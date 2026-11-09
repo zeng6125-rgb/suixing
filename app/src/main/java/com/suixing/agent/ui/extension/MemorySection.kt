@@ -4,7 +4,6 @@ import com.suixing.agent.ui.components.SettingsStyle
 import com.suixing.agent.ui.components.settingsPagePadding
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -28,10 +27,12 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.constrainHeight
+import androidx.compose.ui.unit.constrainWidth
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.graphics.vector.ImageVector
 import com.suixing.agent.R
@@ -114,24 +115,41 @@ fun MemorySection(
                 contentType = { "memory-row" },
             ) { row ->
                 SuixingCard(onClick = { editing = MemoryDraft(row.key, row.value.value, isNew = false) }) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            text = row.key,
-                            style = SettingsStyle.sectionTitle,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.weight(1f),
-                        )
-                        IconButton(
-                            onClick = { deleting = row.key },
-                            modifier = Modifier.minimumInteractiveComponentSize().size(30.dp),
-                        ) {
-                            Icon(
-                                ImageVector.vectorResource(R.drawable.ic_x),
-                                contentDescription = "删除 ${row.key}",
-                                modifier = Modifier.size(16.dp),
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    Layout(
+                        modifier = Modifier.fillMaxWidth(),
+                        content = {
+                            Text(
+                                text = row.key,
+                                style = SettingsStyle.sectionTitle,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
                             )
+                            IconButton(
+                                onClick = { deleting = row.key },
+                                modifier = Modifier.minimumInteractiveComponentSize().size(30.dp),
+                            ) {
+                                Icon(
+                                    ImageVector.vectorResource(R.drawable.ic_x),
+                                    contentDescription = "删除 ${row.key}",
+                                    modifier = Modifier.size(16.dp),
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        },
+                    ) { measurables, constraints ->
+                        val loose = constraints.copy(minWidth = 0, minHeight = 0)
+                        val button = measurables[1].measure(loose)
+                        val title = measurables[0].measure(
+                            loose.copy(maxWidth = (constraints.maxWidth - button.width).coerceAtLeast(0)),
+                        )
+                        // Share 6dp of the 48dp button target with the card's top padding and
+                        // following gap. The body stays below the button; large titles grow normally.
+                        val overlap = 6.dp.roundToPx()
+                        val height = constraints.constrainHeight(maxOf(title.height, button.height - overlap * 2))
+                        val width = constraints.constrainWidth(title.width + button.width)
+                        layout(width, height) {
+                            title.placeRelative(0, (height - title.height) / 2)
+                            button.placeRelative(width - button.width, (height - button.height) / 2)
                         }
                     }
                     Spacer(Modifier.height(6.dp))

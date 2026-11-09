@@ -105,7 +105,7 @@ internal fun VoiceOverlay(
     // 我们自己的录音：这条路完全不碰 SpeechRecognizer，所以屏幕上不会出现任何系统识别面板。
     val recorder = remember { DictationRecorder(context) }
     val autoStopPending = remember { booleanArrayOf(false) }
-    val asrReady = remember(settings.asrModel, settings.baseUrl, settings.apiKey) {
+    val asrReady = remember(settings.asrModel, settings.asrBaseUrl, settings.asrApiKey, settings.baseUrl, settings.apiKey) {
         Dictation.configured(settings)
     }
 
@@ -144,7 +144,7 @@ internal fun VoiceOverlay(
     fun begin() {
         if (!asrReady) {
             // 不静默回落到系统识别：那正是用户否掉两次的东西，缺什么就说什么。
-            phase = VoicePhase.Failed("还没填语音转写模型", 0)
+            phase = VoicePhase.Failed("请先配置语音转写模型、接口和 Key", 0)
             return
         }
         // Assign before the recorder thread can detect silence.

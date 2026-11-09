@@ -331,9 +331,13 @@ data class AppSettings(
      * 语音转写模型，例如 `whisper-1`。
      *
      * 空＝没配：开关可以打开，但点麦克风不会开始录音，只会提示去设置里填。填了才用
-     * [baseUrl] / [apiKey] 那对服务商凭据 POST [asrPath]。
+     * 通过独立语音接口转写；独立接口未填写时沿用当前服务商。
      */
     val asrModel: String = "",
+    /** Independent speech endpoint. Empty follows the active chat endpoint. */
+    val asrBaseUrl: String = "",
+    /** Encrypted like other credentials; never inherit a chat key for a different endpoint. */
+    val asrApiKey: String = "",
     /** 转写接口的路径，拼在 [baseUrl] 后面；换服务商时这里通常不用动。 */
     val asrPath: String = "/audio/transcriptions",
     /** Keep the thinking block on the transcript once the answer is there. */
@@ -757,7 +761,7 @@ private val secretMigrationJson = Json { ignoreUnknownKeys = true; coerceInputVa
 
 internal fun hasPlainSecret(raw: String): Boolean {
     val settings = runCatching { secretMigrationJson.decodeFromString<AppSettings>(raw) }.getOrNull() ?: return false
-    return (sequenceOf(settings.apiKey, settings.searchApiKey) +
+    return (sequenceOf(settings.apiKey, settings.searchApiKey, settings.asrApiKey) +
         settings.providers.asSequence().map { it.apiKey } + settings.requestHeaders.values.asSequence())
         .any { it.isNotBlank() && !SecretBox.isEncrypted(it) }
 }
@@ -767,6 +771,7 @@ internal fun AppSettings.encryptedForStorage(): AppSettings = copy(
     apiKey = SecretBox.requireEncrypted(apiKey),
     providers = providers.map { it.copy(apiKey = SecretBox.requireEncrypted(it.apiKey)) },
     searchApiKey = SecretBox.requireEncrypted(searchApiKey),
+    asrApiKey = SecretBox.requireEncrypted(asrApiKey),
     requestHeaders = requestHeaders.mapValues { (_, value) -> SecretBox.requireEncrypted(value) },
 )
 
@@ -782,6 +787,7 @@ internal fun AppSettings.decrypted(): AppSettings = copy(
     // 与 encrypted() 对称（issue #58 #4）。旧文件里的明文值不带 `enc1:` 前缀，
     // `SecretBox.decrypt` 原样返回 ⇒ 不需要单独的迁移步骤。
     searchApiKey = SecretBox.decrypt(searchApiKey),
+    asrApiKey = SecretBox.decrypt(asrApiKey),
     requestHeaders = requestHeaders.mapValues { (_, value) -> SecretBox.decrypt(value) },
 )
 

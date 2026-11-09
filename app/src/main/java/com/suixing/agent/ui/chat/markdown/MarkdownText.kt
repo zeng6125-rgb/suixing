@@ -35,6 +35,7 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -64,7 +65,12 @@ import com.suixing.agent.ui.chat.IdentityKey
 import com.suixing.agent.R
 import com.suixing.agent.ui.chat.LocalReadingTextKey
 import com.suixing.agent.ui.chat.readingText
+import com.suixing.agent.ui.components.LocalDecorationMotion
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.mutableFloatStateOf
@@ -1534,10 +1540,19 @@ private fun blinkingCursorAlphaState(): State<Float> {
     // 无限 tween 会让绘制按屏幕刷新率持续失效（真机实测一轮在跑时 ≈213~256 fps、单核 42%）。
     // 闪烁只需要两档 ⇒ 480ms 切一次，重绘从 ~120 次/秒降到 ~2 次/秒。
     val alpha = remember { mutableFloatStateOf(1f) }
-    LaunchedEffect(Unit) {
-        while (true) {
-            delay(480)
-            alpha.floatValue = if (alpha.floatValue > 0.5f) 0.15f else 1f
+    val owner = LocalLifecycleOwner.current
+    val decorationMotion = LocalDecorationMotion.current
+    LaunchedEffect(owner, decorationMotion) {
+        owner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            // Observe the discrete motion flag in the effect. Retain the current alpha while
+            // the drawer moves, without recomposing text or invalidating the cached home layer.
+            snapshotFlow { decorationMotion() }.collectLatest { animate ->
+                if (!animate) return@collectLatest
+                while (true) {
+                    delay(480)
+                    alpha.floatValue = if (alpha.floatValue > 0.5f) 0.15f else 1f
+                }
+            }
         }
     }
     return alpha

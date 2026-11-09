@@ -17,6 +17,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -481,8 +482,8 @@ private fun EntryRow(entry: Entry, onClick: () -> Unit) {
     // 图标的选择、颜色、是否目录都是列目录时在 IO 线程上定好的；这里只按资源 id 查一次
     // Compose 的矢量图缓存（同一个 id 只解析一次），不再碰 `File`。
     val icon = ImageVector.vectorResource(entry.iconRes)
-    // 行本身只有一份实现（Common.SettingRow）。这一页的行不在卡片里，所以横向 16dp
-    // 由这里给（SettingRow 自己不加横向 padding）；纵向 12dp、标题 bodyLarge、
+    // 行本身只有一份实现（Common.SettingRow）。横向 16dp 放进点击区内的 contentPadding，
+    // 保留图标和文字的缩进，同时让涟漪铺到列表左右边缘；纵向 12dp、标题 bodyLarge、
     // 副标题 bodySmall 都是全站统一值。
     SettingRow(
         title = entry.name,
@@ -490,7 +491,7 @@ private fun EntryRow(entry: Entry, onClick: () -> Unit) {
         leading = { SoftIcon(icon, size = 36.dp, tint = entry.tint) },
         control = if (entry.isDirectory) ({ RowChevron() }) else null,
         onClick = onClick,
-        modifier = Modifier.padding(horizontal = SettingsStyle.PageMargin),
+        contentPadding = PaddingValues(horizontal = SettingsStyle.PageMargin),
         titleMaxLines = 1,
     )
 }

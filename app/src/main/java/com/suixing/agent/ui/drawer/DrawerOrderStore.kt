@@ -56,17 +56,35 @@ internal fun drawerSections(
     conversations: List<Conversation>,
     order: DrawerOrder,
 ): DrawerSections {
-    val visible = conversations.filterNot { it.archived }
-    val byId = visible.associateBy { it.id }
     val pinnedIds = order.pinned.toHashSet()
     val normalIds = order.normal.toHashSet()
-    val pinned = order.pinned.mapNotNull { byId[it] }.filter { it.pinned } +
-        visible.filter { it.pinned && it.id !in pinnedIds }.sortedByDescending { it.updatedAt }
-    val outside = visible
-        .filter { !it.pinned && it.id !in normalIds }
-        .sortedByDescending { it.updatedAt }
-    val inside = order.normal.mapNotNull { byId[it] }.filter { !it.pinned }
-    return DrawerSections(pinned = pinned, normal = outside + inside)
+    val byId = HashMap<String, Conversation>(conversations.size)
+    val unlistedPinned = ArrayList<Conversation>()
+    val normal = ArrayList<Conversation>()
+    // One pass builds the index and both fallback sections, without temporary filtered lists.
+    for (conversation in conversations) {
+        if (conversation.archived) continue
+        byId[conversation.id] = conversation
+        if (conversation.pinned) {
+            if (conversation.id !in pinnedIds) unlistedPinned.add(conversation)
+        } else if (conversation.id !in normalIds) {
+            normal.add(conversation)
+        }
+    }
+    // Stable sorting keeps the previous tie order, and never mutates the repository's list.
+    unlistedPinned.sortByDescending { it.updatedAt }
+    normal.sortByDescending { it.updatedAt }
+    val pinned = ArrayList<Conversation>(order.pinned.size + unlistedPinned.size)
+    for (id in order.pinned) {
+        val conversation = byId[id] ?: continue
+        if (conversation.pinned) pinned.add(conversation)
+    }
+    pinned.addAll(unlistedPinned)
+    for (id in order.normal) {
+        val conversation = byId[id] ?: continue
+        if (!conversation.pinned) normal.add(conversation)
+    }
+    return DrawerSections(pinned = pinned, normal = normal)
 }
 
 /**

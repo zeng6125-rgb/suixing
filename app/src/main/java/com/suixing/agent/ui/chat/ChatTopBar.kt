@@ -125,8 +125,8 @@ internal fun ChatTopBar(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     // Plain clickable Boxes, not IconButton: M3's IconButton forces a 48dp
                     // minimum touch target, which would overflow this 40dp capsule. The
-                    // drawables carry a black android:tint, so pass onSurface explicitly —
-                    // the same ink FlatPainterButton uses on the header's other actions.
+                    // drawables carry a black android:tint, so pass the theme action ink
+                    // explicitly, matching FlatPainterButton and page-header actions.
                     CapsuleAction(
                         painter = painterResource(R.drawable.ic_compose),
                         description = "新对话",
@@ -229,7 +229,7 @@ private fun CapsuleAction(
         Icon(
             painter = painter,
             contentDescription = description,
-            tint = MaterialTheme.colorScheme.onSurface,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.size(20.dp),
         )
     }

@@ -28,6 +28,9 @@ val LocalDarkTheme = staticCompositionLocalOf { false }
  */
 val LocalUserBubbleColor = staticCompositionLocalOf<Color?> { null }
 
+/** Optional sidebar surface when a palette distinguishes the sidebar from input controls. */
+val LocalDrawerSurfaceColor = staticCompositionLocalOf<Color?> { null }
+
 @Composable
 fun SuixingTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
@@ -58,16 +61,18 @@ fun SuixingTheme(
     // **选中高亮必须自己给**（用户：「有些地方长按复制没有底色，看不出选了哪儿」）：
     // 全项目此前没有设置 `LocalTextSelectionColors`，用的是 Compose 默认值 ——
     // 它由 primary 派生、透明度很低，浅色画布上几乎看不见。
-    // 这里显式给一个明显的底色（primary 32%）和手柄色，全应用统一。
-    val selectionColors = remember(scheme.primary) {
+    // Codex follows the desktop's independent blue selection; other palettes use primary 32%.
+    val selectionBackground = palette.textSelectionBackgroundColor(darkTheme)
+    val selectionColors = remember(scheme.primary, selectionBackground) {
         androidx.compose.foundation.text.selection.TextSelectionColors(
             handleColor = scheme.primary,
-            backgroundColor = scheme.primary.copy(alpha = 0.32f),
+            backgroundColor = selectionBackground ?: scheme.primary.copy(alpha = 0.32f),
         )
     }
     CompositionLocalProvider(
         LocalDarkTheme provides darkTheme,
         LocalUserBubbleColor provides palette.userBubbleColor(darkTheme),
+        LocalDrawerSurfaceColor provides palette.drawerSurfaceColor(darkTheme),
         androidx.compose.foundation.text.selection.LocalTextSelectionColors provides selectionColors,
     ) {
         MaterialTheme(

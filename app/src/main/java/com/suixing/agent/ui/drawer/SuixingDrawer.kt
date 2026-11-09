@@ -9,12 +9,14 @@ import androidx.compose.ui.input.pointer.changedToUp
 import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.width
 import androidx.compose.material3.DrawerValue
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.State
 import androidx.compose.runtime.derivedStateOf
@@ -28,6 +30,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.FrameRateCategory
+import androidx.compose.ui.preferredFrameRate
+import com.suixing.agent.ui.components.LocalDecorationMotion
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.input.pointer.pointerInput
@@ -109,7 +114,11 @@ internal class SuixingDrawerState(initialValue: DrawerValue) {
     internal val progress = Animatable(if (initialValue == DrawerValue.Open) 1f else 0f)
 
     /** One bounded progress for the panel, home transform, background and input shield. */
-    val visualProgress: State<Float> = derivedStateOf { progress.value.coerceIn(0f, 1f) }
+    // Every animation tick changes this value. Read the Animatable directly instead of
+    // maintaining a derived snapshot/cache that cannot filter those ticks.
+    val visualProgress: State<Float> = object : State<Float> {
+        override val value: Float get() = progress.value.coerceIn(0f, 1f)
+    }
 
     /**
      * **只在动画结束时翻转**（不是每帧读 [progress]）。
@@ -329,9 +338,14 @@ internal suspend fun runDrawerDragFrameLoop(
 ) {
     sessions.collectLatest { session ->
         if (session == null) return@collectLatest
+        val updates = dragAccumulator.frameUpdates() ?: return@collectLatest
         var firstSample = true
         var lastAppliedProgress = Float.NaN
         while (isActive(session)) {
+            // A stationary finger needs no display-frame polling. Input is conflated while
+            // waiting for vsync, and each session owns a different update channel.
+            if (!updates.receiveCatching().isSuccess) break
+            if (!isActive(session)) break
             if (!firstSample) awaitFrame()
             firstSample = false
             if (!isActive(session)) break
@@ -353,6 +367,31 @@ internal suspend fun runDrawerDragFrameLoop(
 internal fun rememberSuixingDrawerState(
     initialValue: DrawerValue = DrawerValue.Closed,
 ): SuixingDrawerState = remember { SuixingDrawerState(initialValue) }
+
+/** Keep refresh-rate votes in a small scope and use Compose's platform-aware layer API. */
+@Composable
+private fun DrawerPanelFrameRateHost(
+    state: SuixingDrawerState,
+    modifier: Modifier,
+    content: @Composable BoxScope.() -> Unit,
+) {
+    // A category lets Android choose an appropriate supported rate. Return to the default
+    // as soon as motion ends, instead of holding the whole app at a fixed 90/120 Hz.
+    val frameRateCategory = if (state.isMoving) FrameRateCategory.High else FrameRateCategory.Default
+    Box(modifier.preferredFrameRate(frameRateCategory), content = content)
+}
+
+@Composable
+private fun DrawerDecorationHost(
+    state: SuixingDrawerState,
+    modifier: Modifier,
+    content: @Composable BoxScope.() -> Unit,
+) {
+    val decorationMotion = remember(state) { { !state.isMoving } }
+    CompositionLocalProvider(LocalDecorationMotion provides decorationMotion) {
+        Box(modifier, content = content)
+    }
+}
 
 /**
  * 抽屉宿主：侧边栏在下、主页在上（先画侧边栏，后画主页 ⇒ 主页的阴影能压上去）。
@@ -414,8 +453,9 @@ internal fun SuixingDrawer(
                 }
             }
         }
-    Box(
-        Modifier
+    DrawerDecorationHost(
+        state = state,
+        modifier = Modifier
             .fillMaxSize()
             .pointerInput(gesturesEnabled, panelPx) {
                 if (!gesturesEnabled) return@pointerInput
@@ -495,8 +535,11 @@ internal fun SuixingDrawer(
     ) {
         // Move the whole panel as a layer. The progress read stays in the draw phase, so
         // opening/closing does not re-place the drawer's LazyColumn on every animation frame.
-        Box(
-            Modifier
+        // The panel's vote is enough for the window. Restrict propagation to this small
+        // subtree instead of walking every Markdown/text layer in the home page.
+        DrawerPanelFrameRateHost(
+            state = state,
+            modifier = Modifier
                 .width(DRAWER_SHEET_WIDTH.dp)
                 .fillMaxHeight()
                 .graphicsLayer {

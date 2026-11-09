@@ -136,7 +136,7 @@ internal fun NetworkVoiceSettingsPage(onBack: () -> Unit) {
     val pendingFields = rememberDebouncedSettingsWrites()
     var searchEndpoint by remember { mutableStateOf(stored.searchEndpoint) }
     // 输入框里必须是明文（issue #58 #4）：持久化形态是 `enc1:` 密文。
-    var searchApiKey by remember { mutableStateOf(SecretBox.decrypt(stored.searchApiKey)) }
+    var searchApiKey by remember { mutableStateOf("") }
     var endpointEdited by remember { mutableStateOf(false) }
     var keyEdited by remember { mutableStateOf(false) }
     // 语音转写模型原来逐击键 `persist{}`：一个字符一次「整份 JSON 编码 + Keystore 加密 +
@@ -144,12 +144,33 @@ internal fun NetworkVoiceSettingsPage(onBack: () -> Unit) {
     // 与上面两个搜索字段同一套（#54 C-1）：本地态即时显示，**停手 400ms 才落盘**。
     var asrModelText by remember { mutableStateOf(stored.asrModel) }
     var asrModelEdited by remember { mutableStateOf(false) }
-    LaunchedEffect(stored.searchEndpoint, stored.searchApiKey, stored.asrModel) {
+    var asrEndpointText by remember { mutableStateOf(stored.asrBaseUrl) }
+    var asrEndpointEdited by remember { mutableStateOf(false) }
+    var asrKeyText by remember { mutableStateOf("") }
+    var asrKeyEdited by remember { mutableStateOf(false) }
+    LaunchedEffect(stored.searchEndpoint, stored.asrModel, stored.asrBaseUrl) {
         // Seed from the first real repository emission, without a delayed disk echo
         // replacing characters typed after an earlier debounced batch was dispatched.
         if (!endpointEdited) searchEndpoint = stored.searchEndpoint
-        if (!keyEdited) searchApiKey = SecretBox.decrypt(stored.searchApiKey)
         if (!asrModelEdited) asrModelText = stored.asrModel
+        if (!asrEndpointEdited) asrEndpointText = stored.asrBaseUrl
+    }
+    // Key changes alone trigger decryption; editing a model/URL must not repeat Keystore work.
+    LaunchedEffect(stored.searchApiKey) {
+        if (!keyEdited) {
+            val key = if (stored.searchApiKey.isBlank()) "" else withContext(Dispatchers.IO) {
+                SecretBox.decrypt(stored.searchApiKey)
+            }
+            if (!keyEdited) searchApiKey = key
+        }
+    }
+    LaunchedEffect(stored.asrApiKey) {
+        if (!asrKeyEdited) {
+            val key = if (stored.asrApiKey.isBlank()) "" else withContext(Dispatchers.IO) {
+                SecretBox.decrypt(stored.asrApiKey)
+            }
+            if (!asrKeyEdited) asrKeyText = key
+        }
     }
 
     Scaffold(
@@ -241,26 +262,61 @@ internal fun NetworkVoiceSettingsPage(onBack: () -> Unit) {
                     },
                 )
             }
-            if (stored.voiceInput) {
-                item {
-                    OutlinedTextField(
-                        textStyle = settingsFieldText,
-                        value = asrModelText,
-                        onValueChange = { value ->
-                            asrModelEdited = true
-                            asrModelText = value
-                            pendingFields.put("asr-model") { it.copy(asrModel = value) }
-                        },
-                        modifier = Modifier.fillMaxWidth().heightIn(min = 50.dp),
-                        label = { Text("语音转写模型") },
-                        placeholder = { Text("whisper-1") },
-                        singleLine = true,
-                        shape = MaterialTheme.shapes.small,
-                        supportingText = {
-                            Text("留空时点麦克风只会提示来这里填。转写用上面那对服务商（baseUrl 与 Key），接口：/audio/transcriptions。")
-                        },
-                    )
-                }
+            // Keep configuration available even while the microphone switch is off.
+            item {
+                OutlinedTextField(
+                    textStyle = settingsFieldText,
+                    value = asrEndpointText,
+                    onValueChange = { value ->
+                        asrEndpointEdited = true
+                        asrEndpointText = value
+                        pendingFields.put("asr-endpoint") { it.copy(asrBaseUrl = value) }
+                    },
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 50.dp),
+                    label = { Text("语音转写接口（可留空）") },
+                    placeholder = { Text("https://api.example.com/v1") },
+                    singleLine = true,
+                    shape = MaterialTheme.shapes.small,
+                    supportingText = { Text("留空沿用当前聊天接口；也可以配置独立的语音服务。") },
+                )
+            }
+            item {
+                OutlinedTextField(
+                    textStyle = settingsFieldText,
+                    value = asrModelText,
+                    onValueChange = { value ->
+                        asrModelEdited = true
+                        asrModelText = value
+                        pendingFields.put("asr-model") { it.copy(asrModel = value) }
+                    },
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 50.dp),
+                    label = { Text("语音转写模型") },
+                    placeholder = { Text("whisper-1") },
+                    singleLine = true,
+                    shape = MaterialTheme.shapes.small,
+                    supportingText = {
+                        Text("填写语音服务支持的转写模型；开启语音输入前可以先完成配置。")
+                    },
+                )
+            }
+            item {
+                OutlinedTextField(
+                    textStyle = settingsFieldText,
+                    value = asrKeyText,
+                    onValueChange = { value ->
+                        asrKeyEdited = true
+                        asrKeyText = value
+                        pendingFields.put("asr-api-key") { it.copy(asrApiKey = value) }
+                    },
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 50.dp),
+                    label = { Text("语音转写 Key（可留空）") },
+                    singleLine = true,
+                    shape = MaterialTheme.shapes.small,
+                    visualTransformation = PasswordVisualTransformation(),
+                    supportingText = {
+                        Text("语音接口与聊天接口相同时可沿用聊天 Key；接口不同时请填写独立 Key。")
+                    },
+                )
             }
         }
     }

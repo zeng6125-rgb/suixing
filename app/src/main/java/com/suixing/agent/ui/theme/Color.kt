@@ -5,7 +5,7 @@ import androidx.compose.material3.lightColorScheme
 import androidx.compose.ui.graphics.Color
 
 /**
- * 底层色板是墨绿（JAgent 配色与 Codex 配色都从它 copy 覆盖而来，「跟随壁纸」也以它为底）：
+ * 底层色板是墨绿（JAgent 配色从它 copy 覆盖而来，「跟随壁纸」也以它为底；Codex 使用独立色板）：
  * 一支白羽该配的底色是砚台和竹叶，不是柔紫。它已不是独立的配色选项，默认的「JAgent 配色」
  * 是下面的 Claude 暖纸色 / 陶土橙覆盖版。
  *
@@ -136,6 +136,21 @@ internal enum class AppearancePalette(val id: Int, val label: String) {
         else -> null
     }
 
+    /** Codex's sidebar is a lower surface, separate from its opaque input and popup surfaces. */
+    fun drawerSurfaceColor(dark: Boolean): Color? = when (this) {
+        CODEX -> if (dark) Color(0xFF141414) else Color(0xFFF6F6F6)
+        else -> null
+    }
+
+    /**
+     * Desktop selection also replaces text foreground. Compose keeps styled foreground, so use
+     * the desktop blue with gentler opacity to keep selected supporting text readable as well.
+     */
+    fun textSelectionBackgroundColor(dark: Boolean): Color? = when (this) {
+        CODEX -> if (dark) Color(0x3363A8F8) else Color(0x2E539AF8)
+        else -> null
+    }
+
     companion object {
         val labels = entries.map { it.label }
 
@@ -209,69 +224,124 @@ private val ClaudeDark = BrandDark.copy(
     surfaceContainerHighest = Color(0xFF373633),
 )
 
-private val CodexLight = BrandLight.copy(
-    primary = Color(0xFF4B50B9),
-    primaryContainer = Color(0xFFE5E7FF),
-    onPrimaryContainer = Color(0xFF271E70),
-    inversePrimary = Color(0xFFAAAFFF),
-    secondary = Color(0xFF525B7C),
-    secondaryContainer = Color(0xFFE5E9FA),
-    onSecondaryContainer = Color(0xFF28324E),
-    tertiary = Color(0xFF355E8E),
-    tertiaryContainer = Color(0xFFDCEBFF),
-    onTertiaryContainer = Color(0xFF1D3B61),
-    background = Color(0xFFFCFCFD),
-    onBackground = Color(0xFF202126),
-    surface = Color(0xFFFCFCFD),
-    onSurface = Color(0xFF202126),
-    surfaceTint = Color(0xFF4B50B9),
-    surfaceVariant = Color(0xFFE9EAEE),
-    onSurfaceVariant = Color(0xFF565B6E),
-    inverseSurface = Color(0xFF292B3B),
-    inverseOnSurface = Color(0xFFF0EFF9),
-    outline = Color(0xFF797E91),
-    outlineVariant = Color(0xFFE1E2E7),
-    surfaceBright = Color(0xFFFCFCFD),
-    surfaceDim = Color(0xFFEEEFF2),
+/**
+ * Codex desktop's default neutral theme, mapped to Material roles. Reference: installed
+ * OpenAI.Codex 26.1027.3384.0, webview/assets/app-theme-98273c284c4e.js and app-initial-4267e52fe5b0.js.
+ * Runtime-generated surfaces take precedence over the CSS fallbacks: sidebar F6F6F6/141414,
+ * opaque controls FFFFFF/2D2D2D, popups FFFFFF/363636. Keep coloured status tones separate.
+ */
+private val CodexLight = lightColorScheme(
+    primary = Color.Black,
+    onPrimary = Color.White,
+    primaryContainer = Color(0xFFF4F4F4),
+    onPrimaryContainer = Color(0xFF1A1C1F),
+    inversePrimary = Color.White,
+
+    secondary = Color(0xFF606163),
+    onSecondary = Color.White,
+    secondaryContainer = Color(0xFFF6F6F6),
+    onSecondaryContainer = Color(0xFF1A1C1F),
+    tertiary = Color(0xFF606163),
+    onTertiary = Color.White,
+    tertiaryContainer = Color(0xFFEDEDEE),
+    onTertiaryContainer = Color(0xFF1A1C1F),
+
+    error = Color(0xFFB43E3E),
+    onError = Color.White,
+    errorContainer = Color(0xFFF9DEDC),
+    onErrorContainer = Color(0xFF410002),
+
+    background = Color.White,
+    onBackground = Color(0xFF1A1C1F),
+    surface = Color.White,
+    onSurface = Color(0xFF1A1C1F),
+    // Material replaces tint alpha at elevation; tinting with the surface itself keeps it neutral.
+    surfaceTint = Color.White,
+    surfaceVariant = Color(0xFFEDEDEE),
+    onSurfaceVariant = Color(0xFF606163),
+    inverseSurface = Color(0xFF282828),
+    inverseOnSurface = Color.White,
+    // Control outlines stay visible on Android; quiet separators use the desktop border tone.
+    outline = Color(0xFF848484),
+    outlineVariant = Color(0xFFEDEDEE),
+    scrim = Color.Black,
+
+    surfaceBright = Color.White,
+    surfaceDim = Color(0xFFF6F6F6),
     surfaceContainerLowest = Color.White,
-    surfaceContainerLow = Color(0xFFF8F8FA),
-    surfaceContainer = Color(0xFFF3F3F6),
-    surfaceContainerHigh = Color(0xFFEEEFF2),
-    surfaceContainerHighest = Color(0xFFE8E9ED),
+    surfaceContainerLow = Color(0xFFF6F6F6),
+    surfaceContainer = Color(0xFFF6F6F6),
+    surfaceContainerHigh = Color.White,
+    surfaceContainerHighest = Color.White,
+
+    primaryFixed = Color(0xFFEDEDEE),
+    primaryFixedDim = Color(0xFFDFDFDF),
+    onPrimaryFixed = Color(0xFF1A1C1F),
+    onPrimaryFixedVariant = Color(0xFF606163),
+    secondaryFixed = Color(0xFFF6F6F6),
+    secondaryFixedDim = Color(0xFFEDEDEE),
+    onSecondaryFixed = Color(0xFF1A1C1F),
+    onSecondaryFixedVariant = Color(0xFF6A6B6D),
+    tertiaryFixed = Color(0xFFF6F6F6),
+    tertiaryFixedDim = Color(0xFFEDEDEE),
+    onTertiaryFixed = Color(0xFF1A1C1F),
+    onTertiaryFixedVariant = Color(0xFF6A6B6D),
 )
 
-private val CodexDark = BrandDark.copy(
-    primary = Color(0xFFAAAFFF),
-    onPrimary = Color(0xFF2B226D),
-    primaryContainer = Color(0xFF403587),
-    onPrimaryContainer = Color(0xFFE9E5FF),
-    inversePrimary = Color(0xFF4B50B9),
-    secondary = Color(0xFFBEC7EA),
-    onSecondary = Color(0xFF282F49),
-    secondaryContainer = Color(0xFF363E5B),
-    onSecondaryContainer = Color(0xFFE3E8FC),
-    tertiary = Color(0xFFA8CDFB),
-    onTertiary = Color(0xFF203958),
-    tertiaryContainer = Color(0xFF304C70),
-    onTertiaryContainer = Color(0xFFD7E9FF),
-    background = Color(0xFF18181A),
-    onBackground = Color(0xFFEDEDF1),
-    surface = Color(0xFF18181A),
-    onSurface = Color(0xFFEDEDF1),
-    surfaceTint = Color(0xFFAAAFFF),
-    surfaceVariant = Color(0xFF303136),
-    onSurfaceVariant = Color(0xFFC0C2D5),
-    inverseSurface = Color(0xFFECECF5),
-    inverseOnSurface = Color(0xFF20212B),
-    outline = Color(0xFF8C90A6),
-    outlineVariant = Color(0xFF3E3F46),
-    surfaceBright = Color(0xFF343539),
-    surfaceDim = Color(0xFF18181A),
-    surfaceContainerLowest = Color(0xFF131315),
-    surfaceContainerLow = Color(0xFF1E1E21),
-    surfaceContainer = Color(0xFF252528),
-    surfaceContainerHigh = Color(0xFF2D2D31),
-    surfaceContainerHighest = Color(0xFF343539),
+private val CodexDark = darkColorScheme(
+    primary = Color.White,
+    onPrimary = Color.Black,
+    primaryContainer = Color(0xFF2D2D2D),
+    onPrimaryContainer = Color.White,
+    inversePrimary = Color.Black,
+
+    secondary = Color(0xFFBCBCBC),
+    onSecondary = Color(0xFF181818),
+    secondaryContainer = Color(0xFF242424),
+    onSecondaryContainer = Color.White,
+    tertiary = Color(0xFFBCBCBC),
+    onTertiary = Color(0xFF181818),
+    tertiaryContainer = Color(0xFF282828),
+    onTertiaryContainer = Color.White,
+
+    error = Color(0xFFFF8E8E),
+    onError = Color(0xFF5C1010),
+    errorContainer = Color(0xFF6E2020),
+    onErrorContainer = Color(0xFFFFDAD6),
+
+    background = Color(0xFF181818),
+    onBackground = Color.White,
+    surface = Color(0xFF181818),
+    onSurface = Color.White,
+    surfaceTint = Color(0xFF181818),
+    surfaceVariant = Color(0xFF2D2D2D),
+    onSurfaceVariant = Color(0xFFBCBCBC),
+    inverseSurface = Color.White,
+    inverseOnSurface = Color(0xFF1A1C1F),
+    outline = Color(0xFF858585),
+    outlineVariant = Color(0xFF2B2B2B),
+    scrim = Color.Black,
+
+    surfaceBright = Color(0xFF363636),
+    surfaceDim = Color(0xFF141414),
+    surfaceContainerLowest = Color(0xFF141414),
+    surfaceContainerLow = Color(0xFF212121),
+    surfaceContainer = Color(0xFF242424),
+    surfaceContainerHigh = Color(0xFF2D2D2D),
+    surfaceContainerHighest = Color(0xFF363636),
+
+    primaryFixed = Color(0xFFEDEDEE),
+    primaryFixedDim = Color(0xFFDFDFDF),
+    onPrimaryFixed = Color(0xFF1A1C1F),
+    onPrimaryFixedVariant = Color(0xFF606163),
+    secondaryFixed = Color(0xFFF6F6F6),
+    secondaryFixedDim = Color(0xFFEDEDEE),
+    onSecondaryFixed = Color(0xFF1A1C1F),
+    onSecondaryFixedVariant = Color(0xFF6A6B6D),
+    tertiaryFixed = Color(0xFFF6F6F6),
+    tertiaryFixedDim = Color(0xFFEDEDEE),
+    onTertiaryFixed = Color(0xFF1A1C1F),
+    onTertiaryFixedVariant = Color(0xFF6A6B6D),
 )
 
 /**

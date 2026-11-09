@@ -323,7 +323,7 @@ internal fun ConversationManagerScreen(
             text = {
                 Text(
                     "「${chat.title}」的聊天记录（${chat.messageCount} 条消息）会被永久删除，" +
-                        "不能撤销。工作区里的文件不受影响。",
+                        "不能撤销。工作区里的文件不受影响，用量统计继续保留。",
                 )
             },
             confirmButton = { dialog ->
@@ -332,8 +332,14 @@ internal fun ConversationManagerScreen(
                         dialog.closeThen {
                             pendingDelete = null
                             scope.launch {
-                                Core.chats.delete(chat.id)
-                                snackbar.showSnackbar("已删除「${chat.title}」")
+                                try {
+                                    Core.chats.delete(chat.id)
+                                    snackbar.showSnackbar("已删除「${chat.title}」")
+                                } catch (cancelled: CancellationException) {
+                                    throw cancelled
+                                } catch (failure: Exception) {
+                                    snackbar.showSnackbar(failure.message ?: "会话删除失败，请重试。")
+                                }
                             }
                         }
                     },

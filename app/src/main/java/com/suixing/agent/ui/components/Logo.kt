@@ -22,8 +22,9 @@ fun SuixingMark(
     modifier: Modifier = Modifier,
     running: Boolean = false,
     animateIdle: Boolean = false,
+    animationEnabled: Boolean = true,
 ) {
-    RoundBrandIcon(size, modifier, running, animateIdle)
+    RoundBrandIcon(size, modifier, running, animateIdle, animationEnabled)
 }
 
 /**

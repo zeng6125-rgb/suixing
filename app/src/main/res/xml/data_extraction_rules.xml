@@ -17,6 +17,8 @@
         <exclude domain="file" path="linux" />
         <exclude domain="file" path="datastore" />
         <exclude domain="file" path="chats" />
+        <exclude domain="file" path="usage.json" />
+        <exclude domain="file" path="deleted-usage" />
         <exclude domain="file" path="memory.json" />
         <exclude domain="file" path="profile.md" />
         <exclude domain="file" path="profile.state.json" />
@@ -40,5 +42,7 @@
         <exclude domain="file" path="linux" />
         <include domain="file" path="datastore" />
         <include domain="file" path="chats" />
+        <include domain="file" path="usage.json" />
+        <include domain="file" path="deleted-usage" />
     </device-transfer>
 </data-extraction-rules>

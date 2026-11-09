@@ -263,6 +263,16 @@ internal fun ProcessStatus(text: String, tone: Color = MaterialTheme.colorScheme
 /** The spinner both process blocks show while they are the one being waited on. */
 @Composable
 internal fun ProcessSpinner(tone: Color) {
+    if (!com.suixing.agent.ui.components.LocalDecorationMotion.current()) {
+        CircularProgressIndicator(
+            progress = { 0.75f },
+            modifier = Modifier.size(13.dp),
+            strokeWidth = 2.dp,
+            color = tone,
+            trackColor = Color.Transparent,
+        )
+        return
+    }
     CircularProgressIndicator(
         modifier = Modifier.size(13.dp),
         strokeWidth = 2.dp,

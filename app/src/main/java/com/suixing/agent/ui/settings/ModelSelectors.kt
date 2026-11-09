@@ -22,6 +22,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Checkbox
 import com.suixing.agent.ui.components.ActionMenuItem
+import com.suixing.agent.ui.components.ActionMenuStyle
 import com.suixing.agent.ui.components.MenuRippleSurface
 import com.suixing.agent.ui.components.MenuRippleCheckbox
 import androidx.compose.material3.Icon
@@ -48,7 +49,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
-import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import com.suixing.agent.R
@@ -63,8 +63,6 @@ import com.suixing.agent.ui.components.CompactOutlinedTextField
 import com.suixing.agent.ui.components.SettingsStyle
 import com.suixing.agent.ui.components.SuixingDialog
 
-/** A real read-only form field; its label, padding and container match editable fields exactly. */
-/** Both connection selectors open the same quiet, anchor-width native menu. */
 /**
  * 贴锚点下方的下拉位置：水平与锚点左缘对齐（放不下就往左收），垂直优先放下方、放不下翻到上方。
  *
@@ -94,15 +92,8 @@ private class AnchorBelowProvider(private val gapPx: Int) :
 }
 
 /**
- * 模型页各个选择器共用的浮层容器。
- *
- * **原来用系统的 `DropdownMenu`**：12dp 圆角、系统 elevation 阴影（偏灰、有方向偏移）、
- * 系统自带的展开入场 —— 而全站其它浮层都是 [MenuCard]（20dp 圆角、10dp elevation、
- * 18% 黑的无偏移阴影、统一的 spring 入场）。并排看就是两种质感，用户的原话是
- * 「模型的两个下拉的浮层感觉不好看」。
- *
- * 现在与 [com.suixing.agent.ui.chat.GenerationPicker] 的下拉同款：同一个 `MenuCard`、
- * 同一套阴影与动效，只把内边距换成一档更小的（菜单项自己还带 contentPadding）。
+ * 模型选择器保留与锚点等宽的MenuCard和原有动效，表面、描边及菜单行间距与ActionMenu统一。
+ * 横向留白只在可点击行内部，选中底色与涟漪都可覆盖卡片全宽。
  */
 @Composable
 private fun ModelDropdownMenu(
@@ -135,21 +126,16 @@ private fun ModelDropdownMenu(
         popupPositionProvider = provider,
         modifier = if (anchorWidth > 0) Modifier.width(width) else Modifier,
         shadowMargin = marginDp,
-        // **边界要两件事一起撑**（用户先报「浮层周边和背景混在一起了」，再报「边缘看不太清」）：
-        //  1. 底色换一档 —— `BrandLight` 的 `background` 与 `surface` **字面完全相同**
-        //     （都 0xFFFFFFFF），MenuCard 默认 `surface` 等于画在页面底色上。改
-        //     `surfaceContainerLow`(#F7FAF8) 才有色差，也与下拉按钮的底色一致。
-        //  2. 再加 1dp 描边 —— #F7FAF8 对 #FFFFFF 只差约 3% 亮度；而且为宽度把阴影余量
-        //     收到了 14.8dp，阴影边缘也可能被裁。描边与下拉按钮自己那条 `outlineVariant` 同款。
-        containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
-        borderColor = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.7f),
-        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
+        // A shared popup surface and hairline separate the menu from the page in both themes.
+        containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+        borderColor = MaterialTheme.colorScheme.outlineVariant,
+        contentPadding = PaddingValues(vertical = ActionMenuStyle.VerticalPadding),
         compactMotion = true,
     ) {
         // **滚动必须在卡片内容里、不能挂在 MenuCard 的 modifier 上**：那个 modifier 在
         // `popupCardSurface()`（画背景与阴影）**外层** ⇒ 滚动时背景和阴影会跟着内容一起挪。
         // 放在这里，卡片本体（圆角 + 阴影）固定，只有菜单项滚。
-        Column(Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState())) {
+        Column(Modifier.fillMaxWidth().heightIn(max = ActionMenuStyle.MaxHeight).verticalScroll(rememberScrollState())) {
             content()
         }
     }
@@ -272,10 +258,7 @@ internal fun ProviderDropdown(
                         }
                     },
                     onClick = { onExpandedChange(false); onSelect(provider) },
-                    modifier = Modifier.padding(horizontal = 6.dp).clip(MaterialTheme.shapes.small)
-                        .background(if (chosen) colors.onSurface.copy(alpha = 0.06f) else androidx.compose.ui.graphics.Color.Transparent)
-                        .semantics { this.selected = chosen },
-                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+                    selected = chosen,
                 )
             }
             if (onAdd != null) {
@@ -283,7 +266,6 @@ internal fun ProviderDropdown(
                     text = { Text("添加供应商", style = SettingsStyle.controlLabel, color = colors.primary) },
                     leadingIcon = { Icon(ImageVector.vectorResource(R.drawable.ic_plus), null, Modifier.size(18.dp), tint = colors.primary) },
                     onClick = { onExpandedChange(false); onAdd() },
-                    contentPadding = PaddingValues(horizontal = 20.dp, vertical = 8.dp),
                 )
             }
         }
@@ -368,10 +350,7 @@ internal fun CompactProtocolPicker(
                         }
                     },
                     onClick = { onExpandedChange(false); onPick(value) },
-                    modifier = Modifier.padding(horizontal = 6.dp).clip(MaterialTheme.shapes.small)
-                        .background(if (isChosen) colors.onSurface.copy(alpha = 0.06f) else androidx.compose.ui.graphics.Color.Transparent)
-                        .semantics { this.selected = isChosen },
-                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                    selected = isChosen,
                 )
             }
         }
@@ -433,10 +412,7 @@ internal fun EnabledModelDropdown(
                         }
                     },
                     onClick = { onExpandedChange(false); onPick(id) },
-                    modifier = Modifier.padding(horizontal = 6.dp).clip(MaterialTheme.shapes.small)
-                        .background(if (chosen) colors.onSurface.copy(alpha = 0.06f) else androidx.compose.ui.graphics.Color.Transparent)
-                        .semantics { selected = chosen },
-                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+                    selected = chosen,
                 )
             }
         }

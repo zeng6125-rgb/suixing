@@ -19,6 +19,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import com.suixing.agent.ui.components.actionIconButtonColors
 import androidx.compose.material3.MaterialTheme
 import com.suixing.agent.ui.components.CompactOutlinedTextField as OutlinedTextField
 import androidx.compose.material3.Surface
@@ -234,10 +235,10 @@ private fun ServerCard(
                     TextButton(onClick = onConnect) { Text("连接") }
                 }
             }
-            IconButton(onClick = onEdit) {
+            IconButton(onClick = onEdit, colors = actionIconButtonColors()) {
                 Icon(ImageVector.vectorResource(R.drawable.ic_square_pen), contentDescription = "编辑", modifier = Modifier.size(20.dp))
             }
-            IconButton(onClick = onDelete) {
+            IconButton(onClick = onDelete, colors = actionIconButtonColors()) {
                 Icon(ImageVector.vectorResource(R.drawable.ic_trash), contentDescription = "删除", modifier = Modifier.size(20.dp))
             }
         }

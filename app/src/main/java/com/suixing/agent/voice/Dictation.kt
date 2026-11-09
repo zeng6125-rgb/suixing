@@ -5,6 +5,8 @@ import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
 import com.suixing.agent.data.AppSettings
+import com.suixing.agent.data.SecretBox
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
@@ -245,24 +247,40 @@ object Dictation {
     private val json = Json { ignoreUnknownKeys = true }
 
     /** 转写要用到的凭据是否齐了；UI 用它决定「能不能开始录音」。 */
-    fun configured(settings: AppSettings): Boolean =
-        settings.asrModel.isNotBlank() && settings.baseUrl.isNotBlank() && settings.apiKey.isNotBlank()
+    fun configured(settings: AppSettings): Boolean {
+        val connection = connection(settings)
+        return settings.asrModel.isNotBlank() && connection.baseUrl.isNotBlank() && connection.apiKey.isNotBlank()
+    }
+
+    private data class Connection(val baseUrl: String, val apiKey: String)
+
+    private fun connection(settings: AppSettings): Connection {
+        val baseUrl = settings.asrBaseUrl.trim().ifBlank { settings.baseUrl.trim() }.trimEnd('/')
+        val sameEndpoint = baseUrl == settings.baseUrl.trim().trimEnd('/')
+        val apiKey = settings.asrApiKey.ifBlank { if (sameEndpoint) settings.apiKey else "" }
+        return Connection(baseUrl, apiKey)
+    }
 
     suspend fun transcribe(settings: AppSettings, wav: File): Result<String> = withContext(Dispatchers.IO) {
-        val path = settings.asrPath.ifBlank { "/audio/transcriptions" }
-        val url = settings.baseUrl.trimEnd('/') + if (path.startsWith("/")) path else "/$path"
-        val body = MultipartBody.Builder()
-            .setType(MultipartBody.FORM)
-            .addFormDataPart("file", wav.name, wav.asRequestBody("audio/wav".toMediaType()))
-            .addFormDataPart("model", settings.asrModel.trim())
-            .addFormDataPart("language", "zh")
-            .build()
-        val request = Request.Builder()
-            .url(url)
-            .header("Authorization", "Bearer ${settings.apiKey}")
-            .post(body)
-            .build()
         runCatching {
+            val connection = connection(settings)
+            val key = SecretBox.decrypt(connection.apiKey).trim()
+            require(settings.asrModel.isNotBlank() && connection.baseUrl.isNotBlank() && key.isNotBlank()) {
+                "请填写语音转写模型、接口和 Key；独立语音接口需要独立 Key。"
+            }
+            val path = settings.asrPath.ifBlank { "/audio/transcriptions" }
+            val url = connection.baseUrl + if (path.startsWith("/")) path else "/$path"
+            val body = MultipartBody.Builder()
+                .setType(MultipartBody.FORM)
+                .addFormDataPart("file", wav.name, wav.asRequestBody("audio/wav".toMediaType()))
+                .addFormDataPart("model", settings.asrModel.trim())
+                .addFormDataPart("language", "zh")
+                .build()
+            val request = Request.Builder()
+                .url(url)
+                .header("Authorization", "Bearer $key")
+                .post(body)
+                .build()
             client.newCall(request).execute().use { response ->
                 val text = response.body?.string().orEmpty()
                 if (!response.isSuccessful) {
@@ -273,6 +291,6 @@ object Dictation {
                     ?.takeIf { it.isNotEmpty() }
                     ?: error("服务商没有返回文本")
             }
-        }
+        }.onFailure { if (it is CancellationException) throw it }
     }
 }

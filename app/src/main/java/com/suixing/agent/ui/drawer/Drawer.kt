@@ -81,6 +81,7 @@ import com.suixing.agent.ui.assistant.AssistantAvatar
 import com.suixing.agent.ui.components.SettingsSwitch
 import com.suixing.agent.ui.components.SuixingDialog
 import com.suixing.agent.ui.components.SuixingMark
+import com.suixing.agent.ui.theme.LocalDrawerSurfaceColor
 import com.suixing.agent.ui.components.menuRippleClickable
 import com.suixing.agent.ui.drawer.drawerSections
 import kotlinx.coroutines.Dispatchers
@@ -139,6 +140,24 @@ private val DrawerRowPlacementSpec = spring<IntOffset>(
 )
 // Keep animateItem's modifier node mounted; null would remove/recreate it at motion boundaries.
 private val DrawerRowImmediatePlacementSpec = snap<IntOffset>()
+
+/** Settled-state changes should restart only this close effect, not the entire drawer. */
+@Composable
+private fun DrawerCloseEffect(open: () -> Boolean, onClosed: () -> Unit) {
+    val isOpen = open()
+    val latestClosed by rememberUpdatedState(onClosed)
+    LaunchedEffect(isOpen) {
+        if (!isOpen) latestClosed()
+    }
+}
+
+/** Read motion activity in the mark's own scope so its animation toggle stays local. */
+@Composable
+private fun DrawerMark(running: Boolean, animationActive: () -> Boolean) {
+    val animate = animationActive()
+    SuixingMark(size = 30.dp, running = running, animateIdle = true, animationEnabled = animate)
+}
+
 /**
  * The left drawer: conversations on top, everything else at the bottom.
  *
@@ -150,7 +169,7 @@ private val DrawerRowImmediatePlacementSpec = snap<IntOffset>()
 @Composable
 internal fun Drawer(
     /** Settled state used only to clear drawer interaction modes after closing. */
-    open: Boolean,
+    open: () -> Boolean,
     route: String,
     conversations: List<Conversation>,
     activeId: String,
@@ -165,8 +184,8 @@ internal fun Drawer(
     onToggleConsole: () -> Unit,
     onNavigate: (String) -> Unit,
     onAssistants: () -> Unit,
-    runningAnimationActive: Boolean = true,
-    panelMoving: Boolean = false,
+    runningAnimationActive: () -> Boolean = { true },
+    panelMoving: () -> Boolean = { false },
 ) {
     val unreadCompleted by Core.conversationReads.unread.collectAsStateWithLifecycle()
     // 左上角的标识跟着**当前助手**走：设置过头像就画头像，没头像仍画「JAgent」标。
@@ -255,18 +274,15 @@ internal fun Drawer(
             ).show()
         }
     }
-    LaunchedEffect(open) {
+    DrawerCloseEffect(open) {
         // Drawer motion transforms the home layer without changing its keyboard or viewport.
         // Hiding IME here used to resize/re-anchor chat after the opening animation had settled.
-        if (!open) {
-            // 抽屉一关，排序模式就失效：它是一次性模式，不该跨次拉开残留
-            // （用户：「进行了长按等其它操作（例如关闭侧边栏），自动退出拖动模式」）。
-            sortMode = false
-            draggingState.value = null
-            dragPreview.value = null
-            // 抽屉一关，长按菜单也不该留在屏幕上（它是 focusable = false 的弹窗，不会自己消失）。
-            menuFor = null
-        }
+        // 抽屉一关，排序模式就失效：它是一次性模式，不该跨次拉开残留。
+        sortMode = false
+        draggingState.value = null
+        dragPreview.value = null
+        // 非聚焦的长按菜单不会自己消失，关闭抽屉时仍显式清理。
+        menuFor = null
     }
 
     // 上次手动排的顺序。读失败 = 空表 = 退回时间序：偏好文件坏了不该拦着人看会话列表。
@@ -338,7 +354,7 @@ internal fun Drawer(
             // **宽度只有一处定义**（[DRAWER_SHEET_WIDTH]），别再写魔数。
             .width(DRAWER_SHEET_WIDTH.dp),
         drawerShape = RoundedCornerShape(topEnd = 30.dp, bottomEnd = 30.dp),
-        drawerContainerColor = scheme.surfaceContainerHigh,
+        drawerContainerColor = LocalDrawerSurfaceColor.current ?: scheme.surfaceContainerHigh,
         drawerTonalElevation = 0.dp,
         windowInsets = WindowInsets(0, 0, 0, 0),
     ) {
@@ -359,10 +375,9 @@ internal fun Drawer(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 if (drawerAssistant?.avatarPath.isNullOrBlank()) {
-                    SuixingMark(
-                        size = 30.dp,
-                        running = runningAnimationActive && runningId.isNotEmpty(),
-                        animateIdle = runningAnimationActive,
+                    DrawerMark(
+                        running = runningId.isNotEmpty(),
+                        animationActive = runningAnimationActive,
                     )
                 } else {
                     AssistantAvatar(assistant = drawerAssistant, size = 30.dp)
@@ -440,6 +455,7 @@ internal fun Drawer(
             val activeIdNow = rememberUpdatedState(activeId)
             val runningIdNow = rememberUpdatedState(runningId)
             val runningAnimationNow = rememberUpdatedState(runningAnimationActive)
+            val panelMovingNow = rememberUpdatedState(panelMoving)
             val drawerRow: @Composable (Conversation, Modifier) -> Unit = remember(
                 context, exporter, exitSortMode,
             ) { { conversation, anim ->
@@ -515,7 +531,7 @@ internal fun Drawer(
                         conversation = conversation,
                         selected = conversation.id == activeIdNow.value,
                         running = rowRunning,
-                        runningAnimationActive = rowRunning && runningAnimationNow.value,
+                        runningAnimationActive = rowRunning && runningAnimationNow.value(),
                         completedUnread = conversation.id in unreadCompleted,
                         menuOpen = menuFor == conversation.id,
                         sortMode = sortMode,
@@ -580,7 +596,7 @@ internal fun Drawer(
                 contentPadding = PaddingValues(horizontal = 12.dp, vertical = 2.dp),
             ) {
                 if (sections.pinned.isNotEmpty()) {
-                    item(key = "drawer-pinned-label") {
+                    item(key = "drawer-pinned-label", contentType = "section-label") {
                         Text(
                             text = "置顶",
                             style = MaterialTheme.typography.labelMedium,
@@ -593,12 +609,12 @@ drawerRow(
                         it,
                         Modifier.animateItem(
                             fadeInSpec = null,
-                            placementSpec = if (panelMoving) DrawerRowImmediatePlacementSpec else DrawerRowPlacementSpec,
+                            placementSpec = if (panelMovingNow.value()) DrawerRowImmediatePlacementSpec else DrawerRowPlacementSpec,
                             fadeOutSpec = null,
                         ),
                     ) }
                     if (sections.normal.isNotEmpty()) {
-                        item(key = "drawer-section-divider") {
+                        item(key = "drawer-section-divider", contentType = "section-divider") {
                             HorizontalDivider(
                                 modifier = Modifier.padding(horizontal = 4.dp, vertical = 4.dp),
                                 color = scheme.outlineVariant,
@@ -611,7 +627,7 @@ drawerRow(
                         it,
                         Modifier.animateItem(
                             fadeInSpec = null,
-                            placementSpec = if (panelMoving) DrawerRowImmediatePlacementSpec else DrawerRowPlacementSpec,
+                            placementSpec = if (panelMovingNow.value()) DrawerRowImmediatePlacementSpec else DrawerRowPlacementSpec,
                             fadeOutSpec = null,
                         ),
                     ) }

@@ -27,6 +27,7 @@ import com.suixing.agent.R
 import com.suixing.agent.data.DayUsage
 import com.suixing.agent.data.ModelUsage
 import com.suixing.agent.ui.components.SettingsStyle
+import com.suixing.agent.ui.components.actionIconButtonColors
 import com.suixing.agent.ui.components.SuixingCard
 import java.time.LocalDate
 import kotlin.math.ceil
@@ -170,10 +171,10 @@ private fun UsageDayDetail(day: DayUsage, days: List<DayUsage>, onSelect: (Strin
             Text("${day.reported + day.unreported} 次响应 · ${day.unreported} 次未报告用量",
                 style = SettingsStyle.badge, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
-        IconButton(enabled = index > 0, onClick = { onSelect(days[index - 1].date) }) {
+        IconButton(enabled = index > 0, onClick = { onSelect(days[index - 1].date) }, colors = actionIconButtonColors()) {
             Icon(ImageVector.vectorResource(R.drawable.ic_chevron_left), "前一天")
         }
-        IconButton(enabled = index >= 0 && index < days.lastIndex, onClick = { onSelect(days[index + 1].date) }) {
+        IconButton(enabled = index >= 0 && index < days.lastIndex, onClick = { onSelect(days[index + 1].date) }, colors = actionIconButtonColors()) {
             Icon(ImageVector.vectorResource(R.drawable.ic_chevron_right), "后一天")
         }
     }

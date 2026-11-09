@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -100,6 +101,13 @@ fun Modifier.suixingClickable(
 //  · 独立工具条圆盘（40dp 带盘面和阴影）→ [FlatIconButton] / [FlatPainterButton]
 //  · 成行的可点条目（菜单项、设置行）→ [suixingClickable]（有界涟漪）
 
+/** Ordinary icon actions share the same theme ink and disabled opacity across screens. */
+@Composable
+internal fun actionIconButtonColors() = IconButtonDefaults.iconButtonColors(
+    contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+    disabledContentColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.38f),
+)
+
 /** [InlineIconAction] 的热区盒径。 */
 val INLINE_ICON_BOX = 26.dp
 
@@ -155,7 +163,7 @@ fun InlineIconAction(
         Icon(
             imageVector = icon,
             contentDescription = null, // The parent supplies the single button semantics.
-            tint = if (enabled) tint else tint.copy(alpha = 0.35f),
+            tint = if (enabled) tint else tint.copy(alpha = 0.38f),
             modifier = Modifier
                 .size(INLINE_ICON_GLYPH)
                 .indication(
@@ -287,7 +295,7 @@ private fun handleDisc(): Color = MaterialTheme.colorScheme.surfaceContainerHigh
 
 /** The other half of [handleDisc]: the ink that reads on that disc. */
 @Composable
-private fun handleInk(): Color = MaterialTheme.colorScheme.onSurface
+private fun handleInk(): Color = MaterialTheme.colorScheme.onSurfaceVariant
 
 /**
  * The same disc as [FlatIconButton] for glyphs that are vectors of our own rather

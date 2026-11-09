@@ -42,6 +42,7 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import com.suixing.agent.ui.components.actionIconButtonColors
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import com.suixing.agent.ui.components.CompactOutlinedTextField as OutlinedTextField
@@ -557,7 +558,7 @@ internal fun ConversationRow(
                     overflow = TextOverflow.Ellipsis,
                 )
             }
-            IconButton(onClick = onInfo) {
+            IconButton(onClick = onInfo, colors = actionIconButtonColors()) {
                 Icon(
                     imageVector = ImageVector.vectorResource(R.drawable.ic_info),
                     contentDescription = "详情",
@@ -566,7 +567,7 @@ internal fun ConversationRow(
             }
             // 取消归档排在导出之前：它是这一行唯一的「把会话放回抽屉」的动作，最常用。
             onUnarchive?.let { unarchive ->
-                IconButton(onClick = unarchive) {
+                IconButton(onClick = unarchive, colors = actionIconButtonColors()) {
                     Icon(
                         imageVector = ImageVector.vectorResource(R.drawable.ic_folder_open),
                         contentDescription = "取消归档",
@@ -574,14 +575,14 @@ internal fun ConversationRow(
                     )
                 }
             }
-            IconButton(onClick = onExport) {
+            IconButton(onClick = onExport, colors = actionIconButtonColors()) {
                 Icon(
                     imageVector = ImageVector.vectorResource(R.drawable.ic_download),
                     contentDescription = "导出",
                     modifier = Modifier.size(18.dp),
                 )
             }
-            IconButton(onClick = onDelete) {
+            IconButton(onClick = onDelete, colors = actionIconButtonColors()) {
                 Icon(
                     imageVector = ImageVector.vectorResource(R.drawable.ic_trash),
                     contentDescription = "删除",

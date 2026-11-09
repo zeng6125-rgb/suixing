@@ -161,11 +161,12 @@ object Core {
             settings = SettingsRepository(appContext)
             conversationReads = ConversationReads.create(appContext, appScope)
             conversationViewports = ConversationViewports.create(appContext, appScope)
+            usage = UsageStore(appContext)
             chats = ChatRepository(appContext, onDeleted = { id ->
                 conversationReads.forget(id)
                 conversationViewports.forget(id)
                 SubagentRecords.delete(id)
-            })
+            }, beforeDeleted = { id -> usage.preserveBeforeDeletion(id) })
             memory = MemoryStore(appContext)
             profile = UserProfileStore(appContext)
             capabilities = CapabilityHub(appContext, settings, beforeInitialProbe = startup::awaitMaintenance)
@@ -178,7 +179,6 @@ object Core {
             goals = GoalStore(File(appContext.filesDir, "goal.json"))
             schedules = ScheduleStore(File(appContext.filesDir, "schedules.json"))
             plugins = PluginStore(File(appContext.filesDir, "plugins"))
-            usage = UsageStore(appContext)
             perf = PerfMonitor(File(appContext.filesDir, "perf.json"))
             appScope.launch(Dispatchers.IO) {
                 startup.maintenance { perf.load() }

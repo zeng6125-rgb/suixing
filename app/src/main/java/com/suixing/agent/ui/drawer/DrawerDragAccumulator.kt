@@ -1,5 +1,8 @@
 package com.suixing.agent.ui.drawer
 
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.channels.ReceiveChannel
+
 /** A snapshot a frame consumer may apply only while this exact drag is still active. */
 internal data class DrawerDragFrame(val generation: Long, val progress: Float)
 
@@ -20,9 +23,12 @@ internal class DrawerDragAccumulator {
     private var accumulatedPx = 0f
     private var latestProgress = 0f
     private var cachedFrame: DrawerDragFrame? = null
+    private var updates: Channel<Unit>? = null
 
     fun begin(progress: Float, widthPx: Float): Long {
         require(widthPx > 0f)
+        updates?.close()
+        updates = Channel<Unit>(Channel.CONFLATED).also { it.trySend(Unit) }
         generation++
         active = true
         startProgress = progress.coerceIn(0f, 1f)
@@ -41,10 +47,15 @@ internal class DrawerDragAccumulator {
      */
     fun dragBy(dragGeneration: Long, deltaPx: Float): Float? {
         if (!active || generation != dragGeneration) return null
+        val previous = latestProgress
         accumulatedPx = (accumulatedPx + deltaPx).coerceIn(minOffsetPx, maxOffsetPx)
         latestProgress = startProgress + accumulatedPx / panelWidthPx
+        if (latestProgress != previous) updates?.trySend(Unit)
         return latestProgress
     }
+
+    /** A pump retains this drag's channel; an old receiver cannot consume a newer drag's update. */
+    fun frameUpdates(): ReceiveChannel<Unit>? = updates
 
     fun frame(): DrawerDragFrame? {
         if (!active) return null
@@ -66,6 +77,7 @@ internal class DrawerDragAccumulator {
         if (!active || generation != dragGeneration) return false
         active = false
         generation++
+        updates?.close()
         cachedFrame = null
         return true
     }
@@ -78,6 +90,7 @@ internal class DrawerDragAccumulator {
         if (!active || generation != dragGeneration) return null
         active = false
         generation++
+        updates?.close()
         cachedFrame = null
         return DrawerDragRelease(generation, latestProgress)
     }

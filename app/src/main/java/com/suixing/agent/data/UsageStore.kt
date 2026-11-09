@@ -78,9 +78,8 @@ data class UsageBucket(
  * One chat's own contribution to the roll-up: the days and models it spent on, plus
  * the watermark that makes the next scan incremental.
  *
- * Kept per chat rather than as one flat total because a deleted chat has to take its
- * tokens back out again — a single aggregate can only ever grow, and then the header
- * reads "3 chats / 126M" about chats that no longer exist.
+ * Live transcripts can be rescanned after rewrites; deleted transcripts contribute
+ * their independently persisted final summaries instead.
  */
 @Serializable
 data class ChatUsage(
@@ -113,11 +112,13 @@ data class ChatUsage(
     val scannedGen: Int = -1,
     val dailyModels: Map<String, Map<String, UsageBucket>> = emptyMap(),
     val sourceStamp: String = "",
+    /** Zero for a live source; historical summaries remain counted after deletion. */
+    val deletedAt: Long = 0,
 )
 
 /**
  * The persisted cache: per-chat detail only. The day and model charts are folds over
- * it, so a chat that disappears from disk simply stops being part of them.
+ * it, including the final summaries of conversations that were deleted.
  */
 @Serializable
 data class UsageSnapshot(
@@ -151,11 +152,17 @@ data class UsageSnapshot(
     val totals: TokenTally get() = aggregate.value.totals
 
     val coverage: UsageBucket by lazy {
+        chats.values.fold(UsageBucket()) { sum, chat -> sum + chat.usageBucket() }
+    }
+    val deletedCoverage: UsageBucket by lazy {
         chats.values.fold(UsageBucket()) { sum, chat ->
-            chat.dailyModels.values.fold(sum) { dailySum, models -> models.values.fold(dailySum) { acc, bucket -> acc + bucket } }
+            if (chat.deletedAt > 0L) sum + chat.usageBucket() else sum
         }
     }
+}
 
+private fun ChatUsage.usageBucket(): UsageBucket = dailyModels.values.fold(UsageBucket()) { sum, models ->
+    models.values.fold(sum) { acc, bucket -> acc + bucket }
 }
 
 private data class UsageAggregate(
@@ -166,8 +173,8 @@ private data class UsageAggregate(
 
 /**
  * Read-only roll-up of every chat's token usage, by day and by model. It never
- * writes to `chats/` — only to its own `filesDir/usage.json` cache — so the
- * conversation store stays the single source of truth.
+ * writes to `chats/`. Live usage is cached in `usage.json`; final deleted-source
+ * summaries are durable in `deleted-usage/` and remain available after cache rebuilds.
  */
 class UsageStore(private val context: Context) {
     private val refreshLock = Mutex()
@@ -177,6 +184,7 @@ class UsageStore(private val context: Context) {
 
     /** Reads the transcripts in whichever format they are in; never writes to them. */
     private val store = ChatStore(File(context.filesDir, "chats"))
+    private val deleted = DeletedUsageStore(File(context.filesDir, "deleted-usage"))
 
     @Volatile
     private var snapshot: UsageSnapshot = UsageSnapshot()
@@ -191,6 +199,7 @@ class UsageStore(private val context: Context) {
             val loaded = readCache()
             val cache = if (loaded.zoneId.isNotBlank() && loaded.zoneId != zone.id) UsageSnapshot() else loaded
             val issues = mutableListOf<String>()
+            val historical = deleted.read(issues)
             // **目录只扫一次**：原来 loadSlices 与这里各 listFiles 一遍同一个目录。
             // 盘上仍有的会话（meta 在即算）：retainAll 的「确认删除」依据（issue #41 真问题 3）
             val directory = File(chatsDir, STORE_DIR)
@@ -207,15 +216,51 @@ class UsageStore(private val context: Context) {
                     slices += UsageSlice(child.key, messages, 0, null, -2, child.stamp)
                 }
             }
+            // Preserve any still-available old cache entries whose sources are already gone.
+            // This also survives timezone changes without erasing historical totals.
+            for ((id, usage) in loaded.chats) {
+                if (id !in onDisk && id !in historical) {
+                    historical[id] = deleted.save(id, usage, loaded.zoneId.ifBlank { zone.id })
+                }
+            }
             // 显式打上当前版本：cache 若刚被版本校验丢弃，这里就是"重建一次"的落点。
-            val next = accumulateSlices(cache, slices, zone, onDiskIds = onDisk)
-                .copy(schemaVersion = UsageSnapshot.SCHEMA_VERSION, zoneId = zone.id, issues = issues)
+            val live = accumulateSlices(cache, slices, zone, onDiskIds = onDisk)
+            val combined = live.chats.mapValues { (_, usage) ->
+                if (usage.deletedAt > 0L) usage.copy(deletedAt = 0) else usage
+            }.toMutableMap()
+            historical.forEach { (id, usage) -> if (id !in onDisk) combined[id] = usage }
+            val next = live.copy(chats = combined,
+                schemaVersion = UsageSnapshot.SCHEMA_VERSION, zoneId = zone.id, issues = issues)
             // **没有变化就不重写缓存**（优化清单 data-P2）：`writeCache` 会把整份快照
             // prettyPrint 成 JSON 再落盘；定时刷新时绝大多数次扫描都没有新消息。
             // 比较的是值相等（data class），结果与"总是写"完全一致 —— 只是少一次写盘。
             if (next != cache) writeCache(next)
             snapshot = next
             next
+        }
+    }
+
+    /** Called under the repository's delete lock, before any transcript or child record is removed. */
+    suspend fun preserveBeforeDeletion(id: String) = withContext(Dispatchers.IO) {
+        refreshLock.withLock {
+            val metaFile = File(File(chatsDir, STORE_DIR), "$id$META_SUFFIX")
+            if (!metaFile.exists()) return@withLock
+            val zone = ZoneId.systemDefault()
+            val loaded = readCache()
+            val cache = if (loaded.zoneId.isNotBlank() && loaded.zoneId != zone.id) UsageSnapshot() else loaded
+            val issues = mutableListOf<String>()
+            val slices = loadSlices(cache, arrayOf(metaFile), issues).toMutableList()
+            val childSources = SubagentRecords.usageSources(context.filesDir, setOf(id),
+                cache.chats.mapValues { it.value.sourceStamp })
+            issues += childSources.issues
+            val ids = mutableSetOf(id)
+            childSources.sources.forEach { child ->
+                ids += child.key
+                child.messages?.let { slices += UsageSlice(child.key, it, 0, null, -2, child.stamp) }
+            }
+            if (issues.isNotEmpty()) throw IOException("删除前的用量记录未能完整保存，请重试。")
+            val finalUsage = accumulateSlices(cache, slices, zone, onDiskIds = ids)
+            for ((key, usage) in finalUsage.chats) deleted.save(key, usage.copy(deletedAt = 0), zone.id)
         }
     }
 
@@ -301,9 +346,9 @@ internal const val UNKNOWN_MODEL_LABEL = "历史/未知"
 /**
  * Folds [conversations] into [snapshot], counting each chat only from its stored
  * watermark forward. Pure and zone-injectable so the properties that matter — "a
- * re-scan does not double-count", "messages split across the right days", "a deleted
- * chat gives its tokens back" — can be tested without a device, a clock, or the real
- * chats folder.
+ * re-scan does not double-count" and "messages split across the right days" — can be
+ * tested without a device, a clock, or the real chats folder. This fold handles live
+ * sources; UsageStore merges independently persisted deleted summaries afterward.
  */
 /**
  * The part of one conversation that has not been folded into the usage snapshot yet.

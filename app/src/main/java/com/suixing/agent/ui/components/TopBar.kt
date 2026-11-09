@@ -16,7 +16,6 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -46,14 +45,10 @@ internal fun PageTopBarAction(
     onClick: () -> Unit,
     enabled: Boolean = true,
 ) {
-    val ink = MaterialTheme.colorScheme.onSurfaceVariant
     IconButton(
         onClick = onClick,
         enabled = enabled,
-        colors = IconButtonDefaults.iconButtonColors(
-            contentColor = ink,
-            disabledContentColor = ink.copy(alpha = 0.38f),
-        ),
+        colors = actionIconButtonColors(),
     ) {
         Icon(
             imageVector = icon,

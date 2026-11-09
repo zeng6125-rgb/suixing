@@ -6,7 +6,7 @@
 
 > **会话存储**：`chats/store/<id>.meta`（元数据 + 累计统计）+ `<id>.<gen>.jsonl`（每行一条消息的追加日志）。保存一轮只追加尾部，不再全量重写——32 MB 的会话每轮保存从「序列化 + 写 32 MB + rename」降到「追加几十字节到几 KB」。重排类操作（编辑重答、分支切换）会换代重写，旧代留一代作回退。**装回 0.8.316 及更早版本看不到这些会话**；更早的 `<id>.json` 单文件格式已不再支持读取（迁移代码随兼容层一起删了），磁盘上残留的这类文件不会出现在列表里。
 
-- Kotlin + Jetpack Compose（Material 3，Compose BOM 2026.09.00 / Kotlin 2.4.21 / AGP 9.4.1 / Gradle 9.8.2），交互式终端通过 NDK/JNI 连接 PTY；随包组件与固定来源见[第三方声明](THIRD_PARTY_NOTICES.md)。
+- Kotlin + Jetpack Compose（Material 3，Compose BOM 2026.09.00 / Kotlin 2.4.21 / AGP 9.4.1 / Gradle 9.8.2），交互式终端通过 NDK/JNI 连接 PTY，区分大小写的普通文件内容搜索使用独立 Rust 内核；随包组件与固定来源见[第三方声明](THIRD_PARTY_NOTICES.md)。
 - 目标平台：Android 8.0 (API 26) 及以上；`compileSdk` / `targetSdk` = 37
 - 图片走 Coil 3（内存 + 磁盘双缓存、自动降采样），不再手写 `BitmapFactory` 与 LRU
 - 不做云同步、不做遥测，API Key 只存在本机应用私有目录
@@ -14,13 +14,13 @@
 - 支持技能（Skill）：把写好的操作手册放进手机，模型需要时自己读
 - 支持插件（Plugin）：安装一个 zip 就能带来新工具、新的上下文注入与新的执行闸门
 - 目标与斜杠指令：输入 `/goal 一句话目标`，助手会在当前会话持续推进并记录进度，直到确认完成、遇到卡点或被停止。`/goal` 查看，`/goal resume` 继续，`/goal clear` 清除。输入 `/` 可找其他工具，直接调用仍受审批档与助手禁用表约束。
-- 当前源码版本：**0.8.701**（`versionCode` 722）
+- 当前源码版本：**0.8.703**（`versionCode` 724）
 
 ## 界面与设计
 
 视觉取舍参考了 [Aether 扶摇](https://github.com/Zhou-Shilin/Aether)——不跟随 Material 动态取色、层级靠表面阶梯而不是阴影、卡片走大圆角、整页 edge-to-edge；布局与交互为本项目自研。底层色板仍是一套手调的墨绿（深色侧底色 `#0F1412`、主色 `#8FD6B6`、正文 `#E8EFEA`，浅色侧白底 + 主色 `#1F6B4C`），作为「跟随壁纸」动态取色的基底；它已不再是独立配色选项。几个刻意的选择：
 
-- **配色**。默认是「JAgent 配色」——Claude 的暖纸色与陶土橙（在墨绿色板上覆盖而来）。在「设置 → 外观 → 配色」还可以选 Codex 的冷灰与蓝紫，或在 Android 12 以上跟随壁纸动态取色。墨绿已降级移除，老设置里存着墨绿会自动落到 JAgent 配色。浅色、深色与跟随系统由「主题」单独控制。
+- **配色**。默认是「JAgent 配色」——Claude 的暖纸色与陶土橙（在墨绿色板上覆盖而来）。在「设置 → 外观 → 配色」还可以选参考 Codex 桌面端默认主题的黑白灰：浅色白底与浅灰侧栏、深色炭黑底与更深侧栏，按钮和气泡使用中性色，文字选择保留独立蓝色高亮；或在 Android 12 以上跟随壁纸动态取色。墨绿已降级移除，老设置里存着墨绿会自动落到 JAgent 配色。浅色、深色与跟随系统由「主题」单独控制。
 - **不用阴影**。层级靠表面阶梯（`surfaceContainerLow` / `surfaceContainer` / `surfaceContainerHigh`，另有两级 Lowest / Highest）加 1dp 发丝描边区分。
 - **卡片 20dp 圆角、左侧抽屉导航**。没有底部导航条，会话页的纵向空间全部留给消息；顶栏左上角的按钮拉出抽屉（会话列表 + 助手 / 定时任务 / 文件 / 悬浮窗控制台 / 设置）。
 - **edge-to-edge**。状态栏与导航栏透明，内容自己处理 insets；顶栏自带 `statusBarsPadding()`。列表页的底部让位走 **`contentPadding`**——内容画到手势条下面、滚到底时末行才避让，而不是给列表挂 `navigationBarsPadding()`（后者会让内容停在手势条上方，底下留一条空背景带）。`navigationBarsPadding()` 只留给 `SnackbarHost` 这类不该穿底的浮层。
@@ -237,17 +237,27 @@ description: 打开某 App 完成签到，用户说「签到」时使用
 
 需要 **JDK 17** 与 Android SDK（`platforms;android-37`，以及与它配套的 build-tools 37.x）。SDK 路径写在 `local.properties` 的 `sdk.dir`（该文件不入库）。
 
+原生构建固定 **NDK 28.2.13676358**、**CMake 3.22.1** 和 **Rust 1.98.0**。先独立准备工具链；CMake 会检查目标是否已安装，Cargo 在 Android 构建中使用 `--release --locked --offline`，不会自动下载 Rust 或依赖：
+
+```bash
+sdkmanager "ndk;28.2.13676358" "cmake;3.22.1"
+rustup toolchain install 1.98.0 --profile minimal
+rustup target add --toolchain 1.98.0 aarch64-linux-android armv7-linux-androideabi x86_64-linux-android i686-linux-android
+```
+
+搜索 crate 在 `app/src/main/rust/suixing-search`，没有第三方 Rust 依赖。CMake 为四种 ABI 生成 `libsuixing_search.so`，Rust 中间产物留在构建目录，原 PTY 库独立保留。`grep_files` 的 `case_sensitive=true`、`regex=false` 请求可走 Rust；正则、忽略大小写、原生库不可用或不能无损表示的输入保留 Kotlin。目录遍历、权限、参数和输出格式仍由 Kotlin 处理；无效 UTF-8 或读取条件发生变化的候选文件交回原读取器。
+
 **仓库现在带 `gradlew` / `gradle/wrapper/`**（0.8.4xx 起补上的），wrapper 固定 **Gradle 9.8.2**——AGP 9.4.1 要求 Gradle 9.x。本地直接 `./gradlew` 即可，不再需要一个已解包的 Gradle 发行版。
 
 ```bash
-# 只查语法，不出包
-./gradlew :app:compileDebugKotlin
+# 编译 Kotlin 和四种 ABI 的原生库，不出包
+./gradlew :app:compileReleaseKotlin :app:externalNativeBuildRelease
 
 # 单元测试（1012 个 @Test / 149 个文件 —— 这是静态注解计数，不是某次运行的通过数：
 # 协议层往返、HTML 转纯文本、Markdown 解析与增量复用、
 # 工具批次的并行判定、敏感数据屏蔽、会话日志的追加/换代/自愈、接口报错翻译、
 # 提供方与模型分组、消息分叉的选取逻辑等，无需设备）
-./gradlew :app:testDebugUnitTest
+./gradlew :app:testReleaseUnitTest
 
 # 出包（只出 release）
 ./gradlew :app:assembleRelease

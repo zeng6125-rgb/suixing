@@ -97,6 +97,7 @@ import com.suixing.agent.ui.settings.SettingsScreen
 import com.suixing.agent.ui.settings.ToolsScreen
 import com.suixing.agent.ui.tasks.TasksScreen
 import com.suixing.agent.ui.theme.LocalDarkTheme
+import com.suixing.agent.ui.theme.LocalDrawerSurfaceColor
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
@@ -451,7 +452,7 @@ fun SuixingApp() {
             // 若根底色一直是 surface，那圈边距就是白的 —— 用户看到的「主页被套了个白框」。
             // 所以让它随抽屉进度渐变到侧边栏底色（surfaceContainerHigh）：
             // 主页四周露出的就变成"侧边栏"，与 DeepSeek 一致。
-            val drawerSurfaceColor = MaterialTheme.colorScheme.surfaceContainerHigh
+            val drawerSurfaceColor = LocalDrawerSurfaceColor.current ?: MaterialTheme.colorScheme.surfaceContainerHigh
             val closedBackgroundColor = remember(surfaceColor, drawerSurfaceColor) {
                 androidx.compose.ui.graphics.lerp(surfaceColor, drawerSurfaceColor, 0f)
             }
@@ -502,20 +503,22 @@ fun SuixingApp() {
                 drawerContent = {
                     // 侧边栏本体：宿主按 progress 平移这一层，才有跟手/回弹动画。
                     val drawerVisible = drawerState.homeShieldActive && route == "empty"
-                    val drawerMoving = drawerState.isMoving
                     val drawerLifecycle = com.suixing.agent.ui.chat.rememberChatUiLifecycleOwner(drawerVisible)
                     // Pause high-rate list updates, while retaining the header/avatar's normal preload.
                     val drawerConversations by chat.conversations.collectAsStateWithLifecycle(
                         lifecycleOwner = drawerLifecycle,
                     )
                 Drawer(
-                    open = drawerState.isOpen,
+                    open = remember(drawerState) { { drawerState.isOpen } },
                     route = route,
                     conversations = drawerConversations,
                     activeId = activeConversationId,
                     runningId = runningIds,
-                    runningAnimationActive = drawerVisible && !drawerMoving,
-                    panelMoving = drawerMoving,
+                    // Motion state is read by the mark/rows, not by the whole drawer content.
+                    runningAnimationActive = remember(drawerState, route) {
+                        { route == "empty" && drawerState.homeShieldActive && !drawerState.isMoving }
+                    },
+                    panelMoving = remember(drawerState) { { drawerState.isMoving } },
                     onNew = {
                         switchIntents.invalidate()
                         chat.newConversation()
@@ -576,6 +579,9 @@ fun SuixingApp() {
                 // Home retains the accepted 300dp travel, 0.95 scale and constant screen corners.
                 val panelWidthPx = with(LocalDensity.current) { DRAWER_SHEET_WIDTH.dp.toPx() }
                 val homeShape = remember { RoundedCornerShape(SCREEN_CORNER_DP.dp) }
+                val cacheHomeDuringMotion = remember(context) {
+                    context.getSystemService(android.app.ActivityManager::class.java)?.isLowRamDevice != true
+                }
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
@@ -606,6 +612,13 @@ fun SuixingApp() {
                             // 移动期间同时裁剪内容；完全关闭时让窗口负责屏幕边界，聊天无需常驻圆角遮罩。
                             shape = homeShape
                             clip = progress > 0f
+                            // Cache the clipped home in a GPU layer during the transform. Dirty
+                            // content still redraws; stable text is composited from the texture.
+                            compositingStrategy = if (cacheHomeDuringMotion && progress > 0f && drawerState.isMoving) {
+                                androidx.compose.ui.graphics.CompositingStrategy.Offscreen
+                            } else {
+                                androidx.compose.ui.graphics.CompositingStrategy.Auto
+                            }
                         },
                 ) {
                 // chat 常驻：NavHost 在离开一个目的地之后会把它**销毁**，pop 回来时是从零

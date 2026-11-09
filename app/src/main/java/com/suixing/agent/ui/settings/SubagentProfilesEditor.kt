@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
@@ -16,8 +17,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Checkbox
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -27,12 +26,15 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.text.input.KeyboardType
@@ -51,6 +53,9 @@ import com.suixing.agent.data.resolve
 import com.suixing.agent.plugins.PluginRuntime
 import com.suixing.agent.tools.ToolSpec
 import com.suixing.agent.ui.components.CompactOutlinedTextField
+import com.suixing.agent.ui.components.ActionMenu
+import com.suixing.agent.ui.components.ActionMenuItem
+import com.suixing.agent.ui.components.actionIconButtonColors
 import com.suixing.agent.ui.components.RowChevron
 import com.suixing.agent.ui.components.SegmentedPill
 import com.suixing.agent.ui.components.SettingRow
@@ -89,21 +94,27 @@ internal fun SubagentProfilesCard(settings: AppSettings) {
     var editing by remember { mutableStateOf<SubagentProfile?>(null) }
     var deleting by remember { mutableStateOf<SubagentProfile?>(null) }
     var defaultMenu by remember { mutableStateOf(false) }
+    var defaultAnchorWidth by remember { mutableIntStateOf(0) }
+    val density = LocalDensity.current
     val default = settings.subagentProfiles.firstOrNull { it.id == settings.defaultSubagentProfileId }
-    SuixingCard {
-        Text("配置模板", style = SettingsStyle.cardTitle)
+    SuixingCard(contentPadding = PaddingValues(vertical = SettingsStyle.CardPadding)) {
+        Text("配置模板", style = SettingsStyle.cardTitle, modifier = Modifier.padding(horizontal = SettingsStyle.CardPadding))
         Text("创建子任务时可选模板，再单独调整助手、模型、工具和预算；修改模板不影响已经启动的任务。",
-            style = SettingsStyle.description, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Box {
+            style = SettingsStyle.description, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(horizontal = SettingsStyle.CardPadding))
+        Box(Modifier.fillMaxWidth().onSizeChanged { defaultAnchorWidth = it.width }) {
             SettingRow(title = "默认模板", subtitle = default?.name ?: "跟随父任务与子任务模型设置",
-                onClick = { defaultMenu = true }, control = { RowChevron() })
-            DropdownMenu(expanded = defaultMenu, onDismissRequest = { defaultMenu = false }) {
-                DropdownMenuItem(text = { Text("跟随父任务") }, onClick = {
+                onClick = { defaultMenu = true }, control = { RowChevron() },
+                contentPadding = PaddingValues(horizontal = SettingsStyle.CardPadding))
+            ActionMenu(expanded = defaultMenu, onDismissRequest = { defaultMenu = false },
+                anchorWidth = with(density) { defaultAnchorWidth.toDp() }) {
+                ActionMenuItem(text = { Text("跟随父任务") }, selected = default == null, onClick = {
                     defaultMenu = false
                     scope.persist { it.copy(defaultSubagentProfileId = "") }
                 })
                 settings.subagentProfiles.forEach { profile ->
-                    DropdownMenuItem(text = { Text(profile.name) }, onClick = {
+                    ActionMenuItem(text = { Text(profile.name, maxLines = 2, overflow = TextOverflow.Ellipsis) },
+                        selected = profile.id == default?.id, onClick = {
                         defaultMenu = false
                         scope.persist { current ->
                             if (current.subagentProfiles.any { it.id == profile.id }) current.copy(defaultSubagentProfileId = profile.id)
@@ -117,32 +128,35 @@ internal fun SubagentProfilesCard(settings: AppSettings) {
             var menu by remember(profile.id) { mutableStateOf(false) }
             SettingRow(title = profile.name + if (profile.id == default?.id) " · 默认" else "",
                 subtitle = subagentProfileSummary(profile, settings), onClick = { editing = profile },
+                contentPadding = PaddingValues(horizontal = SettingsStyle.CardPadding),
                 control = {
                     Box {
-                        IconButton(onClick = { menu = true }) {
+                        IconButton(onClick = { menu = true }, colors = actionIconButtonColors()) {
                             Icon(ImageVector.vectorResource(R.drawable.ic_more_vertical), "${profile.name}的操作", Modifier.size(18.dp))
                         }
-                        DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                            DropdownMenuItem(text = { Text("编辑") }, onClick = { menu = false; editing = profile })
-                            DropdownMenuItem(text = { Text("复制") }, onClick = {
+                        ActionMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                            ActionMenuItem(text = { Text("编辑") }, onClick = { menu = false; editing = profile })
+                            ActionMenuItem(text = { Text("复制") }, onClick = {
                                 menu = false
                                 editing = profile.copy(id = newProfileId(), name = "${profile.name}副本")
                             })
-                            DropdownMenuItem(text = { Text("设为默认") }, onClick = {
+                            ActionMenuItem(text = { Text("设为默认") }, onClick = {
                                 menu = false
                                 scope.persist { current ->
                                     if (current.subagentProfiles.any { it.id == profile.id }) current.copy(defaultSubagentProfileId = profile.id)
                                     else current
                                 }
                             })
-                            DropdownMenuItem(text = { Text("删除") }, onClick = { menu = false; deleting = profile })
+                            ActionMenuItem(text = { Text("删除") }, onClick = { menu = false; deleting = profile })
                         }
                     }
                 })
         }
         if (settings.subagentProfiles.isEmpty()) Text("还没有模板，可从新建模板开始。", style = SettingsStyle.description,
-            color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = SettingsStyle.FieldGap))
-        TextButton(onClick = { editing = SubagentProfile(id = newProfileId(), name = "新模板") }) { Text("新建模板") }
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(horizontal = SettingsStyle.CardPadding).padding(top = SettingsStyle.FieldGap))
+        TextButton(onClick = { editing = SubagentProfile(id = newProfileId(), name = "新模板") },
+            modifier = Modifier.padding(horizontal = SettingsStyle.CardPadding)) { Text("新建模板") }
     }
     editing?.let { original ->
         var draft by remember(original.id) { mutableStateOf(original) }
@@ -262,7 +276,7 @@ internal fun SubagentConfigEditor(
         }
     }
     Column(verticalArrangement = Arrangement.spacedBy(SettingsStyle.FieldGap)) {
-        ProfileChoiceRow("助手", settings.assistants.firstOrNull { it.id == profile.assistantId }?.label ?: "跟随父助手",
+        ProfileChoiceRow("助手", profile.assistantId, settings.assistants.firstOrNull { it.id == profile.assistantId }?.label ?: "跟随父助手",
             listOf("" to "跟随父助手") + settings.assistants.map { it.id to it.label }) { id -> onChange(profile.copy(assistantId = id)) }
         Text("只改变子任务使用的助手，不切换父会话助手。", style = SettingsStyle.description, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Text("模型", style = SettingsStyle.metadata)
@@ -378,13 +392,16 @@ private fun actionLabel(tool: String, action: String): String = if (tool == "ui_
 } else action
 
 @Composable
-private fun ProfileChoiceRow(title: String, selected: String, choices: List<Pair<String, String>>, onPick: (String) -> Unit) {
+private fun ProfileChoiceRow(title: String, selectedId: String, selected: String, choices: List<Pair<String, String>>, onPick: (String) -> Unit) {
     var menu by remember(title) { mutableStateOf(false) }
-    Box {
+    var anchorWidth by remember { mutableIntStateOf(0) }
+    val density = LocalDensity.current
+    Box(Modifier.fillMaxWidth().onSizeChanged { anchorWidth = it.width }) {
         SettingRow(title = title, subtitle = selected, onClick = { menu = true }, control = { RowChevron() })
-        DropdownMenu(expanded = menu, onDismissRequest = { menu = false }, modifier = Modifier.heightIn(max = 300.dp)) {
+        ActionMenu(expanded = menu, onDismissRequest = { menu = false },
+            anchorWidth = with(density) { anchorWidth.toDp() }, modifier = Modifier.heightIn(max = 300.dp)) {
             choices.forEach { (id, label) ->
-                DropdownMenuItem(text = { Text(label, maxLines = 2, overflow = TextOverflow.Ellipsis) },
+                ActionMenuItem(text = { Text(label, maxLines = 2, overflow = TextOverflow.Ellipsis) }, selected = selectedId == id,
                     onClick = { menu = false; onPick(id) })
             }
         }

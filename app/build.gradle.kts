@@ -7,14 +7,15 @@ plugins {
 android {
     namespace = "com.suixing.agent"
     compileSdk = 37
+    ndkVersion = "28.2.13676358"
 
     defaultConfig {
         applicationId = "com.suixing.agent"
         minSdk = 26
         targetSdk = 37
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        versionCode = 722
-        versionName = "0.8.701"
+        versionCode = 724
+        versionName = "0.8.703"
         resourceConfigurations += listOf("zh", "en")
     }
 
@@ -77,9 +78,12 @@ android {
         compose = true
     }
 
-    // #61 PR-0: native PTY only. No terminal UI, agent access, Root/Shizuku or Linux yet.
+    // PTY keeps its existing C++ library; read-only file search links a locked Rust staticlib.
     externalNativeBuild {
-        cmake { path = file("src/main/cpp/CMakeLists.txt") }
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
     }
 
     packaging {

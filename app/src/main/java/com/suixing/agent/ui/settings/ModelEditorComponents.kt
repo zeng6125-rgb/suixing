@@ -44,6 +44,7 @@ import com.suixing.agent.data.ProviderConfig
 import com.suixing.agent.data.hasProviderDetails
 import com.suixing.agent.ui.components.CompactOutlinedTextField
 import com.suixing.agent.ui.components.SettingsStyle
+import com.suixing.agent.ui.components.actionIconButtonColors
 import com.suixing.agent.ui.components.SuixingDialog
 
 @Composable
@@ -63,7 +64,7 @@ internal fun ProviderApiKeyField(
         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
         visualTransformation = if (revealed) VisualTransformation.None else PasswordVisualTransformation(),
         trailingIcon = {
-            IconButton(enabled = value.isNotEmpty(), onClick = { revealed = !revealed }) {
+            IconButton(enabled = value.isNotEmpty(), onClick = { revealed = !revealed }, colors = actionIconButtonColors()) {
                 Icon(
                     ImageVector.vectorResource(if (revealed) R.drawable.ic_eye_off else R.drawable.ic_eye),
                     if (revealed) "隐藏 API Key" else "显示 API Key",

@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -48,6 +49,7 @@ import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
@@ -224,6 +226,7 @@ internal fun MenuItemRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .heightIn(min = ActionMenuStyle.RowHeight)
             .clip(MaterialTheme.shapes.small)
             .semantics { this.selected = selected }
             .menuRippleClickable(onClick = onClick)
@@ -237,7 +240,14 @@ internal fun MenuItemRow(
             modifier = Modifier.size(18.dp),
         )
         Spacer(Modifier.width(10.dp))
-        Text(text = label, style = MaterialTheme.typography.bodyMedium, color = scheme.onSurface)
+        Text(
+            text = label,
+            style = MaterialTheme.typography.bodyMedium,
+            color = scheme.onSurface,
+            modifier = Modifier.weight(1f),
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+        )
         if (selected) {
             Spacer(Modifier.width(10.dp))
             Icon(

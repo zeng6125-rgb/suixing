@@ -38,6 +38,8 @@ import com.suixing.agent.data.ApprovalMode
 import com.suixing.agent.data.ChildRunConfig
 import com.suixing.agent.data.Roles
 import com.suixing.agent.ui.components.SettingsStyle
+import com.suixing.agent.ui.components.ActionMenu
+import com.suixing.agent.ui.components.ActionMenuItem
 import com.suixing.agent.ui.components.SuixingDialog
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
@@ -91,10 +93,17 @@ internal fun SubagentRunViewer(
                     }
                     if (summaries.size > 1) Box {
                         TextButton(onClick = { switching = true }) { Text("切换") }
-                        DropdownMenu(expanded = switching, onDismissRequest = { switching = false }) {
+                        ActionMenu(expanded = switching, onDismissRequest = { switching = false }) {
                             summaries.forEach { child ->
-                                DropdownMenuItem(
-                                    text = { Text("${child.name} · ${subagentStatusLabel(child.status)}") },
+                                ActionMenuItem(
+                                    text = {
+                                        Column {
+                                            Text(child.name, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                            Text(subagentStatusLabel(child.status), style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                        }
+                                    },
+                                    selected = child.id == selected?.id,
                                     onClick = { switching = false; onSelect(child.id) },
                                 )
                             }

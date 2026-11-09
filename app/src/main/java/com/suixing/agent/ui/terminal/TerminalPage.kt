@@ -92,11 +92,18 @@ fun TerminalScreen(onBack: () -> Unit, chatId: String = "") {
             MenuRippleHost(horizontalOverflow = 24.dp) {
             Column {
                 Text("最多同时运行 4 个会话，退出页面后继续保留。", style = MaterialTheme.typography.bodySmall)
-                MenuRippleTextButton(onClick = { newSession = false; open("android") }) { Text("Android · 应用身份") }
+                // Session choices are full-width rows; the host's wider feedback must not leave
+                // only each label's intrinsic width tappable.
+                MenuRippleTextButton(
+                    onClick = { newSession = false; open("android") },
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("Android · 应用身份", modifier = Modifier.fillMaxWidth()) }
                 for (distro in LINUX_DISTRIBUTIONS) MenuRippleTextButton(onClick = {
                     newSession = false
                     if (Core.linux.states.value[distro.id]?.available == true) open(distro.id) else environments = true
-                }) { Text(distro.title + " Linux") }
+                }, modifier = Modifier.fillMaxWidth()) {
+                    Text(distro.title + " Linux", modifier = Modifier.fillMaxWidth())
+                }
             }
             }
         }, confirmButton = { TextButton(onClick = { newSession = false }) { Text("取消") } },

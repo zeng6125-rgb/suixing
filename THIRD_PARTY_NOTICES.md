@@ -58,6 +58,12 @@ GPL 要求分发二进制时提供对应源码的获取途径。上面的上游�
 
 本应用自身的代码以 MIT 许可发布（见 `LICENSE`）；上表中的两个组件仍分别适用其 GPL 许可。
 
+## Rust 标准库与文件搜索
+
+`libsuixing_search.so` 静态链接固定 Rust 1.98.0 的标准库，用于只读、区分大小写的普通文件内容搜索。搜索 crate 为本项目源码，没有第三方 Cargo 依赖；Rust 标准库默认许可为 `Apache-2.0 OR MIT`，版权归 Rust Project Developers 及各原作者。固定上游源码为 https://github.com/rust-lang/rust/tree/1.98.0/library 。
+
+原工具链中的标准库专用 `COPYRIGHT-library.html` 与相邻许可正文已原样保留在 `app/src/main/assets/licenses/rust-1.98.0/`，随 APK 提供作者归属、Unicode 数据及相关第三方声明。该上游清单包含跨平台和构建时条目，并不表示其中每个组件都链接进 Android 搜索库；它也不以构建工具 Cargo 或整套编译器的许可清单代替运行库声明。
+
 ## 终端仿真与视口
 
 - 组件：Termux `terminal-emulator`、`terminal-view` 的部分 Java 源码及选区资源，版本 v0.118.3。

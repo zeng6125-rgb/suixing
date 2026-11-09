@@ -48,6 +48,7 @@ internal fun sameSavedDraftMessages(
 class ChatRepository(
     private val context: Context,
     private val onDeleted: suspend (String) -> Unit = {},
+    private val beforeDeleted: suspend (String) -> Unit = {},
 ) {
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
     private val dir: File get() = File(context.filesDir, "chats").apply { if (!exists()) mkdirs() }
@@ -744,6 +745,7 @@ private fun readTailText(file: java.io.File, maxChars: Int = TAIL_MAX_CHARS): St
 
     suspend fun delete(id: String) = withContext(Dispatchers.IO) {
         lock.withLock {
+            beforeDeleted(id)
             File(dir, "$id.json").delete()
             // The transcript itself, its metadata, and whatever a crashed rewrite left behind.
             store.discard(id)

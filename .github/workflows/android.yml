@@ -32,6 +32,25 @@ jobs:
       - name: Make gradlew executable
         run: chmod +x gradlew
 
+      - name: Prepare pinned Android native tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v sdkmanager >/dev/null 2>&1 || { echo "sdkmanager is required on the Android runner." >&2; exit 1; }
+          sdkmanager --install "ndk;28.2.13676358" "cmake;3.22.1"
+
+      # Toolchain downloads are explicit preparation; CMake only uses installed tools and
+      # cargo --locked --offline, so Gradle never installs Rust or Android Rust targets.
+      - name: Prepare pinned Rust Android toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v rustup >/dev/null 2>&1 || { echo "rustup is required on the Android runner." >&2; exit 1; }
+          rustup toolchain install 1.98.0 --profile minimal
+          rustup target add --toolchain 1.98.0 \
+            aarch64-linux-android armv7-linux-androideabi \
+            i686-linux-android x86_64-linux-android
+
       - name: Unit tests
         run: ./gradlew :app:testReleaseUnitTest --no-daemon --stacktrace
 

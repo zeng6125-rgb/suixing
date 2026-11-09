@@ -415,9 +415,15 @@ internal fun ChatRuntime.deleteConversation(conversation: Conversation) {
     }
     // Nothing left to hand a queued line to.
     clearSteers(conversation.id)
-    forgetConversation(conversation.id)
     viewModelScope.launch {
-        environment.chats.delete(conversation.id)
+        val deleted = runCatchingCancellable { environment.chats.delete(conversation.id) }
+        if (deleted.isFailure) {
+            _state.update {
+                it.copy(error = deleted.exceptionOrNull()?.message ?: "会话删除失败，请重试")
+            }
+            return@launch
+        }
+        forgetConversation(conversation.id)
         if (conversation.id != _state.value.conversationId) return@launch
         // 删除后落到另一条会话（或一条都没有）必须走**和用户点击同一条**路径：
         // 直接 `_state.value = next.toUiState(...)` 只换了 id 和标题，正文、viewport 恢复、

@@ -37,6 +37,7 @@ import java.time.LocalDate
 private data class UsageViewData(
     val snapshot: UsageSnapshot, val windows: Map<Int, UsageWindow>,
     val heatmap: UsageWindow, val all: UsageBucket,
+    val deleted: UsageBucket,
 )
 
 private const val COLLAPSED_MODEL_COUNT = 5
@@ -58,7 +59,7 @@ fun UsageScreen(onBack: () -> Unit) {
             data = withContext(Dispatchers.Default) {
                 val today = LocalDate.now()
                 UsageViewData(fresh, listOf(7, 30, 90).associateWith { usageWindow(fresh, it, today) },
-                    usageWindow(fresh, 90, today), fresh.coverage)
+                    usageWindow(fresh, 90, today), fresh.coverage, fresh.deletedCoverage)
             }
         } catch (cancelled: CancellationException) { throw cancelled }
         catch (failure: Exception) { error = failure.message ?: "用量读取失败，请重试。" }
@@ -140,12 +141,17 @@ fun UsageScreen(onBack: () -> Unit) {
                 }
                 item(key = "all-time") {
                     SuixingCard {
-                        Text("全部保留记录", style = SettingsStyle.cardTitle)
+                        Text("全部历史用量", style = SettingsStyle.cardTitle)
                         Text("${usageExact(current.all.tokens.total)} tokens · ${usageExact(current.all.requests)} 次已记录响应",
                             style = SettingsStyle.body)
                         val children = current.snapshot.chats.keys.count { it.startsWith("child/") }
-                        Text("包含 ${current.snapshot.chats.size - children} 个主会话、${children} 个子对话。删除对话后相应统计会移除。",
+                        Text("包含 ${current.snapshot.chats.size - children} 个主会话、${children} 个子对话的历史记录。删除会话后用量继续保留。",
                             style = SettingsStyle.description, color = scheme.onSurfaceVariant)
+                        if (current.deleted.requests > 0) Text(
+                            "其中已删除会话：${usageExact(current.deleted.tokens.total)} tokens · ${usageExact(current.deleted.requests)} 次响应",
+                            style = SettingsStyle.description, color = scheme.onSurfaceVariant,
+                            modifier = Modifier.padding(top = 8.dp),
+                        )
                         Text("按已保存的模型响应累计输入与输出；缓存、推理单独展示，不重复加进总量。未保存或未上报的用量无法还原，计费以服务商账单为准。",
                             style = SettingsStyle.description, color = scheme.onSurfaceVariant,
                             modifier = Modifier.padding(top = 8.dp))

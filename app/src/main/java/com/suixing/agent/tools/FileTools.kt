@@ -5,8 +5,9 @@ import android.content.Context
 import com.suixing.agent.data.FileActivity
 import com.suixing.agent.data.FileActivityKind
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.isActive
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonObject
 import java.io.File
@@ -510,6 +511,8 @@ class FileTools(private val context: Context) : ToolGroup() {
                     "找到 " + hits.size + " 个" + suffix + "：" + "\n" + hits.joinToString("\n"),
                 )
             }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (error: Exception) {
             ToolResult.failure("查找失败：" + (error.message ?: error.javaClass.simpleName))
         }
@@ -540,14 +543,15 @@ class FileTools(private val context: Context) : ToolGroup() {
             val hits = ArrayList<String>()
             val hitFiles = LinkedHashSet<String>()
             var scanned = 0
-            walk(root, 0, 12, { hits.size >= limit || hitFiles.size >= limit || scanned >= maxFiles },
-                descend = { !it.absolutePath.contains(exclude) }) { file ->
-                val full = hits.size >= limit || hitFiles.size >= limit || scanned >= maxFiles
-                if (full || !file.isFile) return@walk
-                if (file.absolutePath.contains(exclude)) return@walk
-                if (file.length() > MAX_SEARCH_BYTES) return@walk
-                scanned++
-                runCatching {
+            val searchContext = currentCoroutineContext()
+            val useNative = NativeFileSearch.supports(query, caseSensitive, regex != null)
+            val pending = ArrayList<File>(NativeFileSearch.BATCH_SIZE)
+            fun full(): Boolean = hits.size >= limit || hitFiles.size >= limit || scanned >= maxFiles
+            fun scanKotlin(file: File) {
+                searchContext.ensureActive()
+                // A queued candidate may have been replaced since Kotlin's traversal or native read.
+                if (!file.isFile) return
+                try {
                     file.inputStream().buffered().use { input ->
                         input.mark(2048)
                         val prefix = ByteArray(2048)
@@ -564,6 +568,7 @@ class FileTools(private val context: Context) : ToolGroup() {
                             }
                         }
                         forEachLogicalLine(input.reader(Charsets.UTF_8)) { line ->
+                            searchContext.ensureActive()
                             number++
                             val matched = searchLineMatches(line, query, caseSensitive, regex)
                             if (matched && filesOnly) {
@@ -585,8 +590,58 @@ class FileTools(private val context: Context) : ToolGroup() {
                             hits.size < limit
                         }
                     }
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    // Existing per-file read failures are skipped; they are never retried natively.
                 }
             }
+            suspend fun drainPending() {
+                if (pending.isEmpty()) return
+                val batch = pending.toList()
+                pending.clear()
+                var offset = 0
+                while (offset < batch.size && !full()) {
+                    searchContext.ensureActive()
+                    val suffix = batch.subList(offset, batch.size)
+                    val remaining = limit - if (filesOnly) hitFiles.size else hits.size
+                    val result = NativeFileSearch.scan(suffix, query, context, filesOnly, remaining)
+                    if (result == null) {
+                        // Unrepresentable paths or an unavailable library keep the old backend.
+                        for (file in suffix) {
+                            if (full()) break
+                            scanned++
+                            scanKotlin(file)
+                        }
+                        return
+                    }
+                    scanned += result.processedCount
+                    result.rows.forEach { row ->
+                        val path = suffix[row.fileIndex].absolutePath
+                        if (row.marker == 2) hitFiles.add(path)
+                        else hits.add("$path:${row.number}${if (row.marker == 0) ":" else "-"} ${row.snippet}")
+                    }
+                    // Rust has not emitted rows for this candidate. Invalid UTF-8 or a raced
+                    // read falls back to the existing reader, before continuing the suffix.
+                    result.compatibilityIndex?.let { scanKotlin(suffix[it]) }
+                    offset += result.processedCount
+                }
+            }
+            walk(root, 0, 12, { hits.size >= limit || hitFiles.size >= limit || scanned >= maxFiles },
+                descend = { !it.absolutePath.contains(exclude) }) { file ->
+                if (full() || !file.isFile) return@walk
+                if (file.absolutePath.contains(exclude)) return@walk
+                if (file.length() > MAX_SEARCH_BYTES) return@walk
+                if (useNative) {
+                    pending += file
+                    if (pending.size >= NativeFileSearch.BATCH_SIZE || scanned + pending.size >= maxFiles) drainPending()
+                } else {
+                    scanned++
+                    scanKotlin(file)
+                }
+            }
+            drainPending()
+            searchContext.ensureActive()
             val found: List<String> = if (filesOnly) hitFiles.toList() else hits
             if (found.isEmpty()) {
                 ToolResult.success("在 " + scanned + " 个文件里没有找到「" + query + "」")
@@ -595,6 +650,8 @@ class FileTools(private val context: Context) : ToolGroup() {
                     "命中 " + found.size + " 条（扫描 " + scanned + " 个文件）：" + "\n" + found.joinToString("\n"),
                 )
             }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (error: Exception) {
             ToolResult.failure("搜索失败：" + (error.message ?: error.javaClass.simpleName))
         }
@@ -611,12 +668,14 @@ class FileTools(private val context: Context) : ToolGroup() {
         maxDepth: Int,
         stop: () -> Boolean,
         descend: (File) -> Boolean = { true },
-        action: (File) -> Unit,
+        action: suspend (File) -> Unit,
     ) {
-        if (depth > maxDepth || stop() || !currentCoroutineContext().isActive) return
+        currentCoroutineContext().ensureActive()
+        if (depth > maxDepth || stop()) return
         val children = root.listFiles() ?: return
         for (child in children) {
-            if (stop() || !currentCoroutineContext().isActive) return
+            currentCoroutineContext().ensureActive()
+            if (stop()) return
             action(child)
             if (child.isDirectory && descend(child)) walk(child, depth + 1, maxDepth, stop, descend, action)
         }
