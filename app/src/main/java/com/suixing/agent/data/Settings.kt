@@ -1,5 +1,6 @@
 package com.suixing.agent.data
 
+import com.suixing.agent.core.decodeCoreObject
 import android.content.Context
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
@@ -684,7 +685,7 @@ class SettingsRepository(private val context: Context) {
     suspend fun cleanupEmptyProviders() = persist {
         context.settingsDataStore.edit { prefs ->
             val raw = prefs[key] ?: return@edit
-            val parsed = runCatching { json.decodeFromString<AppSettings>(raw) }.getOrNull() ?: return@edit
+            val parsed = runCatching { json.decodeCoreObject(AppSettings.serializer(), raw) }.getOrNull() ?: return@edit
             val clean = parsed.withoutEmptyProviders()
             if (clean !== parsed) {
                 prefs[key] = json.encodeToString(AppSettings.serializer(), clean.encryptedForStorage())
@@ -715,7 +716,7 @@ class SettingsRepository(private val context: Context) {
         val parsed = if (raw.isNullOrBlank()) {
             AppSettings()
         } else {
-            runCatching { json.decodeFromString<AppSettings>(raw) }.getOrElse { AppSettings() }
+            runCatching { json.decodeCoreObject(AppSettings.serializer(), raw) }.getOrElse { AppSettings() }
         }
         // **这里不解密**（2026-10-21 起）：AndroidKeyStore 每次冷启动要 ~150ms（provider 每次
         // 进程重载），解密放在读路径上会连累**设置的首个 emit** ⇒ 会话列表迟迟不出
@@ -760,7 +761,7 @@ class SettingsRepository(private val context: Context) {
 private val secretMigrationJson = Json { ignoreUnknownKeys = true; coerceInputValues = true }
 
 internal fun hasPlainSecret(raw: String): Boolean {
-    val settings = runCatching { secretMigrationJson.decodeFromString<AppSettings>(raw) }.getOrNull() ?: return false
+    val settings = runCatching { secretMigrationJson.decodeCoreObject(AppSettings.serializer(), raw) }.getOrNull() ?: return false
     return (sequenceOf(settings.apiKey, settings.searchApiKey, settings.asrApiKey) +
         settings.providers.asSequence().map { it.apiKey } + settings.requestHeaders.values.asSequence())
         .any { it.isNotBlank() && !SecretBox.isEncrypted(it) }

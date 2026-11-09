@@ -544,7 +544,23 @@ private class InlineScanner(
 
     fun scan(appendCaret: Boolean = false): AnnotatedString {
         val base = if (baseWeight == null) EMPTY_SPAN else SpanStyle(fontWeight = baseWeight)
-        emit(0, text.length, base, null)
+        // Only consume exact-text runs prepared by the cold-document worker here.
+        // Streaming searchState still updates upstream before a later append resumes it.
+        val prepared = if (parseMarkup) NativeMarkdown.inlineRuns(text) else null
+        if (prepared == null) {
+            emit(0, text.length, base, null)
+        } else {
+            for (run in prepared) {
+                var style = base
+                if (run.style and 1 != 0) style = style.merge(BOLD_SPAN)
+                if (run.style and 2 != 0) style = style.merge(ITALIC_SPAN)
+                if (run.style and 4 != 0) style = style.merge(STRIKE_SPAN)
+                if (run.style and 16 != 0) style = style.merge(SpanStyle(textDecoration = TextDecoration.Underline))
+                if (run.style and 32 != 0) style = style.merge(pathStyle)
+                if (run.style and 8 != 0) style = style.merge(codeStyle)
+                addRun(run.text, style, run.link)
+            }
+        }
         if (appendCaret) out.append(CARET_PLACEHOLDER)
         return out.toAnnotatedString()
     }

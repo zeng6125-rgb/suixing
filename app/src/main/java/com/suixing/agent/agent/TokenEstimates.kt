@@ -1,6 +1,8 @@
 package com.suixing.agent.agent
 
 import com.suixing.agent.data.StoredMessage
+import java.lang.ref.WeakReference
+import com.suixing.agent.core.NativeCore
 
 /**
  * 逐条 token 估算的有界缓存（issue #71 A3）。
@@ -9,17 +11,17 @@ import com.suixing.agent.data.StoredMessage
  * **整个历史**倒着估一遍 —— 一条 3 万字符的回答在会话里会被重复估算几十次，
  * 复杂度是 O(轮数 × 历史总量)。消息是不可变的，估算值只取决于这条消息本身。
  *
- * 键是 `id + 长度`：id 全局唯一且不复用，长度再兜一层"同 id 内容被换掉"的情况
- * （编辑消息会换长度；同长度不同内容在极端情况下会命中旧值 —— 那只影响裁剪的
- * 估算值，不影响发出去的内容，比每次重算整个历史更划算）。
+ * 按 id 查找，再核对所有估算输入；同长度编辑、参数或图片变化都不能复用旧值。
+ * 弱引用避免缓存延长大消息正文的生命周期，失去引用时安全重算。
  */
 internal object TokenEstimates {
 
     /** 上限：估算可重算，内存不涨。超出按最久未用淘汰。 */
     const val MAX_ENTRIES = 512
 
-    private val entries = object : LinkedHashMap<String, Int>(64, 0.75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Int>?): Boolean =
+    private data class Estimate(val message: WeakReference<StoredMessage>, val imageCount: Int, val tokens: Int)
+    private val entries = object : LinkedHashMap<String, Estimate>(64, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Estimate>?): Boolean =
             size > MAX_ENTRIES
     }
 
@@ -32,10 +34,14 @@ internal object TokenEstimates {
         message: StoredMessage,
         estimator: (StoredMessage) -> Int = ::estimateTokens,
     ): Int {
-        val key = message.id + ':' + message.text.length + ':' + message.toolOutput.orEmpty().length
-        synchronized(entries) { entries[key] }?.let { return it }
+        val imageCount = message.imageCount
+        synchronized(entries) { entries[message.id] }?.let { cached ->
+            val old = cached.message.get()
+            if (old != null && old.text == message.text && old.toolOutput == message.toolOutput &&
+                old.toolArgs == message.toolArgs && cached.imageCount == imageCount) return cached.tokens
+        }
         val tokens = estimator(message)
-        synchronized(entries) { entries[key] = tokens }
+        synchronized(entries) { entries[message.id] = Estimate(WeakReference(message), imageCount, tokens) }
         return tokens
     }
 
@@ -113,6 +119,7 @@ internal fun estimateTokens(message: StoredMessage): Int {
  */
 internal fun tokensFor(text: String): Int {
     if (text.isEmpty()) return 0
+    NativeCore.tokens(text)?.let { return it }
     var cjk = 0
     var other = 0
     for (ch in text) {

@@ -600,7 +600,7 @@ internal class AgentRun(
     ) {
         val images = line.imagesBase64.takeIf { settings.imageInput }.orEmpty()
         val note = if (line.imagesBase64.isNotEmpty() && images.isEmpty()) {
-            "（图片已省略：当前未开启「模型支持图片输入」）"
+            "\n（图片已省略：当前未开启「模型支持图片输入」）"
         } else ""
         val from = wire.size
         wire += ChatMessage.user("（用户在任务进行中说：${line.text}）$note", images)

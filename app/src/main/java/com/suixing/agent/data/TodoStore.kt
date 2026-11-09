@@ -1,5 +1,6 @@
 package com.suixing.agent.data
 
+import com.suixing.agent.core.decodeCoreValue
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -40,7 +41,7 @@ class TodoStore(private val file: File) {
         if (!file.exists()) {
             emptyList()
         } else {
-            runCatching { json.decodeFromString<List<TodoItem>>(file.readText()) }.getOrElse {
+            runCatching { json.decodeCoreValue<List<TodoItem>>(file.readText()) }.getOrElse {
                 // A corrupt board must not read back as "no tasks at all": keep the bad file next
                 // to the original name, or the next write would bury it for good.
                 file.renameTo(File(file.parentFile, "todos.corrupt.json"))

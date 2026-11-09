@@ -8,9 +8,15 @@ import okhttp3.Response
 import java.io.IOException
 
 /** Keeps cancellation attached until the response body has finished being consumed. */
-internal suspend fun <T> Call.readCancellable(read: (Response) -> T): T =
+internal suspend fun <T> Call.readCancellable(
+    onCancellation: () -> Unit = {},
+    read: (Response) -> T,
+): T =
     suspendCancellableCoroutine { continuation ->
-        continuation.invokeOnCancellation { cancel() }
+        continuation.invokeOnCancellation {
+            cancel()
+            onCancellation()
+        }
         enqueue(object : Callback {
             override fun onFailure(call: Call, error: IOException) {
                 // 取消之后回调仍可能被投递：此时 continuation 已结束，再 resumeWith 会抛

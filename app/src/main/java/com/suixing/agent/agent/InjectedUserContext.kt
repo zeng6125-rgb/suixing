@@ -1,6 +1,7 @@
 package com.suixing.agent.agent
 
 import com.suixing.agent.data.MemoryEntry
+import com.suixing.agent.data.memoryPromptBody
 
 /** The exact optional suffix used by systemPrompt; disabled sections contribute no bytes. */
 internal fun injectedUserContext(
@@ -16,8 +17,6 @@ internal fun injectedUserContext(
     }
     if (injectMemory && memory.isNotEmpty()) {
         append("\n\n## 你记得的事\n")
-        append(memory.entries.sortedBy { it.key }.take(40).joinToString("\n") { (key, entry) ->
-            "- $key: ${entry.value.take(400)}"
-        })
+        append(memoryPromptBody(memory))
     }
 }

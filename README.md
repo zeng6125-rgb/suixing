@@ -6,7 +6,7 @@
 
 > **会话存储**：`chats/store/<id>.meta`（元数据 + 累计统计）+ `<id>.<gen>.jsonl`（每行一条消息的追加日志）。保存一轮只追加尾部，不再全量重写——32 MB 的会话每轮保存从「序列化 + 写 32 MB + rename」降到「追加几十字节到几 KB」。重排类操作（编辑重答、分支切换）会换代重写，旧代留一代作回退。**装回 0.8.316 及更早版本看不到这些会话**；更早的 `<id>.json` 单文件格式已不再支持读取（迁移代码随兼容层一起删了），磁盘上残留的这类文件不会出现在列表里。
 
-- Kotlin + Jetpack Compose（Material 3，Compose BOM 2026.09.00 / Kotlin 2.4.21 / AGP 9.4.1 / Gradle 9.8.2），交互式终端通过 NDK/JNI 连接 PTY，区分大小写的普通文件内容搜索使用独立 Rust 内核；随包组件与固定来源见[第三方声明](THIRD_PARTY_NOTICES.md)。
+- Kotlin + Jetpack Compose（Material 3，Compose BOM 2026.09.00 / Kotlin 2.4.21 / AGP 9.4.1 / Gradle 9.8.2），通过 NDK/JNI 接入 Rust 文件搜索与编辑、用量只读投影、共享 JSON 解码与文档编码、上下文预算与组装、记忆提示词、Skill 文档处理、列表顺序、历史 Markdown 冷解析与 PTY 内核；随包组件与固定来源见[第三方声明](THIRD_PARTY_NOTICES.md)。
 - 目标平台：Android 8.0 (API 26) 及以上；`compileSdk` / `targetSdk` = 37
 - 图片走 Coil 3（内存 + 磁盘双缓存、自动降采样），不再手写 `BitmapFactory` 与 LRU
 - 不做云同步、不做遥测，API Key 只存在本机应用私有目录
@@ -14,7 +14,7 @@
 - 支持技能（Skill）：把写好的操作手册放进手机，模型需要时自己读
 - 支持插件（Plugin）：安装一个 zip 就能带来新工具、新的上下文注入与新的执行闸门
 - 目标与斜杠指令：输入 `/goal 一句话目标`，助手会在当前会话持续推进并记录进度，直到确认完成、遇到卡点或被停止。`/goal` 查看，`/goal resume` 继续，`/goal clear` 清除。输入 `/` 可找其他工具，直接调用仍受审批档与助手禁用表约束。
-- 当前源码版本：**0.8.703**（`versionCode` 724）
+- 当前源码版本：**0.8.705**（`versionCode` 726）
 
 ## 界面与设计
 
@@ -36,7 +36,7 @@
 
 - **多会话**：左侧抽屉顶部是会话列表，支持改名、置顶、归档、导出、删除；默认只渲染最近 12 轮，顶部可以「加载更早的 12 轮」。
 - **流式输出**：正文、思考、工具调用分三路流式回来，思考段与工具段会把正文段切开，合并回一条回复里。
-- **Markdown 渲染**（自研实现，不依赖第三方库）：标题、有序 / 无序列表（支持嵌套）、表格、引用、代码块（含语言标签与复制按钮）、分割线、行内的加粗 / 斜体 / 删除线 / 行内代码、可点链接与自动识别的裸链接、文件路径可点。
+- **Markdown 渲染**（自研方言，Kotlin / Compose 渲染与 Rust 历史冷解析）：标题、有序 / 无序列表（支持嵌套）、表格、引用、代码块（含语言标签与复制按钮）、分割线、行内的加粗 / 斜体 / 删除线 / 行内代码、可点链接与自动识别的裸链接、文件路径可点。流式尾部仍使用增量解析与缓存。
 - **助手正文图片**：Markdown 图片支持 HTTP(S) 直链和内联 Base64。点开后可双指缩放、拖动，点一下或返回关闭。
 - **前台服务保活**：`AgentForegroundService` 在任务运行期间挂一条常驻通知（通知渠道「任务执行」），切后台不中断。
 - **思考过程折叠块**：推理模型（DeepSeek-R1 系、国产网关的 `reasoning_content`）的思考实时流出来，包在「思考过程」折叠条里。
@@ -131,7 +131,7 @@ ARM64 设备可在终端页按需安装实验性的 Alpine 3.22.2 或 Debian 12 
 - **地址写 `.../v1` 就行**，不用补 `/chat/completions`；补了也认。
 - **局域网自签名证书**：如果你的反代是 `https://192.168.x.x:端口/v1` 这类自签证书，安卓会以 `Trust anchor for certification path not found` 拒绝。打开「设置 → 模型与生成 → 允许自签名证书」即可放行（只对模型请求生效，且只跳过证书校验，不影响别的）。更省事的办法是把地址写成 `http://`（应用已允许明文流量），或者在手机上把该证书装进系统信任库。
 - **报错说人话**：401 会说「API Key 不对或已失效」，404 会提醒地址要以 `/v1` 结尾，连不上会说「检查地址和网络」，证书问题会直接告诉你打开上面那个开关；被截断的流会明确说「这一轮超过 10 分钟被中断」。
-- **失败自动重试**（默认开）：只对连接重置、超时、5xx 与 429 重试，429 优先用服务端的 `Retry-After`；已经开始输出正文就绝不重试（那会重复计费）；用户点停止立刻结束等待。
+- **失败自动重试**（默认开）：只对连接重置、超时、5xx 与 429 重试，429 优先用服务端的 `Retry-After`。中途断流仍在重试次数内时，会撤回本轮已显示的部分内容后重新请求；次数用尽则保留部分内容并标记中断。用户点停止立刻结束等待。
 - **上下文自动压缩**：上下文接近窗口上限时（阈值 20%–95%，默认 80%）把较早的对话压成摘要，摘要只进请求不落盘。也可以在输入框的「+」里手动「压缩上下文」。
 
 **生成参数**（设置页「模型与生成」）——这几个都是加法：留默认就跟随接口自己的行为。
@@ -237,15 +237,34 @@ description: 打开某 App 完成签到，用户说「签到」时使用
 
 需要 **JDK 17** 与 Android SDK（`platforms;android-37`，以及与它配套的 build-tools 37.x）。SDK 路径写在 `local.properties` 的 `sdk.dir`（该文件不入库）。
 
-原生构建固定 **NDK 28.2.13676358**、**CMake 3.22.1** 和 **Rust 1.98.0**。先独立准备工具链；CMake 会检查目标是否已安装，Cargo 在 Android 构建中使用 `--release --locked --offline`，不会自动下载 Rust 或依赖：
+原生构建固定 **NDK 28.2.13676358**、**CMake 3.22.1** 和 **Rust 1.98.0**。先独立准备工具链与锁定依赖缓存；CMake 会检查目标是否已安装，Cargo 在 Android 构建中使用 `--release --locked --offline`，不会自动下载 Rust 或依赖：
 
 ```bash
 sdkmanager "ndk;28.2.13676358" "cmake;3.22.1"
 rustup toolchain install 1.98.0 --profile minimal
 rustup target add --toolchain 1.98.0 aarch64-linux-android armv7-linux-androideabi x86_64-linux-android i686-linux-android
+cargo +1.98.0 fetch --locked --manifest-path app/src/main/rust/suixing-search/Cargo.toml
 ```
 
-搜索 crate 在 `app/src/main/rust/suixing-search`，没有第三方 Rust 依赖。CMake 为四种 ABI 生成 `libsuixing_search.so`，Rust 中间产物留在构建目录，原 PTY 库独立保留。`grep_files` 的 `case_sensitive=true`、`regex=false` 请求可走 Rust；正则、忽略大小写、原生库不可用或不能无损表示的输入保留 Kotlin。目录遍历、权限、参数和输出格式仍由 Kotlin 处理；无效 UTF-8 或读取条件发生变化的候选文件交回原读取器。
+Rust crate 保留目录名 `app/src/main/rust/suixing-search`，承载下列核心模块；第三方依赖的确切版本与校验由 `Cargo.lock` 锁定，许可证见[第三方声明](THIRD_PARTY_NOTICES.md)。CMake 为四种 ABI 构建同一份 Rust 静态归档，再链接到 `libsuixing_search.so` 和 `libsuixing_terminal.so`；C++ 保留 JNI 参数、字节与异常桥接，Rust 中间产物留在构建目录。
+
+| 入口 | Rust 执行范围 | Kotlin / Android 边界与兼容处理 |
+|---|---|---|
+| `grep_files` | 普通文本的批量字面搜索；支持区分大小写，以及查询和文件均为 ASCII 时的忽略大小写 | 正则、Unicode 忽略大小写、无效 UTF-8、读取条件变化与不可无损表示的输入交回 Kotlin；权限、候选遍历和输出格式由 Kotlin 持有 |
+| `find_files` | 深度优先目录遍历、访问数 / 深度 / 命中数 / 时间预算与 ASCII 名称、glob 匹配 | Unicode 和特殊 glob 谓词回调 Kotlin；无法表示的系统文件名或过大响应使用 Kotlin 后备；权限、根路径解析与结果格式保留 |
+| 用量刷新 | 从确定 generation 的只读 FD 读取已提交 JSONL 区间，仅投影角色、时间、模型与 token，并返回消息数和字节水位 | 不兼容 schema / Unicode 或超预算的完整切片使用同 FD 的 Kotlin 解码；日期、缓存、删除前归档、写入、日志提交与恢复继续由 Kotlin 管理 |
+| SSE（OpenAI / Anthropic / Responses） | 增量处理 SSE 行、事件边界、结束标记及 JSON 节点 | 不支持的事件 payload 交回 Kotlin，库不可用时在读流前选择 Kotlin；已发送事件不重放，网络请求、取消与 `StreamTurn` 保留原生命周期 |
+| 历史 Markdown | 批量冷解析 block AST 与行内文本、样式和链接目标扫描 | 已有缓存、解析 owner 和流式尾部增量解析保留；不支持或超预算的文档回 Kotlin；Compose 布局、字体、注解与点击回调继续在 Kotlin |
+| 交互式 PTY | Android PTY 创建、FD 读写与 poll、窗口尺寸、进程组信号、等待退出和关闭 | JNI 转换参数、字节及错误；终端会话、前后台服务、页面与权限保留 Kotlin，加载或系统调用失败按终端错误路径处理 |
+| `read_file` / `edit_file` | 有界文本读取、行裁剪与 UTF-16 revision；精确匹配、非重叠替换及结果大小检查 | 读取保持同一个已打开 FD；Unicode 不兼容读取回同 FD 后备；权限、乐观 revision 检查、原用户文件写入与文件活动记录由 Kotlin 执行 |
+| 共享 JSON 解码 | 对象、数组和原始值的受限原生 JSON 树解析，接入会话、设置、用量、插件和其它存储读取 | 原 Kotlin serializer / Json 配置仍决定字段默认值、枚举、未知字段与类型；不兼容语法、Unicode 或超预算时使用原解析器 |
+| JSON 文档编码 | 整份文档的结构遍历、字符串转义、UTF-8 长度与有界分块输出；HTTP 与 compact JSON 字节存储共用 | Kotlin 构建类型化 JsonElement 与字符串引用池；Base64 通过引用分段使用。网络、IO 异常及原子提交留在 Kotlin；prettyPrint 和 DataStore 字符串保留原格式 |
+| 上下文与退出规则 | Token 字符估算、历史预算裁剪、工具截图预算、重试与运行终态动作选择 | Kotlin 缓存核对完整估算输入，保留消息模型、错误原对象、事件 / 统计 / 状态回调顺序与协程所有权 |
+| 记忆提示词 | UTF-16 键排序、前 40 条选择、每条 400 单位裁剪和提示文本构建 | 不可变快照缓存与磁盘内容摘要由 Kotlin 管理；原子写成功才更新缓存，字符串不经过有损 UTF-8 往返 |
+| 用量聚合 | 增量 day/model/dailyModel 合并、全局 totals/coverage/deletedCoverage、窗口汇总排序、会话连续 run 统计 | 日期、source/generation 与 byte 水位、归档和事务提交留在 Kotlin；保留 known/unreported、负值及 JVM 整数规则 |
+| 上下文组装 | 按批次生成历史重放描述、摘要正文与工具说明 | 保留原消息/图片引用；普通正文按引用复用，仅包装文本生成 UTF-16；完整准备后再追加 wire 与来源 span |
+| Skill 文档与目录 | frontmatter 范围与 name/description、固定单行清洗、整批 catalog 文本 | 文件发现/排序、安装、enabled/origin、路径与执行校验保留；敏感 Regex/Unicode 空白和超预算整操作回 Kotlin |
+| 列表分区与顺序 | 大批次置顶/普通分区、稳定时间顺序和顺序表过滤，返回原 source 索引 | UI 与原对象留 Kotlin；小批次先走原路径，自定义 Set 的会员语义保留；不改变原视觉、重复 ID 与手动顺序规则 |
 
 **仓库现在带 `gradlew` / `gradle/wrapper/`**（0.8.4xx 起补上的），wrapper 固定 **Gradle 9.8.2**——AGP 9.4.1 要求 Gradle 9.x。本地直接 `./gradlew` 即可，不再需要一个已解包的 Gradle 发行版。
 

@@ -26,11 +26,28 @@ internal fun pruneRequestImages(
     // 即使整条 wire 里一张截图都没有，也要为每条消息造一个 IndexedValue 再拼一个列表。
     // 绝大多数请求没有截图，这一步是白付的。
     if (wire.none { it.toolScreenshot && it.imageCount > 0 }) return wire
+    val demote = NativeRequestBudget.select(wire, budgetChars)
+        ?: return pruneRequestImagesKotlin(wire, budgetChars)
+    if (demote.isEmpty()) return wire
+    var selected = 0
+    return wire.mapIndexed { index, message ->
+        if (selected < demote.size && demote[selected] == index) {
+            selected++
+            message.omitImages(IMAGE_OFFLOAD_NOTE)
+        } else message
+    }
+}
+
+/** Missing libraries and metadata budgets retain the same selection rules in Kotlin. */
+private fun pruneRequestImagesKotlin(wire: List<ChatMessage>, budgetChars: Int): List<ChatMessage> {
     val carriers = wire.withIndex().filter { entry ->
         entry.value.toolScreenshot && entry.value.imageCount > 0
     }
     if (carriers.isEmpty()) return wire
-    var total = carriers.sumOf { entry -> entry.value.allImages.sumOf { it.length } }
+    // Both kernels use checked Long sums. The former Int sum could wrap above 2 GiB and falsely
+    // return an over-budget wire unchanged; this is an intentional correction of that edge case.
+    var total = 0L
+    for (entry in carriers) total = checkedImageChars(total, imageChars(entry.value))
     if (total <= budgetChars) return wire
 
     val demote = mutableSetOf<Int>()
@@ -38,12 +55,24 @@ internal fun pruneRequestImages(
     for ((index, message) in carriers) {
         if (total <= budgetChars) break
         demote += index
-        total -= message.allImages.sumOf { it.length }
+        total = Math.subtractExact(total, imageChars(message))
     }
     if (demote.isEmpty()) return wire
     return wire.mapIndexed { index, message ->
         if (index !in demote) message else message.omitImages(IMAGE_OFFLOAD_NOTE)
     }
+}
+
+private fun imageChars(message: ChatMessage): Long {
+    var count = 0L
+    for (image in message.allImages) count = checkedImageChars(count, image.length.toLong())
+    return count
+}
+
+private fun checkedImageChars(current: Long, next: Long): Long = try {
+    Math.addExact(current, next)
+} catch (error: ArithmeticException) {
+    throw IllegalArgumentException("请求截图字符总数超过可处理上限", error)
 }
 
 /** 占位文案：既说清「为什么没了」，也给出能拿回来的办法，不承诺不存在的文件。 */

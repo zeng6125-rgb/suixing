@@ -1,5 +1,6 @@
 package com.suixing.agent.plugins
 
+import com.suixing.agent.core.decodeCoreValue
 import com.suixing.agent.data.SecretBox
 import android.system.Os
 import kotlinx.coroutines.Dispatchers
@@ -63,7 +64,7 @@ class PluginStore(private val baseDir: File) {
             val issues = mutableListOf<PluginIssue>()
             val manifest = File(dir, MANIFEST_FILE)
             val spec = if (manifest.exists()) {
-                runCatching { PluginJson.decodeFromString<PluginSpec>(manifest.readText()) }
+                runCatching { PluginJson.decodeCoreValue<PluginSpec>(manifest.readText()) }
                     .onFailure {
                         issues += PluginIssue(
                             ReasonCode.SCHEMA_INVALID, Severity.ERROR,
@@ -98,7 +99,7 @@ class PluginStore(private val baseDir: File) {
     suspend fun readSpec(id: String): PluginSpec? = withContext(Dispatchers.IO) {
         val manifest = File(pluginDir(id), MANIFEST_FILE)
         if (!manifest.exists()) return@withContext null
-        runCatching { PluginJson.decodeFromString<PluginSpec>(manifest.readText()) }.getOrNull()
+        runCatching { PluginJson.decodeCoreValue<PluginSpec>(manifest.readText()) }.getOrNull()
     }
 
     /**
@@ -275,7 +276,7 @@ class PluginStore(private val baseDir: File) {
         for (dir in baseDir.listFiles { f -> f.isDirectory && !f.name.startsWith(".") }.orEmpty()) {
             val manifest = File(dir, MANIFEST_FILE)
             if (!manifest.exists()) continue
-            runCatching { PluginJson.decodeFromString<PluginSpec>(manifest.readText()) }
+            runCatching { PluginJson.decodeCoreValue<PluginSpec>(manifest.readText()) }
                 .getOrNull()?.tools?.forEach { names += "${dir.name}_${it.name}" }
         }
         return names
@@ -337,7 +338,7 @@ class PluginStore(private val baseDir: File) {
     private fun readState(dir: File): PluginState {
         val file = File(dir, STATE_FILE)
         if (!file.exists()) return PluginState()
-        return runCatching { PluginJson.decodeFromString<PluginState>(file.readText()) }
+        return runCatching { PluginJson.decodeCoreValue<PluginState>(file.readText()) }
             .getOrDefault(PluginState())
     }
 
@@ -348,14 +349,14 @@ class PluginStore(private val baseDir: File) {
     private fun readEnvFile(file: File): Map<String, String> {
         if (!file.exists()) return emptyMap()
         return runCatching {
-            PluginJson.decodeFromString<Map<String, String>>(file.readText())
+            PluginJson.decodeCoreValue<Map<String, String>>(file.readText())
         }.getOrDefault(emptyMap())
     }
 
     private fun readKnown(): KnownPlugins {
         val file = File(baseDir, KNOWN_FILE)
         if (!file.exists()) return KnownPlugins()
-        return runCatching { PluginJson.decodeFromString<KnownPlugins>(file.readText()) }
+        return runCatching { PluginJson.decodeCoreValue<KnownPlugins>(file.readText()) }
             .getOrDefault(KnownPlugins())
     }
 

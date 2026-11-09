@@ -1,5 +1,6 @@
 package com.suixing.agent.data
 
+import com.suixing.agent.core.decodeCoreObject
 import android.content.Context
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -138,37 +139,41 @@ data class UsageSnapshot(
     }
     @kotlinx.serialization.Transient
     private val aggregate: Lazy<UsageAggregate> = lazy {
-        val days = mutableMapOf<String, TokenTally>()
-        val models = mutableMapOf<String, TokenTally>()
-        chats.values.forEach { usage ->
-            usage.days.forEach { (key, tally) -> days[key] = (days[key] ?: TokenTally()) + tally }
-            usage.models.forEach { (key, tally) -> models[key] = (models[key] ?: TokenTally()) + tally }
+        NativeUsageAggregation.aggregate(chats.values) ?: run {
+            val days = mutableMapOf<String, TokenTally>()
+            val models = mutableMapOf<String, TokenTally>()
+            var coverage = UsageBucket()
+            var deletedCoverage = UsageBucket()
+            chats.values.forEach { usage ->
+                usage.days.forEach { (key, tally) -> days[key] = (days[key] ?: TokenTally()) + tally }
+                usage.models.forEach { (key, tally) -> models[key] = (models[key] ?: TokenTally()) + tally }
+                val bucket = usage.usageBucket()
+                coverage += bucket
+                if (usage.deletedAt > 0L) deletedCoverage += bucket
+            }
+            UsageAggregate(days, models, days.values.fold(TokenTally()) { acc, tally -> acc + tally },
+                coverage, deletedCoverage)
         }
-        UsageAggregate(days, models, days.values.fold(TokenTally()) { acc, tally -> acc + tally })
     }
 
     val days: Map<String, TokenTally> get() = aggregate.value.days
     val models: Map<String, TokenTally> get() = aggregate.value.models
     val totals: TokenTally get() = aggregate.value.totals
 
-    val coverage: UsageBucket by lazy {
-        chats.values.fold(UsageBucket()) { sum, chat -> sum + chat.usageBucket() }
-    }
-    val deletedCoverage: UsageBucket by lazy {
-        chats.values.fold(UsageBucket()) { sum, chat ->
-            if (chat.deletedAt > 0L) sum + chat.usageBucket() else sum
-        }
-    }
+    val coverage: UsageBucket get() = aggregate.value.coverage
+    val deletedCoverage: UsageBucket get() = aggregate.value.deletedCoverage
 }
 
 private fun ChatUsage.usageBucket(): UsageBucket = dailyModels.values.fold(UsageBucket()) { sum, models ->
     models.values.fold(sum) { acc, bucket -> acc + bucket }
 }
 
-private data class UsageAggregate(
+internal data class UsageAggregate(
     val days: Map<String, TokenTally>,
     val models: Map<String, TokenTally>,
     val totals: TokenTally,
+    val coverage: UsageBucket,
+    val deletedCoverage: UsageBucket,
 )
 
 /**
@@ -273,7 +278,7 @@ class UsageStore(private val context: Context) {
     fun byModel(): List<ModelUsage> = byModelOf(snapshot)
 
     /** 每个会话**尚未计数**的那部分（#30）：只从上次数到的字节偏移续读、只解析新增。 */
-    private fun loadSlices(snapshot: UsageSnapshot, metaFiles: Array<File>, issues: MutableList<String>): List<UsageSlice> {
+    private suspend fun loadSlices(snapshot: UsageSnapshot, metaFiles: Array<File>, issues: MutableList<String>): List<UsageSlice> {
         val out = ArrayList<UsageSlice>()
         // 旧格式 `<id>.json` 已随 #40 删除（loadConversations 全量解析路径是死代码，一并删了），
         // 这里只扫 store 的 meta；增量续扫见下面的 slicedFrom。
@@ -288,19 +293,20 @@ class UsageStore(private val context: Context) {
                     val resumable = previous != null &&
                         previous.scannedGen == meta.gen &&
                         previous.scannedBytes > 0 && previous.scannedBytes <= meta.logBytes && previous.scanned <= meta.messageCount
-                    val sliced = if (resumable) {
-                        store.slicedFrom(meta, previous.scannedBytes)
-                    } else {
-                        store.allSliced(meta)
+                    val offset = if (resumable) previous.scannedBytes else 0L
+                    val base = if (resumable) previous.scanned else 0
+                    store.openRead(meta).use { read ->
+                        val projection = read.usageProjection(offset)
+                        if (projection != null) {
+                            out += UsageSlice(id, emptyList(), base, null, meta.gen, projection = projection)
+                        } else {
+                            // Unknown schema/Unicode candidates keep the old complete decoder.
+                            // Reuse the pinned descriptor so a rewrite cannot change the source.
+                            val sliced = read.slicedFrom(offset)
+                            out += UsageSlice(id, sliced.map { it.message }, base,
+                                sliced.map { it.endOffset }, meta.gen)
+                        }
                     }
-                    out += UsageSlice(
-                        id = id,
-                        // 一趟同时取两个字段（原来在同一个 sliced 上 map 两遍、建两个等长 list）。
-                        messages = sliced.map { it.message },
-                        baseIndex = if (resumable) previous.scanned else 0,
-                        endOffsets = sliced.map { it.endOffset },
-                        gen = meta.gen,
-                    )
                 }.onFailure {
                     if (it is CancellationException) throw it
                     issues += "有会话未能刷新，已保留此前统计。"
@@ -312,7 +318,7 @@ class UsageStore(private val context: Context) {
     private fun readCache(): UsageSnapshot {
         snapshot.let { if (it != UsageSnapshot()) return it }
         if (!cacheFile.isFile) return UsageSnapshot()
-        return runCatching { json.decodeFromString<UsageSnapshot>(cacheFile.readText()) }
+        return runCatching { json.decodeCoreObject(UsageSnapshot.serializer(), cacheFile.readText()) }
             // 版本不匹配 ⇒ 当作没有缓存（下一次 refresh 按全量重建）。见 SCHEMA_VERSION。
             .map { if (it.schemaVersion == UsageSnapshot.SCHEMA_VERSION) it else UsageSnapshot() }
             .getOrDefault(UsageSnapshot())
@@ -366,7 +372,19 @@ internal data class UsageSlice(
     val endOffsets: List<Long>?,
     val gen: Int,
     val sourceStamp: String = "",
-)
+    val projection: UsageProjection? = null,
+) {
+    val messageCount: Int get() = projection?.messageCount ?: messages.size
+    val endOffset: Long? get() = projection?.endOffset ?: endOffsets?.lastOrNull()
+
+    /** Child/live records still use their in-memory messages without a native round trip. */
+    fun assistantUsage(startIndex: Int): Sequence<UsageProjectedMessage> =
+        projection?.assistants?.asSequence()?.filter { it.index >= startIndex }
+            ?: messages.asSequence().withIndex().drop(startIndex)
+                .filter { it.value.role == Roles.ASSISTANT }
+                .map { (index, message) -> UsageProjectedMessage(index, message.timestamp, message.model,
+                    message.promptTokens, message.completionTokens, message.reasoningTokens, message.cachedTokens) }
+}
 
 internal fun accumulate(
     snapshot: UsageSnapshot,
@@ -407,19 +425,30 @@ internal fun accumulateSlices(
         // Rewrites replace a conversation's contribution. Keeping its old count watermark
         // silently retained edited/deleted tokens and skipped newly priced messages.
         val rebuild = slice.baseIndex == 0 && (slice.gen != cached.scannedGen ||
-            slice.gen < 0 || cached.scanned > slice.messages.size)
+            slice.gen < 0 || cached.scanned > slice.messageCount)
         val previous = if (rebuild) ChatUsage() else cached
-        val start = previous.scanned.coerceIn(slice.baseIndex, slice.baseIndex + slice.messages.size)
+        val start = previous.scanned.coerceIn(slice.baseIndex, slice.baseIndex + slice.messageCount)
+        // The native fold is complete before Kotlin advances any source/cache watermark.
+        val native = NativeUsageAggregation.merge(previous,
+            slice.assistantUsage(start - slice.baseIndex), zone)
+        if (native != null) {
+            chats[slice.id] = ChatUsage(
+                days = native.days, models = native.models, dailyModels = native.dailyModels,
+                scanned = slice.baseIndex + slice.messageCount, scannedUpTo = native.newest,
+                scannedBytes = slice.endOffset ?: previous.scannedBytes,
+                scannedGen = slice.gen, sourceStamp = slice.sourceStamp,
+            )
+            continue
+        }
         val days = previous.days.toMutableMap()
         val models = previous.models.toMutableMap()
         val dailyModels = previous.dailyModels.toMutableMap()
         var newest = previous.scannedUpTo
-        for (message in slice.messages.drop(start - slice.baseIndex)) {
-            if (message.role != Roles.ASSISTANT) continue
+        for (message in slice.assistantUsage(start - slice.baseIndex)) {
             val date = dayKey(message.timestamp, zone)
             val model = message.model.ifBlank { UNKNOWN_MODEL_LABEL }
             val known = message.usageKnown
-            val bucket = UsageBucket(if (known) TokenTally() + message else TokenTally(),
+            val bucket = UsageBucket(if (known) message.tokens() else TokenTally(),
                 reported = if (known) 1 else 0, unreported = if (known) 0 else 1)
             val byModel = dailyModels[date].orEmpty().toMutableMap()
             byModel[model] = (byModel[model] ?: UsageBucket()) + bucket
@@ -434,8 +463,8 @@ internal fun accumulateSlices(
         // Attaching usage later rewrites ChatStore's generation, which triggers a full rebuild.
         chats[slice.id] = ChatUsage(
             days = days, models = models, dailyModels = dailyModels,
-            scanned = slice.baseIndex + slice.messages.size, scannedUpTo = newest,
-            scannedBytes = slice.endOffsets?.lastOrNull() ?: previous.scannedBytes,
+            scanned = slice.baseIndex + slice.messageCount, scannedUpTo = newest,
+            scannedBytes = slice.endOffset ?: previous.scannedBytes,
             scannedGen = slice.gen, sourceStamp = slice.sourceStamp,
         )
     }
@@ -464,6 +493,7 @@ data class UsageWindow(val days: List<DayUsage>, val models: List<ModelUsage>, v
 fun usageWindow(snapshot: UsageSnapshot, count: Int, end: LocalDate = LocalDate.now()): UsageWindow {
     require(count in 1..366)
     val dates = (count - 1 downTo 0).map { end.minusDays(it.toLong()).toString() }
+    NativeUsageAggregation.window(snapshot.chats.values, dates)?.let { return it }
     val dateSet = dates.toHashSet()
     val daily = mutableMapOf<String, UsageBucket>()
     val models = mutableMapOf<String, UsageBucket>()

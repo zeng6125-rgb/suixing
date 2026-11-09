@@ -1,5 +1,6 @@
 package com.suixing.agent.data
 
+import com.suixing.agent.core.parseCoreValue
 import java.io.IOException
 import java.net.URI
 import java.net.URLEncoder
@@ -48,7 +49,7 @@ internal fun releaseRelation(current: String, published: String): ReleaseRelatio
 }
 
 internal fun parseReleaseInfo(raw: String): ReleaseInfo {
-    val fields = Json.parseToJsonElement(raw).jsonObject
+    val fields = Json.parseCoreValue(raw).jsonObject
     require(fields["draft"]?.jsonPrimitive?.booleanOrNull != true &&
         fields["prerelease"]?.jsonPrimitive?.booleanOrNull != true) { "没有可用的正式版本" }
     val version = fields["tag_name"]?.jsonPrimitive?.contentOrNull.orEmpty()

@@ -1,5 +1,6 @@
 package com.suixing.agent.ui.drawer
 
+import com.suixing.agent.core.decodeCoreValue
 import android.content.Context
 import androidx.compose.runtime.Immutable
 import com.suixing.agent.data.Conversation
@@ -31,7 +32,7 @@ internal data class DrawerOrder(
     val normal: List<String> = emptyList(),
 ) {
     /** 去掉已经不存在的会话 id。 */
-    fun prunedTo(known: Set<String>): DrawerOrder = DrawerOrder(
+    fun prunedTo(known: Set<String>): DrawerOrder = NativeDrawerOrder.prune(this, known) ?: DrawerOrder(
         pinned = pinned.filter { it in known },
         normal = normal.filter { it in known },
     )
@@ -56,6 +57,7 @@ internal fun drawerSections(
     conversations: List<Conversation>,
     order: DrawerOrder,
 ): DrawerSections {
+    NativeDrawerOrder.sections(conversations, order)?.let { return it }
     val pinnedIds = order.pinned.toHashSet()
     val normalIds = order.normal.toHashSet()
     val byId = HashMap<String, Conversation>(conversations.size)
@@ -134,7 +136,7 @@ internal class DrawerOrderStore(context: Context) {
         return try {
             // **不用 org.json**：它在 JVM 单测里是 Android 桩（方法一律 not mocked），
             // kotlinx.serialization keeps the actual file format testable on the JVM.
-            val dto = json.decodeFromString(DrawerOrderDto.serializer(), source.readText())
+            val dto = json.decodeCoreValue(DrawerOrderDto.serializer(), source.readText())
             DrawerOrder(pinned = dto.pinned, normal = dto.normal)
         } catch (cancelled: CancellationException) {
             throw cancelled

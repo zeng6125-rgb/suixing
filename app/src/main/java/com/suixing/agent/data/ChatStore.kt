@@ -1,5 +1,7 @@
 package com.suixing.agent.data
 
+import com.suixing.agent.core.decodeCoreObject
+import com.suixing.agent.core.encodeCoreBytes
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import java.io.File
@@ -70,6 +72,7 @@ internal data class ChatTotals(
  * `plus` 做不到，只能在这种有序折叠里顺路算。
  */
 internal fun foldTotals(messages: List<StoredMessage>, initial: ChatTotals = ChatTotals.EMPTY): ChatTotals {
+    NativeUsageAggregation.foldTotals(messages, initial)?.let { return it }
     var acc = initial
     var runId = initial.trailingRunId.orEmpty()
     var runPrompt = initial.trailingRunPromptTokens
@@ -252,7 +255,7 @@ internal class ChatStore(private val root: File) {
             committedMetas[id] = CommittedMeta(it, key)
             return it
         }
-        val parsed = chatJson.decodeFromString(ConversationMeta.serializer(), file.readText())
+        val parsed = chatJson.decodeCoreObject(ConversationMeta.serializer(), file.readText())
         synchronized(metaCache) { metaCache[key] = parsed }
         committedMetas[id] = CommittedMeta(parsed, key)
         return parsed
@@ -272,7 +275,7 @@ internal class ChatStore(private val root: File) {
         }
         writeAtomically(
             metaFile(meta.id),
-            chatJson.encodeToString(ConversationMeta.serializer(), meta).toByteArray(Charsets.UTF_8),
+            chatJson.encodeCoreBytes(ConversationMeta.serializer(), meta),
         )
         val file = metaFile(meta.id)
         committedMetas[meta.id] = CommittedMeta(meta, MetaKey(file.absolutePath, file.length(), file.lastModified()))
@@ -524,14 +527,7 @@ internal class ChatStore(private val root: File) {
     fun slicedFrom(meta: ConversationMeta, startOffset: Long): List<SlicedMessage> {
         val log = logFile(meta)
         if (!log.isFile) throw ConversationLogDamagedException("chat ${meta.id}: no log at ${log.name}")
-        val from = startOffset.coerceIn(0, meta.logBytes)
-        val entries = readEntries(log, from, meta.logBytes)
-        return entries.mapIndexed { index, entry ->
-            // The next line's start is where a later scan continues; the last message ends
-            // at the end of the log.
-            val end = entries.getOrNull(index + 1)?.offset ?: meta.logBytes
-            SlicedMessage(entry.message, end)
-        }
+        return openRead(meta).use { it.slicedFrom(startOffset) }
     }
 
     /** Every committed message from the line at [startOffset] to the end. */
@@ -569,6 +565,18 @@ internal class ChatStore(private val root: File) {
         fun tail(turns: Int): MessageWindow = window(meta.logBytes, turns)
         fun window(endOffset: Long, turns: Int): MessageWindow =
             windowFrom(file, name, endOffset.coerceIn(0, meta.logBytes), turns)
+        /** Both native projection and compatibility fallback read this exact open generation. */
+        internal suspend fun usageProjection(startOffset: Long): UsageProjection? =
+            NativeUsageProjection.project(file.fd, startOffset.coerceIn(0, meta.logBytes), meta.logBytes)
+
+        fun slicedFrom(startOffset: Long): List<SlicedMessage> {
+            val entries = readEntries(file, name, startOffset.coerceIn(0, meta.logBytes), meta.logBytes)
+            return entries.mapIndexed { index, entry ->
+                // Blank lines are excluded; the watermark is the next nonempty line's start.
+                val end = entries.getOrNull(index + 1)?.offset ?: meta.logBytes
+                SlicedMessage(entry.message, end)
+            }
+        }
         override fun close() = file.close()
     }
 
@@ -790,7 +798,7 @@ internal class ChatStore(private val root: File) {
         val out = java.io.ByteArrayOutputStream(64 * 1024)
         val newline = 10
         for (message in messages) {
-            out.write(chatJson.encodeToString(StoredMessage.serializer(), message).toByteArray(Charsets.UTF_8))
+            out.write(chatJson.encodeCoreBytes(StoredMessage.serializer(), message))
             out.write(newline)
         }
         return out.toByteArray()
@@ -806,7 +814,7 @@ internal class ChatStore(private val root: File) {
     private fun appendEncoded(raf: RandomAccessFile, messages: List<StoredMessage>): Long {
         var total = 0L
         for (message in messages) {
-            val bytes = chatJson.encodeToString(StoredMessage.serializer(), message).toByteArray(Charsets.UTF_8)
+            val bytes = chatJson.encodeCoreBytes(StoredMessage.serializer(), message)
             raf.write(bytes)
             raf.write(10)
             total += bytes.size + 1L
@@ -860,7 +868,7 @@ internal class ChatStore(private val root: File) {
                 if (index > start) {
                     val line = String(bytes, start, index - start, Charsets.UTF_8)
                     val message = runCatching {
-                        chatJson.decodeFromString(StoredMessage.serializer(), line)
+                        chatJson.decodeCoreObject(StoredMessage.serializer(), line)
                     }.getOrElse { cause ->
                         throw ConversationLogDamagedException(
                             "chat $name: line ${index - start} bytes at offset " +

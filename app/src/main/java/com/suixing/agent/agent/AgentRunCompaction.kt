@@ -4,6 +4,8 @@ import com.suixing.agent.data.AppSettings
 import com.suixing.agent.data.ContextCheckpoint
 import com.suixing.agent.llm.ChatMessage
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import java.io.IOException
@@ -207,7 +209,10 @@ internal suspend fun AgentRun.compressContext(
 
 /** One call to the same endpoint, asking only for prose: no tools, no streaming UI. */
 internal suspend fun AgentRun.summarize(older: List<ChatMessage>, settings: AppSettings): SummaryAttempt {
-    val transcript = withContext(Dispatchers.Default) { older.joinToString("\n") { renderForSummary(it) } }
+    val transcript = withContext(Dispatchers.Default) {
+        val context = currentCoroutineContext()
+        renderSummaryBatch(older) { context.ensureActive() }
+    }
     val turn = llm.complete(
         settings = settings,
         messages = listOf(

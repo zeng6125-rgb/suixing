@@ -236,8 +236,8 @@ internal class LinuxInstaller(private val context: Context, private val scope: C
             }
         } finally {
             withContext(NonCancellable) {
-                runCatching { TerminalNative.nativeSignalGroup(pid, SIGKILL) }
-                val exit = runCatching { TerminalNative.nativeWait(pid) }.getOrDefault(-1)
+                runCatching { TerminalNative.nativeSignalOwned(fd, pid, SIGKILL) }
+                val exit = runCatching { TerminalNative.nativeWaitOwned(fd, pid, -1) }.getOrDefault(-1)
                 TerminalNative.nativeClose(fd)
                 check(!eof || exit == 0) { "Linux 包管理器启动失败（退出码 $exit）：" + output.toString().takeLast(1500) }
             }

@@ -1,5 +1,7 @@
 package com.suixing.agent.data
 
+import com.suixing.agent.core.decodeCoreObject
+import com.suixing.agent.core.encodeCoreBytes
 import com.suixing.agent.core.AtomicFiles
 import java.io.File
 import java.io.IOException
@@ -18,7 +20,7 @@ internal class DeletedUsageStore(private val directory: File) {
         val entries = linkedMapOf<String, ChatUsage>()
         for (file in files) {
             try {
-                val entry = json.decodeFromString(DeletedUsageEntry.serializer(), file.readText())
+                val entry = json.decodeCoreObject(DeletedUsageEntry.serializer(), file.readText())
                 require(entry.id.isNotBlank() && entry.usage.deletedAt > 0L)
                 entries[entry.id] = entry.usage
             } catch (cancelled: CancellationException) {
@@ -36,8 +38,8 @@ internal class DeletedUsageStore(private val directory: File) {
             ?: System.currentTimeMillis().coerceAtLeast(1L))
         val name = MessageDigest.getInstance("SHA-256").digest(id.toByteArray(Charsets.UTF_8))
             .joinToString("") { (it.toInt() and 0xff).toString(16).padStart(2, '0') }
-        AtomicFiles.writeText(File(directory, "$name.json"),
-            json.encodeToString(DeletedUsageEntry.serializer(), DeletedUsageEntry(id, saved, zoneId)))
+        AtomicFiles.writeBytes(File(directory, "$name.json"),
+            json.encodeCoreBytes(DeletedUsageEntry.serializer(), DeletedUsageEntry(id, saved, zoneId)))
         return saved
     }
 }

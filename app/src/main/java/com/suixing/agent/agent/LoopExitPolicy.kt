@@ -34,37 +34,50 @@ internal class LoopExitPolicy(
     private val prepareCallerCancellation: (LoopExit.CallerCancelled) -> Unit,
 ) {
     fun finish(exit: LoopExit) {
-        when (exit) {
-            is LoopExit.Done -> complete(exit.text)
-            LoopExit.GoalStopped, LoopExit.DirectToolRejected -> complete("")
-            is LoopExit.StepLimit -> fail("已达到最大工具轮数（${exit.rounds}），任务未完成。")
-            LoopExit.MissingGoalSummary -> fail("目标运行已停止，但模型没有返回总结正文。")
-            is LoopExit.Cancelled -> if (prepareCancelled(exit)) {
-                onEvent(AgentEvent.Finished(""))
-                publish(RunState.Cancelled(stats()))
-            }
-            is LoopExit.CallerCancelled -> {
-                prepareCallerCancellation(exit)
-                publish(RunState.Cancelled(stats()))
-                throw exit.cause
-            }
-            is LoopExit.Failed -> {
-                val retryNote = if (exit.retries > 0) "（已重试 ${exit.retries} 次）" else ""
-                val message = (exit.error.message ?: exit.error::class.java.simpleName) + retryNote
-                publish(RunState.Failed(message))
-                // Keep the original cause and the existing caller-owned error event path.
-                throw if (exit.retries > 0) LlmException(message, exit.error) else exit.error
-            }
+        val reason = when (exit) {
+            is LoopExit.Done -> NativeLoopPolicy.DONE
+            LoopExit.GoalStopped -> NativeLoopPolicy.GOAL_STOPPED
+            LoopExit.DirectToolRejected -> NativeLoopPolicy.DIRECT_TOOL_REJECTED
+            is LoopExit.StepLimit -> NativeLoopPolicy.STEP_LIMIT
+            LoopExit.MissingGoalSummary -> NativeLoopPolicy.MISSING_GOAL_SUMMARY
+            is LoopExit.Cancelled -> NativeLoopPolicy.CANCELLED
+            is LoopExit.CallerCancelled -> NativeLoopPolicy.CALLER_CANCELLED
+            is LoopExit.Failed -> NativeLoopPolicy.FAILED
         }
-    }
-
-    private fun complete(text: String) {
-        onEvent(AgentEvent.Finished(text))
-        publish(RunState.Done(stats()))
-    }
-
-    private fun fail(message: String) {
-        onEvent(AgentEvent.Failed(message))
-        publish(RunState.Failed(message))
+        val retries = (exit as? LoopExit.Failed)?.retries ?: 0
+        val plan = NativeLoopPolicy.plan(reason, retries)
+        // The ordered slots retain all platform effects and Throwable identity in Kotlin.
+        when (plan.prepare) {
+            NativeLoopPolicy.PREPARE_CANCELLED -> if (!prepareCancelled(exit as LoopExit.Cancelled)) return
+            NativeLoopPolicy.PREPARE_CALLER -> prepareCallerCancellation(exit as LoopExit.CallerCancelled)
+        }
+        val message = when (plan.message) {
+            NativeLoopPolicy.MESSAGE_STEP_LIMIT -> "已达到最大工具轮数（${(exit as LoopExit.StepLimit).rounds}），任务未完成。"
+            NativeLoopPolicy.MESSAGE_MISSING_SUMMARY -> "目标运行已停止，但模型没有返回总结正文。"
+            NativeLoopPolicy.MESSAGE_ERROR -> (exit as LoopExit.Failed).let {
+                it.error.message ?: it.error::class.java.simpleName
+            }
+            NativeLoopPolicy.MESSAGE_ERROR_WITH_RETRIES -> (exit as LoopExit.Failed).let {
+                val retryNote = "（已重试 ${it.retries} 次）"
+                (it.error.message ?: it.error::class.java.simpleName) + retryNote
+            }
+            else -> null
+        }
+        when (plan.event) {
+            NativeLoopPolicy.EVENT_FINISHED_TEXT -> onEvent(AgentEvent.Finished((exit as LoopExit.Done).text))
+            NativeLoopPolicy.EVENT_FINISHED_EMPTY -> onEvent(AgentEvent.Finished(""))
+            NativeLoopPolicy.EVENT_FAILED -> onEvent(AgentEvent.Failed(checkNotNull(message)))
+        }
+        when (plan.state) {
+            NativeLoopPolicy.STATE_DONE -> publish(RunState.Done(stats()))
+            NativeLoopPolicy.STATE_CANCELLED -> publish(RunState.Cancelled(stats()))
+            NativeLoopPolicy.STATE_FAILED -> publish(RunState.Failed(checkNotNull(message)))
+        }
+        when (plan.throwAction) {
+            NativeLoopPolicy.THROW_CALLER -> throw (exit as LoopExit.CallerCancelled).cause
+            // The caller owns the failure event path; preserve the Throwable rather than recreate it.
+            NativeLoopPolicy.THROW_ERROR -> throw (exit as LoopExit.Failed).error
+            NativeLoopPolicy.THROW_WRAPPED_ERROR -> throw LlmException(checkNotNull(message), (exit as LoopExit.Failed).error)
+        }
     }
 }

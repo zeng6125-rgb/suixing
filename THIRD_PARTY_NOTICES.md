@@ -1,6 +1,6 @@
 # 随包分发的第三方组件
 
-本应用（JAgent / suixing）随 APK 分发以下 shell、终端和可选 Linux 运行组件。各组件保留自己的许可证；许可证材料同时随 APK 放在 `assets/licenses/`。Linux rootfs 不随 APK 分发，只在用户选择安装后下载。
+本应用（JAgent / suixing）随 APK 分发以下 Rust 运行库、shell、终端和可选 Linux 运行组件。各组件保留自己的许可证；许可证材料同时随 APK 放在 `assets/licenses/`。Linux rootfs 不随 APK 分发，只在用户选择安装后下载。
 
 ## 随包 shell
 
@@ -58,11 +58,39 @@ GPL 要求分发二进制时提供对应源码的获取途径。上面的上游�
 
 本应用自身的代码以 MIT 许可发布（见 `LICENSE`）；上表中的两个组件仍分别适用其 GPL 许可。
 
-## Rust 标准库与文件搜索
+## Rust 内核与标准库
 
-`libsuixing_search.so` 静态链接固定 Rust 1.98.0 的标准库，用于只读、区分大小写的普通文件内容搜索。搜索 crate 为本项目源码，没有第三方 Cargo 依赖；Rust 标准库默认许可为 `Apache-2.0 OR MIT`，版权归 Rust Project Developers 及各原作者。固定上游源码为 https://github.com/rust-lang/rust/tree/1.98.0/library 。
+本项目的 Rust crate 位于 `app/src/main/rust/suixing-search`，源码依本仓库 MIT 许可发布，承载文件内容搜索、目录查找、文本读取与编辑、已提交 JSONL 用量只读投影、共享 JSON 解码与文档编码、上下文预算与运行规则、用量聚合、历史重放与摘要组装、Skill 文档与列表顺序、记忆提示词、历史 Markdown 冷解析及 Android PTY。CMake 为每种 ABI 构建一个 Rust 静态归档，链接到 `libsuixing_search.so` 与 `libsuixing_terminal.so`；C++ 提供 JNI 参数、字节和异常桥接。
 
-原工具链中的标准库专用 `COPYRIGHT-library.html` 与相邻许可正文已原样保留在 `app/src/main/assets/licenses/rust-1.98.0/`，随 APK 提供作者归属、Unicode 数据及相关第三方声明。该上游清单包含跨平台和构建时条目，并不表示其中每个组件都链接进 Android 搜索库；它也不以构建工具 Cargo 或整套编译器的许可清单代替运行库声明。
+两个 JNI 库使用固定 Rust 1.98.0 的标准库。Rust 标准库默认许可为 `Apache-2.0 OR MIT`，版权归 Rust Project Developers 及各原作者。固定上游源码为 https://github.com/rust-lang/rust/tree/1.98.0/library 。
+
+原工具链中的标准库专用 `COPYRIGHT-library.html` 与相邻 12 份许可正文已原样保留在 `app/src/main/assets/licenses/rust-1.98.0/`，随 APK 提供作者归属、Unicode 数据及相关第三方声明。该上游清单包含跨平台和构建时条目，并不表示其中每个组件都链接进 Android 原生库；它也不以构建工具 Cargo 或整套编译器的许可清单代替运行库声明。
+
+## 锁定的 Rust crate 依赖
+
+`Cargo.toml` 固定直接依赖 `libc = 0.2.189`、`serde = 1.0.229`、`serde_json = 1.0.151`；`serde_json` 启用 `raw_value`、`arbitrary_precision`、`preserve_order`，用于借用 JSON 原始值、保留数字字面量和对象顺序。全部版本、来源和 crate 校验由 `app/src/main/rust/suixing-search/Cargo.lock` 记录。
+
+以下列出该锁文件中的 15 个外部包。每个包的原始许可 / COPYRIGHT / COPYING / NOTICE 材料，从固定版本的 crates.io 缓存源包原样复制到 `app/src/main/assets/licenses/rust-crates/<name>-<version>/`，随 APK 提供；原文件中的作者与版权归属保留。
+
+| crate | 版本 | 上游声明的许可证 | 固定版本源码包 |
+|---|---|---|---|
+| `equivalent` | 1.0.2 | Apache-2.0 OR MIT | https://crates.io/crates/equivalent/1.0.2 |
+| `hashbrown` | 0.17.1 | MIT OR Apache-2.0 | https://crates.io/crates/hashbrown/0.17.1 |
+| `indexmap` | 2.14.0 | Apache-2.0 OR MIT | https://crates.io/crates/indexmap/2.14.0 |
+| `itoa` | 1.0.18 | MIT OR Apache-2.0 | https://crates.io/crates/itoa/1.0.18 |
+| `libc` | 0.2.189 | MIT OR Apache-2.0 | https://crates.io/crates/libc/0.2.189 |
+| `memchr` | 2.8.3 | Unlicense OR MIT | https://crates.io/crates/memchr/2.8.3 |
+| `proc-macro2` | 1.0.107 | MIT OR Apache-2.0 | https://crates.io/crates/proc-macro2/1.0.107 |
+| `quote` | 1.0.47 | MIT OR Apache-2.0 | https://crates.io/crates/quote/1.0.47 |
+| `serde` | 1.0.229 | MIT OR Apache-2.0 | https://crates.io/crates/serde/1.0.229 |
+| `serde_core` | 1.0.229 | MIT OR Apache-2.0 | https://crates.io/crates/serde_core/1.0.229 |
+| `serde_derive` | 1.0.229 | MIT OR Apache-2.0 | https://crates.io/crates/serde_derive/1.0.229 |
+| `serde_json` | 1.0.151 | MIT OR Apache-2.0 | https://crates.io/crates/serde_json/1.0.151 |
+| `syn` | 3.0.3 | MIT OR Apache-2.0 | https://crates.io/crates/syn/3.0.3 |
+| `unicode-ident` | 1.0.24 | (MIT OR Apache-2.0) AND Unicode-3.0 | https://crates.io/crates/unicode-ident/1.0.24 |
+| `zmij` | 1.0.23 | MIT | https://crates.io/crates/zmij/1.0.23 |
+
+该表描述锁定依赖清单，不表示每个包都进入 APK 的运行时机器代码。当前未启用 `serde/derive`；`serde_core` 的 `cfg(any())` 条件依赖仍使 `serde_derive`、`proc-macro2`、`quote`、`syn` 和 `unicode-ident` 留在锁文件中，对应材料也一并保留。`memchr` 同时提供原 `COPYING`、`LICENSE-MIT` 与 `UNLICENSE`；`unicode-ident` 同时保留 `LICENSE-UNICODE`，其 Unicode 条款不由 MIT / Apache 文本替代。
 
 ## 终端仿真与视口
 

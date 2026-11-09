@@ -1,5 +1,6 @@
 package com.suixing.agent.plugins
 
+import com.suixing.agent.core.parseCoreValue
 import com.suixing.agent.capability.Shell
 import com.suixing.agent.core.Core
 import com.suixing.agent.llm.readCancellable
@@ -474,7 +475,7 @@ object PluginRuntime {
         if (path.isNullOrBlank()) {
             return ToolResult.success(prefix + truncate(if (raw.isBlank()) "(无响应体)" else raw, limit))
         }
-        val element = runCatching { Json.parseToJsonElement(raw) }.getOrNull()
+        val element = runCatching { Json.parseCoreValue(raw) }.getOrNull()
         // 「解析成功」不等于「是 JSON」：kotlinx 会把 `<html>boom</html>` 这种裸文本也读成一个
         // 字面量 JsonPrimitive（实测），于是它会落到下面「路径落空」那一支，报成「响应里没有
         // pick=items.0 这条路径」—— 模型读到的是「接口结构变了」，而真相是接口压根没返回 JSON。

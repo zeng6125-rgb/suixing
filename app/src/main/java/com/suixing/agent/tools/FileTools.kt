@@ -199,7 +199,8 @@ class FileTools(private val context: Context) : ToolGroup() {
                         "可以用 run_shell 配合 head/tail 分段读取",
                 )
             }
-            val input = file.inputStream().buffered()
+            val raw = file.inputStream()
+            val input = raw.buffered()
             val window = input.use {
                 it.mark(4096)
                 val prefix = ByteArray(4096)
@@ -208,8 +209,10 @@ class FileTools(private val context: Context) : ToolGroup() {
                     return@withContext ToolResult.success("二进制文件：${file.absolutePath}（${humanSize(file.length())}），无法按文本读取")
                 }
                 it.reset()
-                scanTextWindow(it.reader(Charsets.UTF_8), args.int("offset", 1).coerceAtLeast(1),
-                    args.int("limit", 400).coerceIn(1, 5000))
+                val offset = args.int("offset", 1).coerceAtLeast(1)
+                val limit = args.int("limit", 400).coerceIn(1, 5000)
+                NativeFileRead.scan(raw.fd, offset, limit, MAX_TEXT_BYTES.toInt())
+                    ?: scanTextWindow(it.reader(Charsets.UTF_8), offset, limit)
             }
             val offset = args.int("offset", 1).coerceAtLeast(1)
             if (offset > window.totalLines) {
@@ -218,6 +221,8 @@ class FileTools(private val context: Context) : ToolGroup() {
             val header = "${file.absolutePath}（共 ${window.totalLines} 行，显示 $offset-${offset + window.lines.size - 1}）\n" +
                 "revision=${window.revision}\n"
             ToolResult.success(header + window.lines.joinToString("\n"))
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (error: Exception) {
             ToolResult.failure("读取失败：${error.message ?: error.javaClass.simpleName}")
         }
@@ -290,23 +295,29 @@ class FileTools(private val context: Context) : ToolGroup() {
                         "请重新 read_file 拿到最新内容与 revision 后再改。",
                 )
             }
-            val hits = occurrences(text, old)
-            if (hits.isEmpty()) {
+            val native = NativeFileEdits.apply(text, old, new, replaceAll, MAX_TEXT_BYTES.toInt())
+            val hits = if (native == null) occurrences(text, old) else emptyList()
+            val matchCount = native?.count ?: hits.size
+            if (matchCount == 0) {
                 return@withContext ToolResult.failure(
                     "文件里找不到 old_string：${file.absolutePath}。它必须与文件内容**逐字符一致**" +
                         "（空格、缩进、换行都要一样）；先用 read_file 看一眼原文再改。",
                 )
             }
-            if (hits.size > 1 && !replaceAll) {
-                // 一次扫描算出全部命中行号，避免每个命中各做一次 substring + count（issue #54 B-1）。
-                val lineMap = lineNumbers(text, hits)
-                val lines = hits.joinToString("、") { lineMap[it].toString() }
+            if (matchCount > 1 && !replaceAll) {
+                // 总命中数保留，行号摘要限制为八处，避免生成与文件同量级的拒绝消息。
+                val summary = native?.lines ?: hits.take(8).let { offsets ->
+                    val lineMap = lineNumbers(text, offsets)
+                    offsets.map { lineMap.getValue(it) }
+                }
+                val lines = summary.joinToString("、") + if (matchCount > 8) "…" else ""
                 return@withContext ToolResult.failure(
-                    "old_string 在文件里出现 ${hits.size} 次（第 $lines 行），拒绝盲改：" +
+                    "old_string 在文件里出现 $matchCount 次（第 $lines 行），拒绝盲改：" +
                         "把 old_string 写长一点（带上前后行）让它唯一，或传 replace_all=true 全部替换。",
                 )
             }
-            val changed = if (replaceAll) text.replace(old, new) else {
+            require(native?.tooLarge != true) { "修改后的文本超过 ${humanSize(MAX_TEXT_BYTES)} 上限" }
+            val changed = native?.changed ?: if (replaceAll) text.replace(old, new) else {
                 text.substring(0, hits.first()) + new + text.substring(hits.first() + old.length)
             }
             require(changed.length <= MAX_TEXT_BYTES) { "修改后的文本超过 ${humanSize(MAX_TEXT_BYTES)} 上限" }
@@ -314,7 +325,10 @@ class FileTools(private val context: Context) : ToolGroup() {
             require(changedBytes.size <= MAX_TEXT_BYTES) {
                 "修改后的文本超过 ${humanSize(MAX_TEXT_BYTES)} 上限"
             }
+            currentCoroutineContext().ensureActive()
             FileMutationObservation.noteIndependentMutation(file)
+            // Retain in-place writes: replacing the directory entry changes symlink/hardlink and
+            // executable-mode behavior. Rust owns text computation, not user-file commit policy.
             file.writeBytes(changedBytes)
             val oldLines = old.lines()
             val newLines = new.lines()
@@ -326,12 +340,16 @@ class FileTools(private val context: Context) : ToolGroup() {
                 }
             }.trim()
             val counts = activityLineCounts(text, changed)
+            val firstLine = native?.lines?.first() ?: lineOf(text, hits.first())
+            val revision = native?.revision ?: revisionOf(changed)
             ToolResult(true,
-                "已修改 ${file.absolutePath}（第 ${lineOf(text, hits.first())} 行，替换 ${hits.size} 处）：\n$preview" +
-                    "\nrevision=${revisionOf(changed)}",
+                "已修改 ${file.absolutePath}（第 $firstLine 行，替换 $matchCount 处）：\n$preview" +
+                    "\nrevision=$revision",
                 fileActivities = listOf(FileActivity(file.absolutePath, FileActivityKind.MODIFIED,
                     addedLines = counts?.first, removedLines = counts?.second, sizeBytes = file.length())),
             )
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (error: Exception) {
             ToolResult.failure("修改失败：${error.message ?: error.javaClass.simpleName}")
         }
@@ -460,12 +478,24 @@ class FileTools(private val context: Context) : ToolGroup() {
             val timeBudgetMs = args.int("time_budget_ms", FIND_TIME_BUDGET_MS)
                 .coerceIn(50, 60_000)
             val startedAt = SystemClock.uptimeMillis()
+            val native = NativeFileFind.scan(
+                root, name, pattern, exclude, kind, maxDepth, limit, maxVisited, timeBudgetMs, startedAt,
+            )
             val visited = intArrayOf(0)
             var truncated: String? = null
             val hits = ArrayList<String>()
             val matches = pattern?.let { Glob.pathMatcher(it, root) }
             val descend = Glob.directoryMatcher(pattern, root)
-            walk(
+            if (native != null) {
+                visited[0] = native.visited
+                hits.addAll(native.paths)
+                truncated = when (native.reason) {
+                    1 -> "已达 limit 上限"
+                    2 -> "已扫描 $maxVisited 个节点（max_visited）"
+                    3 -> "已超时 ${timeBudgetMs}ms（time_budget_ms）"
+                    else -> null
+                }
+            } else walk(
                 root,
                 0,
                 maxDepth,
@@ -605,7 +635,7 @@ class FileTools(private val context: Context) : ToolGroup() {
                     searchContext.ensureActive()
                     val suffix = batch.subList(offset, batch.size)
                     val remaining = limit - if (filesOnly) hitFiles.size else hits.size
-                    val result = NativeFileSearch.scan(suffix, query, context, filesOnly, remaining)
+                    val result = NativeFileSearch.scan(suffix, query, context, filesOnly, remaining, caseSensitive)
                     if (result == null) {
                         // Unrepresentable paths or an unavailable library keep the old backend.
                         for (file in suffix) {

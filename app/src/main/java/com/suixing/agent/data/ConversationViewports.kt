@@ -1,5 +1,6 @@
 package com.suixing.agent.data
 
+import com.suixing.agent.core.decodeCoreValue
 import android.content.Context
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
@@ -58,7 +59,7 @@ internal class ConversationViewports(
             val saved = try {
                 preferences.data.first().asMap().mapNotNull { (key, value) ->
                     if (!key.name.startsWith(PREFIX) || value !is String) null
-                    else runCatching { json.decodeFromString<ViewportBookmark>(value) }.getOrNull()
+                    else runCatching { json.decodeCoreValue<ViewportBookmark>(value) }.getOrNull()
                 }
             } catch (failure: IOException) {
                 android.util.Log.w("suixing-viewport", "cannot load reading positions", failure)

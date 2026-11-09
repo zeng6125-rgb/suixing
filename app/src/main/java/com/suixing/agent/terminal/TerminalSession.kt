@@ -108,24 +108,29 @@ internal class TerminalSession(
         }
         writer = scope.launch(Dispatchers.IO) {
             for (request in writes) {
-                synchronized(nativeLock) {
+                val allowed = synchronized(nativeLock) {
                     if (request.ownerJob?.isActive == false) {
                         request.written.cancel()
-                        return@synchronized
+                        return@synchronized false
                     }
                     if (closing.get() || request.caller?.let {
                         !policy.allow(it) || request.grantRevision != policy.revision.value
                     } == true) {
                         request.written.completeExceptionally(IllegalStateException("输入已取消：会话停止或用户已接管"))
-                        return@synchronized
+                        return@synchronized false
                     }
-                    runCatching {
-                        check(TerminalNative.nativeWrite(masterFd, request.bytes) == request.bytes.size) { "终端输入未完整写入" }
-                    }.onSuccess { request.written.complete(Unit) }
-                        .onFailure {
-                            _ended.value = "写入失败：" + it.message
-                            request.written.completeExceptionally(it)
-                        }
+                    true
+                }
+                if (!allowed) continue
+                try {
+                    check(TerminalNative.writeOwned(masterFd, request.bytes, request.ownerJob) == request.bytes.size) { "终端输入未完整写入" }
+                    request.written.complete(Unit)
+                } catch (cancelled: CancellationException) {
+                    request.written.cancel(cancelled)
+                    currentCoroutineContext().ensureActive()
+                } catch (error: Exception) {
+                    if (!closing.get()) _ended.value = "写入失败：" + error.message
+                    request.written.completeExceptionally(error)
                 }
             }
         }
@@ -191,9 +196,9 @@ internal class TerminalSession(
         resizes.close()
         try {
             if (force) {
-                synchronized(nativeLock) { runCatching { TerminalNative.nativeSignalGroup(pid, SIGTERM) } }
+                runCatching { TerminalNative.nativeSignalOwned(masterFd, pid, SIGTERM) }
                 delay(200)
-                synchronized(nativeLock) { runCatching { TerminalNative.nativeSignalGroup(pid, SIGKILL) } }
+                runCatching { TerminalNative.nativeSignalOwned(masterFd, pid, SIGKILL) }
             }
             reader?.join()
             chunks.close()
@@ -207,12 +212,12 @@ internal class TerminalSession(
             }
             // EOF only means the slave descriptors closed. A process may close stdio and
             // keep running; do not leave it in an uninterruptible natural-exit wait.
-            var code = runCatching { TerminalNative.nativeWaitForExit(pid, 300) }.getOrDefault(-1)
+            var code = runCatching { TerminalNative.nativeWaitOwned(masterFd, pid, 300) }.getOrDefault(-1)
             if (code == -2) {
-                runCatching { TerminalNative.nativeSignalGroup(pid, SIGTERM) }
+                runCatching { TerminalNative.nativeSignalOwned(masterFd, pid, SIGTERM) }
                 delay(200)
-                runCatching { TerminalNative.nativeSignalGroup(pid, SIGKILL) }
-                code = runCatching { TerminalNative.nativeWait(pid) }.getOrDefault(-1)
+                runCatching { TerminalNative.nativeSignalOwned(masterFd, pid, SIGKILL) }
+                code = runCatching { TerminalNative.nativeWaitOwned(masterFd, pid, -1) }.getOrDefault(-1)
             }
             _ended.value = failure?.let { "终端已断开：$it" } ?: "会话已结束（退出码 $code）"
             _status.value = SessionStatus.EXITED

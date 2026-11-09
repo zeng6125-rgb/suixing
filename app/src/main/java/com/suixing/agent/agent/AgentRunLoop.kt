@@ -21,6 +21,8 @@ import com.suixing.agent.core.Core
 import com.suixing.agent.skills.SkillStore
 import com.suixing.agent.tools.ToolRegistry
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.NonCancellable
@@ -147,10 +149,13 @@ internal suspend fun AgentRun.runLoop(
     // （工具输出最长 8000 字符/条、一轮几十条），而它每轮都在主线程上跑一遍。
     // This block exclusively owns wire/spans until it returns; no per-message list/Pair.
     withContext(Dispatchers.Default) {
-        for (message in replayed) {
-            val from = wire.size
-            appendToWire(wire, message, settings)
-            spans += WireSpan(message.id, from, wire.size)
+        val context = currentCoroutineContext()
+        var from = wire.size
+        val counts = appendToWireBatch(wire, replayed, settings) { context.ensureActive() }
+        for (index in replayed.indices) {
+            val end = from + counts[index]
+            spans += WireSpan(replayed[index].id, from, end)
+            from = end
         }
     }
 
@@ -228,10 +233,10 @@ internal suspend fun AgentRun.runLoop(
         spans += WireSpan(stored.id, toolAt, wire.size)
         result.imageBase64?.let { base64 ->
             if (settings.imageInput) {
-                wire += ChatMessage.screenshot("（这是上一步 $call.name 返回的截图）", listOf(base64))
+                wire += ChatMessage.screenshot("（这是上一步 ${call.name} 返回的截图）", listOf(base64))
             } else {
                 wire += ChatMessage.user(
-                    "（上一步 $call.name 返回了一张截图，但当前模型未开启图片输入，你看不到图像内容。）",
+                    "（上一步 ${call.name} 返回了一张截图，但当前模型未开启图片输入，你看不到图像内容。）",
                 )
             }
         }

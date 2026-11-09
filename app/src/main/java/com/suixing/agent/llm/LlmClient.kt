@@ -10,6 +10,10 @@ import com.suixing.agent.data.PROTOCOL_OPENAI
 import com.suixing.agent.data.PROTOCOL_RESPONSES
 import com.suixing.agent.data.Roles
 import com.suixing.agent.tools.ToolSpec
+import com.suixing.agent.core.NativeCore
+import com.suixing.agent.core.parseCoreValue
+import com.suixing.agent.core.JsonStreamingBody
+import com.suixing.agent.core.WireStringParts
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -29,7 +33,6 @@ import okhttp3.Call
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.InterruptedIOException
 import java.net.ConnectException
 import java.net.SocketTimeoutException
@@ -176,6 +179,7 @@ internal fun shouldRetry(
      */
     midStream: Boolean = false,
 ): Boolean {
+    NativeCore.retry(status, attempt, maxAttempts, receivedAnyOutput, cancelled, midStream)?.let { return it }
     if (cancelled) return false
     if (receivedAnyOutput && !midStream) return false
     if (attempt > maxAttempts) return false
@@ -412,7 +416,8 @@ class LlmClient(http: OkHttpClient? = null) {
     ): AssistantTurn = withContext(Dispatchers.IO) {
         val protocol = settings.protocol
         val url = endpoint(settings.baseUrl, protocol)
-        val payloadText = requestBody(settings, messages, tools, protocol).toString()
+        val strings = WireStringParts()
+        val payload = JsonStreamingBody(buildRequestBody(settings, messages, tools, protocol, strings), strings, JSON_MEDIA, currentCoroutineContext())
         val builder = Request.Builder()
             .url(url)
             .header("Content-Type", "application/json")
@@ -423,7 +428,7 @@ class LlmClient(http: OkHttpClient? = null) {
             if (name.isNotBlank()) builder.header(name, value)
         }
         val request = builder
-            .post(payloadText.toRequestBody(JSON_MEDIA))
+            .post(payload)
             .build()
 
         val maxRetries = if (settings.retryOnFailure) {
@@ -447,173 +452,197 @@ class LlmClient(http: OkHttpClient? = null) {
             // The turn this attempt has assembled so far, kept outside the block below: a stream
             // that breaks after delivering text still has to hand that text back — see `received`.
             var partial: StreamTurn? = null
+            val nativeStream = NativeSseStream.open()
             val outcome = runCatching {
-                call.readCancellable { response ->
-                    val body = response.body
-                    if (!response.isSuccessful || body == null) {
-                        // 取证（真机 0.8.116 报障：压缩后首轮被网关 400，错误体只说「request was
-                        // rejected by an internal MaaS component」，本地 A/B 把形状/体量/模型假设全
-                        // 证伪后仍不知真因）：非 2xx 时把**完整请求体**与响应体落盘，下次复现拉文件
-                        // 就能对着真 payload 找差异。截断到 2MB 防撑爆私有目录；只留最近一次。
-                        val errBody = body?.string().orEmpty()
-                        // **默认只落可公开的元数据**（issue #58 #5）：完整 `request` 里有会话正文、
-                        // 工具输出、截图 base64；`response` 里有网关回灌的请求摘要。原来两者无条件
-                        // 落盘，等于把用户内容写进了诊断文件，还会被云备份带走。
-                        // 需要真 payload 时，在 `files/` 下放一个空文件 `http-dump-full`
-                        // 即打开完整转储（临时诊断用，排除在备份之外、可随时删除）。
-                        runCatching {
-                            val app = com.suixing.agent.core.Core.appContext
-                            val marker = java.io.File(app.filesDir, "http-dump-full")
-                            val fullDump = fullDiagnosticAllowed(marker.lastModified(), System.currentTimeMillis())
-                            if (!fullDump) marker.delete()
-                            val dump = buildJsonObject {
-                                put("code", JsonPrimitive(response.code))
-                                put("at", JsonPrimitive(System.currentTimeMillis()))
-                                put("model", JsonPrimitive(settings.model))
-                                put("requestChars", JsonPrimitive(payloadText.length))
-                                put("responseChars", JsonPrimitive(errBody.length))
-                                // 摘要：只留状态行，不含请求/响应正文。
-                                if (fullDump) {
-                                    put("response", JsonPrimitive(errBody.take(8_000)))
-                                    put("request", JsonPrimitive(payloadText.take(2_000_000)))
+                nativeStream.use {
+                    call.readCancellable(onCancellation = { nativeStream?.cancel() }) { response ->
+                        val body = response.body
+                        if (!response.isSuccessful || body == null) {
+                            // 取证（真机 0.8.116 报障：压缩后首轮被网关 400，错误体只说「request was
+                            // rejected by an internal MaaS component」，本地 A/B 把形状/体量/模型假设全
+                            // 证伪后仍不知真因）：非 2xx 时把**完整请求体**与响应体落盘，下次复现拉文件
+                            // 就能对着真 payload 找差异。截断到 2MB 防撑爆私有目录；只留最近一次。
+                            val errBody = body?.string().orEmpty()
+                            // **默认只落可公开的元数据**（issue #58 #5）：完整 `request` 里有会话正文、
+                            // 工具输出、截图 base64；`response` 里有网关回灌的请求摘要。原来两者无条件
+                            // 落盘，等于把用户内容写进了诊断文件，还会被云备份带走。
+                            // 需要真 payload 时，在 `files/` 下放一个空文件 `http-dump-full`
+                            // 即打开完整转储（临时诊断用，排除在备份之外、可随时删除）。
+                            runCatching {
+                                val app = com.suixing.agent.core.Core.appContext
+                                val marker = java.io.File(app.filesDir, "http-dump-full")
+                                val fullDump = fullDiagnosticAllowed(marker.lastModified(), System.currentTimeMillis())
+                                if (!fullDump) marker.delete()
+                                val dump = buildJsonObject {
+                                    put("code", JsonPrimitive(response.code))
+                                    put("at", JsonPrimitive(System.currentTimeMillis()))
+                                    put("model", JsonPrimitive(settings.model))
+                                    put("requestChars", JsonPrimitive(payload.characterLength))
+                                    put("responseChars", JsonPrimitive(errBody.length))
+                                    // 摘要：只留状态行，不含请求/响应正文。
+                                    if (fullDump) {
+                                        put("response", JsonPrimitive(errBody.take(8_000)))
+                                        put("request", JsonPrimitive(payload.preview(2_000_000)))
+                                    }
+                                }
+                                java.io.File(app.filesDir, "last-http-error.json").writeText(dump.toString())
+                            }
+                            // The status and the header are what the retry decision runs on, so they ride
+                            // along in the failure instead of being flattened into a message here.
+                            throw AttemptFailure(
+                                code = response.code,
+                                retryAfterSeconds = parseRetryAfter(response.header("Retry-After")),
+                                failure = LlmException(friendlyHttp(response.code, errBody)),
+                            )
+                        }
+                        val stream = StreamTurn(protocol).also { partial = it }
+                        val source = body.source()
+                        var unparsed = 0
+                        /**
+                         * 已经解析好的 chunk 交给 stream。
+                         *
+                         * **单独拆出来**（优化清单 llm-P0）：热路径（单行 data 帧，每 delta 一条）原来
+                         * 先做一次"探针解析"判断能否当场处理，成功后又把同一个字符串交给
+                         * `acceptPayload` 再解析一遍 —— 每条 delta 两次全量 JSON 解析。
+                         * 现在探针的解析结果直接复用。
+                         */
+                        fun acceptChunk(chunk: JsonObject) {
+                            chunk["error"]?.let { error ->
+                                val message = (error as? JsonObject)?.get("message")?.jsonPrimitive?.content
+                                    ?: error.toString()
+                                throw LlmException("接口返回错误：$message")
+                            }
+                            stream.accept(
+                                chunk,
+                                { piece -> received = true; onDelta(piece) },
+                                { piece -> received = true; onReasoning(piece) },
+                            )
+                            // Tool-call deltas do not travel through the two callbacks above, so a round
+                            // that only asked for a tool would look like "nothing arrived" — and be
+                            // retried, which is a second request for a turn the endpoint already
+                            // answered, and a second round of tool calls on top of it.
+                            if (stream.hasToolCalls()) received = true
+                        }
+
+                        /** 字符串入口（多行事件拼接后走这里），解析失败计入 [unparsed]。 */
+                        fun acceptPayload(payload: String) {
+                            val chunk = runCatching { Json.parseToJsonElement(payload).jsonObject }.getOrNull()
+                            if (chunk == null) {
+                                unparsed++
+                                return
+                            }
+                            acceptChunk(chunk)
+                        }
+                        if (nativeStream != null) {
+                            val bytes = ByteArray(NativeSseStream.READ_BYTES)
+                            var ended = false
+                            while (!ended) {
+                                if (call.isCanceled()) throw CancellationException("已停止")
+                                // BufferedSource.read returns available bytes. It does not wait to fill
+                                // the 8 KiB buffer, so the first complete delta is delivered immediately.
+                                val count = source.read(bytes, 0, bytes.size)
+                                if (count == 0) continue
+                                val eof = count < 0
+                                var offset = 0
+                                do {
+                                    if (call.isCanceled()) throw CancellationException("已停止")
+                                    val event = nativeStream.feed(bytes, offset, if (eof) 0 else count - offset, eof)
+                                    if (event.sawDone) sawDone = true
+                                    event.chunk?.let(::acceptChunk)
+                                    event.compatibilityPayload?.let(::acceptPayload)
+                                    offset += event.consumed
+                                    ended = event.sawDone || event.eof
+                                    if (!ended && event.consumed == 0) {
+                                        throw LlmException("原生流式解析未消费输入")
+                                    }
+                                } while (!ended && offset < count)
+                            }
+                        } else {
+                            // Libraries unavailable before the first byte keep the existing Kotlin reader.
+                            // One pending buffer and bracket state span all lines of an SSE event.
+                            val pending = StringBuilder()
+                            val frame = SseFrames.State()
+                            while (true) {
+                                // 用户点停止要**保持取消语义**（issue #56 R15）：原来抛的是
+                                // `IOException("请求已取消")`，会落进「传输失败」口径被当成可重试失败。
+                                // 这里改抛 CancellationException —— 本 lambda 是非挂起的（`(Response) -> T`），
+                                // 调不了 `ensureActive()`，但 `readCancellable` 里会把它转成
+                                // `continuation.cancel(...)`，到达调用方时就是真正的取消。
+                                if (call.isCanceled()) throw CancellationException("已停止")
+                                val line = readSseLine(source) ?: break
+                                if (line.isEmpty()) {
+                                    // 事件边界：把攒着的多行 data 拼成一条再解析。
+                                    if (pending.isNotEmpty()) {
+                                        acceptPayload(pending.toString())
+                                        pending.clear()
+                                        frame.reset()
+                                    }
+                                    continue
+                                }
+                                if (!line.startsWith("data:")) continue
+                                val data = sseDataValue(line)
+                                if (data.isEmpty()) continue
+                                checkSseFrameSize(pending.length, data.length)
+                                // `[DONE]` ends the stream, so stop reading here. A gateway that keeps the
+                                // connection open afterwards would otherwise leave this loop blocked until the
+                                // read timeout — or the 10-minute call cap — with the answer already in hand.
+                                // 哨兵判定要容错（issue #56 R12）：有的网关发 `data:  [DONE]`（多一个
+                                // 空格），按 RFC 只剥一个之后还剩前导空白，`== "[DONE]"` 就失败 ⇒ 不置
+                                // `sawDone` ⇒ 正常结束的流被当成截断 ⇒ 重试 + onRestart 清屏重发 ⇒
+                                // 用户看到「答完了又重答」。解析器仍按规范只剥一个空格（SseFramesTest 守着），
+                                // 容错只放在这一个哨兵比较上。
+                                if (data.trim() == "[DONE]") {
+                                    sawDone = true
+                                    break
+                                }
+                                if (pending.isEmpty()) {
+                                    // 单行即完整事件的常见情况：解析一次、直接交给 stream（不再二次解析）。
+                                    val quick = runCatching { Json.parseToJsonElement(data).jsonObject }.getOrNull()
+                                    if (quick != null) {
+                                        acceptChunk(quick)
+                                        continue
+                                    }
+                                }
+                                if (pending.isNotEmpty()) pending.append('\n')
+                                pending.append(data)
+                                // **不要每加一行就重新 parse 整个 pending**：网关把一个 JSON 拆成多行时，
+                                // 那是 O(行数2) 的字符解析（30KB 的 chunk 约等于 600 行，十几万字符被反复解析）。
+                                // 改用花括号配平判断「这个 JSON 完整了」，每行只扫本行；完整时仍会 parse 一次。
+                                if (SseFrames.feed(frame, data)) {
+                                    acceptPayload(pending.toString())
+                                    pending.clear()
+                                    frame.reset()
                                 }
                             }
-                            java.io.File(app.filesDir, "last-http-error.json").writeText(dump.toString())
-                        }
-                        // The status and the header are what the retry decision runs on, so they ride
-                        // along in the failure instead of being flattened into a message here.
-                        throw AttemptFailure(
-                            code = response.code,
-                            retryAfterSeconds = parseRetryAfter(response.header("Retry-After")),
-                            failure = LlmException(friendlyHttp(response.code, errBody)),
-                        )
-                    }
-                    val stream = StreamTurn(protocol).also { partial = it }
-                    val source = body.source()
-                    // **SSE 事件可以跨多行 `data:`**（规范：同一事件的多行用 "\n" 连接，空行结束）。
-                    // 旧代码把每一行 `data:` 都当成完整 JSON、解析失败就 `?: continue` 静默丢掉 ——
-                    // 网关把一条事件拆成两行（长思考/长正文时很常见）时，那段内容会凭空消失，
-                    // 表现就是「思考块一结束就停住」（用户判断：是 SSE 的问题）。
-                    // 现在两派都兼容：单行能解析就当场解析；解析不了就先攒着，碰到空行再拼起来。
-                    val pending = StringBuilder()
-                    // 多行 JSON 的配平状态：**必须和 pending 同寿命** ——
-                    // 放在读行循环里会每行重置，多行 JSON 永远配不平、整条事件丢失。
-                    val frame = SseFrames.State()
-                    var unparsed = 0
-                    /**
-                     * 已经解析好的 chunk 交给 stream。
-                     *
-                     * **单独拆出来**（优化清单 llm-P0）：热路径（单行 data 帧，每 delta 一条）原来
-                     * 先做一次"探针解析"判断能否当场处理，成功后又把同一个字符串交给
-                     * `acceptPayload` 再解析一遍 —— 每条 delta 两次全量 JSON 解析。
-                     * 现在探针的解析结果直接复用。
-                     */
-                    fun acceptChunk(chunk: JsonObject) {
-                        chunk["error"]?.let { error ->
-                            val message = (error as? JsonObject)?.get("message")?.jsonPrimitive?.content
-                                ?: error.toString()
-                            throw LlmException("接口返回错误：$message")
-                        }
-                        stream.accept(
-                            chunk,
-                            { piece -> received = true; onDelta(piece) },
-                            { piece -> received = true; onReasoning(piece) },
-                        )
-                        // Tool-call deltas do not travel through the two callbacks above, so a round
-                        // that only asked for a tool would look like "nothing arrived" — and be
-                        // retried, which is a second request for a turn the endpoint already
-                        // answered, and a second round of tool calls on top of it.
-                        if (stream.hasToolCalls()) received = true
-                    }
-
-                    /** 字符串入口（多行事件拼接后走这里），解析失败计入 [unparsed]。 */
-                    fun acceptPayload(payload: String) {
-                        val chunk = runCatching { Json.parseToJsonElement(payload).jsonObject }.getOrNull()
-                        if (chunk == null) {
-                            unparsed++
-                            return
-                        }
-                        acceptChunk(chunk)
-                    }
-                    while (true) {
-                        // 用户点停止要**保持取消语义**（issue #56 R15）：原来抛的是
-                        // `IOException("请求已取消")`，会落进「传输失败」口径被当成可重试失败。
-                        // 这里改抛 CancellationException —— 本 lambda 是非挂起的（`(Response) -> T`），
-                        // 调不了 `ensureActive()`，但 `readCancellable` 里会把它转成
-                        // `continuation.cancel(...)`，到达调用方时就是真正的取消。
-                        if (call.isCanceled()) throw CancellationException("已停止")
-                        val line = readSseLine(source) ?: break
-                        if (line.isEmpty()) {
-                            // 事件边界：把攒着的多行 data 拼成一条再解析。
+                            // 流尾没有空行收尾的那条事件也别丢。
                             if (pending.isNotEmpty()) {
                                 acceptPayload(pending.toString())
                                 pending.clear()
                                 frame.reset()
                             }
-                            continue
                         }
-                        if (!line.startsWith("data:")) continue
-                        val data = sseDataValue(line)
-                        if (data.isEmpty()) continue
-                        checkSseFrameSize(pending.length, data.length)
-                        // `[DONE]` ends the stream, so stop reading here. A gateway that keeps the
-                        // connection open afterwards would otherwise leave this loop blocked until the
-                        // read timeout — or the 10-minute call cap — with the answer already in hand.
-                        // 哨兵判定要容错（issue #56 R12）：有的网关发 `data:  [DONE]`（多一个
-                        // 空格），按 RFC 只剥一个之后还剩前导空白，`== "[DONE]"` 就失败 ⇒ 不置
-                        // `sawDone` ⇒ 正常结束的流被当成截断 ⇒ 重试 + onRestart 清屏重发 ⇒
-                        // 用户看到「答完了又重答」。解析器仍按规范只剥一个空格（SseFramesTest 守着），
-                        // 容错只放在这一个哨兵比较上。
-                        if (data.trim() == "[DONE]") {
-                            sawDone = true
-                            break
+                        // 一个字符都没收到、却有解析不了的载荷：那是端点 SSE 格式不兼容，
+                        // 不是"模型没说话"——明确报出来，别再静默收场。
+                        if (!received && unparsed > 0 && !sawDone && stream.finishReason == null) {
+                            throw LlmException("流式响应无法解析（$unparsed 段），端点返回的 SSE 格式不兼容")
                         }
-                        if (pending.isEmpty()) {
-                            // 单行即完整事件的常见情况：解析一次、直接交给 stream（不再二次解析）。
-                            val quick = runCatching { Json.parseToJsonElement(data).jsonObject }.getOrNull()
-                            if (quick != null) {
-                                acceptChunk(quick)
-                                continue
-                            }
-                        }
-                        if (pending.isNotEmpty()) pending.append('\n')
-                        pending.append(data)
-                        // **不要每加一行就重新 parse 整个 pending**：网关把一个 JSON 拆成多行时，
-                        // 那是 O(行数2) 的字符解析（30KB 的 chunk 约等于 600 行，十几万字符被反复解析）。
-                        // 改用花括号配平判断「这个 JSON 完整了」，每行只扫本行；完整时仍会 parse 一次。
-                        if (SseFrames.feed(frame, data)) {
-                            acceptPayload(pending.toString())
-                            pending.clear()
-                            frame.reset()
-                        }
+                        val turn = stream.toTurn()
+                        // 结束判定：见到 `[DONE]`，或端点给了 `finish_reason`，才算这一轮正常说完。
+                        // 两者都没有 ⇒ 流是被掐断的（网关抖动、局域网断、上游掐流）。
+                        //
+                        // 这条必须保留：它正是「运行中被掐流就重试」的唯一判据，去掉就等于把半截
+                        // 回答当完整回答交出去（用户：「那上游掐流又不行了？你这不是扯淡吗」）。
+                        //
+                        // 那 d1api 为什么以前会停？**不是因为这条太严，是因为解析漏了 chunk**：
+                        // 旧代码把每个 `data:` 行都当完整 JSON、解析失败 `?: continue` 静默丢掉，
+                        // 端点把长事件拆成多行时，最后那个带 `finish_reason` 的块就被吞了 ⇒
+                        // 这里判定"没结束" ⇒ 重试 ⇒ onRestart 清空 ⇒ 看起来"思考完就停"。
+                        // 修的是上面那段多行拼接，不是把这里的判据拆掉。
+                        // DSH 用的 pi-ai 也是同一条规矩（openai-completions.js: "Stream ended
+                        // without finish_reason" 直接抛错）。
+                        if (!sawDone && stream.finishReason == null) throw CutFailure()
+                        turn
                     }
-                    // 流尾没有空行收尾的那条事件也别丢。
-                    if (pending.isNotEmpty()) {
-                        acceptPayload(pending.toString())
-                        pending.clear()
-                        frame.reset()
-                    }
-                    // 一个字符都没收到、却有解析不了的载荷：那是端点 SSE 格式不兼容，
-                    // 不是"模型没说话"——明确报出来，别再静默收场。
-                    if (!received && unparsed > 0 && !sawDone && stream.finishReason == null) {
-                        throw LlmException("流式响应无法解析（$unparsed 段），端点返回的 SSE 格式不兼容")
-                    }
-                    val turn = stream.toTurn()
-                    // 结束判定：见到 `[DONE]`，或端点给了 `finish_reason`，才算这一轮正常说完。
-                    // 两者都没有 ⇒ 流是被掐断的（网关抖动、局域网断、上游掐流）。
-                    //
-                    // 这条必须保留：它正是「运行中被掐流就重试」的唯一判据，去掉就等于把半截
-                    // 回答当完整回答交出去（用户：「那上游掐流又不行了？你这不是扯淡吗」）。
-                    //
-                    // 那 d1api 为什么以前会停？**不是因为这条太严，是因为解析漏了 chunk**：
-                    // 旧代码把每个 `data:` 行都当完整 JSON、解析失败 `?: continue` 静默丢掉，
-                    // 端点把长事件拆成多行时，最后那个带 `finish_reason` 的块就被吞了 ⇒
-                    // 这里判定"没结束" ⇒ 重试 ⇒ onRestart 清空 ⇒ 看起来"思考完就停"。
-                    // 修的是上面那段多行拼接，不是把这里的判据拆掉。
-                    // DSH 用的 pi-ai 也是同一条规矩（openai-completions.js: "Stream ended
-                    // without finish_reason" 直接抛错）。
-                    if (!sawDone && stream.finishReason == null) throw CutFailure()
-                    turn
                 }
             }
             outcome.getOrNull()?.let { return@withContext it }
@@ -995,19 +1024,23 @@ class LlmClient(http: OkHttpClient? = null) {
         messages: List<ChatMessage>,
         tools: List<ToolSpec>,
         protocol: String,
-    ): JsonObject = when (protocol) {
+    ): JsonObject = buildRequestBody(settings, messages, tools, protocol, null)
+
+    private fun buildRequestBody(settings: AppSettings, messages: List<ChatMessage>, tools: List<ToolSpec>, protocol: String, strings: WireStringParts?): JsonObject = when (protocol) {
         PROTOCOL_ANTHROPIC -> anthropicBody(settings, messages, tools)
-        PROTOCOL_RESPONSES -> responsesBody(settings, messages, tools)
-        else -> chatCompletionsBody(settings, messages, tools)
+        PROTOCOL_RESPONSES -> responsesBodyStreaming(settings, messages, tools, strings)
+        else -> chatCompletionsBodyStreaming(settings, messages, tools, strings)
     }
 
     private fun chatCompletionsBody(
         settings: AppSettings,
         messages: List<ChatMessage>,
         tools: List<ToolSpec>,
-    ): JsonObject = buildJsonObject {
+    ): JsonObject = chatCompletionsBodyStreaming(settings, messages, tools, null)
+
+    private fun chatCompletionsBodyStreaming(settings: AppSettings, messages: List<ChatMessage>, tools: List<ToolSpec>, strings: WireStringParts?): JsonObject = buildJsonObject {
         put("model", JsonPrimitive(settings.model))
-        put("messages", JsonArray(messages.map { encodeMessage(it) }))
+        put("messages", JsonArray(messages.map { encodeMessageStreaming(it, strings) }))
         put("stream", JsonPrimitive(true))
         // 采样参数（温度 / top_p）**默认都不发**，见 [samplingFields]。
         samplingFields(settings).forEach { (name, value) -> put(name, value) }
@@ -1063,7 +1096,9 @@ class LlmClient(http: OkHttpClient? = null) {
         settings: AppSettings,
         messages: List<ChatMessage>,
         tools: List<ToolSpec>,
-    ): JsonObject = buildJsonObject {
+    ): JsonObject = responsesBodyStreaming(settings, messages, tools, null)
+
+    private fun responsesBodyStreaming(settings: AppSettings, messages: List<ChatMessage>, tools: List<ToolSpec>, strings: WireStringParts?): JsonObject = buildJsonObject {
         put("model", JsonPrimitive(settings.model))
         put("stream", JsonPrimitive(true))
         put("store", JsonPrimitive(false))
@@ -1079,7 +1114,7 @@ class LlmClient(http: OkHttpClient? = null) {
         if (instructions.isNotEmpty()) put("instructions", JsonPrimitive(instructions))
         put(
             "input",
-            JsonArray(messages.filter { it.role != Roles.SYSTEM }.flatMap { encodeResponseItems(it) }),
+            JsonArray(messages.filter { it.role != Roles.SYSTEM }.flatMap { encodeResponseItemsStreaming(it, strings) }),
         )
         if (tools.isNotEmpty()) {
             put("tools", JsonArray(tools.map { encodeResponseTool(it) }))
@@ -1199,6 +1234,10 @@ class LlmClient(http: OkHttpClient? = null) {
      * message, so one message may expand to several items.
      */
     private fun encodeResponseItems(message: ChatMessage): List<JsonObject> {
+        return encodeResponseItemsStreaming(message, null)
+    }
+
+    private fun encodeResponseItemsStreaming(message: ChatMessage, strings: WireStringParts?): List<JsonObject> {
         if (message.role == Roles.TOOL) {
             return listOf(
                 buildJsonObject {
@@ -1222,7 +1261,7 @@ class LlmClient(http: OkHttpClient? = null) {
                 images.forEach { image ->
                     add(buildJsonObject {
                         put("type", JsonPrimitive("input_image"))
-                        put("image_url", JsonPrimitive("data:image/jpeg;base64,$image"))
+                        put("image_url", strings?.imageDataUri(image) ?: JsonPrimitive("data:image/jpeg;base64,$image"))
                     })
                 }
             }
@@ -1262,7 +1301,9 @@ class LlmClient(http: OkHttpClient? = null) {
         put("parameters", spec.parameters.normalizedSchema() as JsonElement)
     }
 
-    private fun encodeMessage(message: ChatMessage): JsonObject = buildJsonObject {
+    private fun encodeMessage(message: ChatMessage): JsonObject = encodeMessageStreaming(message, null)
+
+    private fun encodeMessageStreaming(message: ChatMessage, strings: WireStringParts?): JsonObject = buildJsonObject {
         put("role", JsonPrimitive(message.role))
         val images = message.allImages
         when {
@@ -1281,7 +1322,7 @@ class LlmClient(http: OkHttpClient? = null) {
                             put("type", JsonPrimitive("image_url"))
                             put(
                                 "image_url",
-                                buildJsonObject { put("url", JsonPrimitive("data:image/jpeg;base64,$image")) },
+                                buildJsonObject { put("url", strings?.imageDataUri(image) ?: JsonPrimitive("data:image/jpeg;base64,$image")) },
                             )
                         })
                     }
@@ -1511,7 +1552,7 @@ internal fun parseUsage(usage: JsonObject): Usage? {
 /** Reads the model ids out of an OpenAI-style `GET /models` response. */
 internal fun parseModels(body: String): List<String> {    val trimmed = body.trim()
     if (trimmed.isEmpty()) throw LlmException("服务器返回了空内容")
-    val root = runCatching { Json.parseToJsonElement(trimmed) }.getOrNull()
+    val root = runCatching { Json.parseCoreValue(trimmed) }.getOrNull()
         ?: throw LlmException("服务器返回的不是 JSON：${trimmed.take(160)}")
     val array = when (root) {
         is JsonArray -> root
@@ -1550,7 +1591,7 @@ data class ProviderModel(val id: String, val contextLength: Int? = null)
 internal fun parseModelDetails(body: String): List<ProviderModel> {
     val trimmed = body.trim()
     if (trimmed.isEmpty()) throw LlmException("服务器返回了空内容")
-    val root = runCatching { Json.parseToJsonElement(trimmed) }.getOrNull()
+    val root = runCatching { Json.parseCoreValue(trimmed) }.getOrNull()
         ?: throw LlmException("服务器返回的不是 JSON：${trimmed.take(160)}")
     val array = when (root) {
         is JsonArray -> root
@@ -1596,7 +1637,7 @@ private fun contextLengthOf(element: JsonObject): Int? {
 internal fun extractApiError(body: String): String {
     val trimmed = body.trim()
     if (trimmed.isEmpty()) return ""
-    val parsed = runCatching { Json.parseToJsonElement(trimmed) as? JsonObject }.getOrNull()
+    val parsed = runCatching { Json.parseCoreValue(trimmed) as? JsonObject }.getOrNull()
     if (parsed != null) {
         val message = when (val error = parsed["error"]) {
             is JsonObject -> error["message"].asText()
@@ -1657,7 +1698,7 @@ private fun JsonElement?.intOrNull(): Int? =
  * no-argument tool means anyway.
  */
 private fun String.toJsonObjectOrEmpty(): JsonObject =
-    runCatching { Json.parseToJsonElement(ifBlank { "{}" }) as? JsonObject }.getOrNull()
+    runCatching { Json.parseCoreValue(ifBlank { "{}" }) as? JsonObject }.getOrNull()
         ?: JsonObject(emptyMap())
 
 /**

@@ -55,10 +55,10 @@ internal object AndroidTerminalSessionRuntime : TerminalSessionRuntime {
         val fd = native[0].toInt()
         val pid = native[1].toInt()
         try {
-            runCatching { TerminalNative.nativeSignalGroup(pid, SIGTERM) }
+            runCatching { TerminalNative.nativeSignalOwned(fd, pid, SIGTERM) }
             delay(200)
-            runCatching { TerminalNative.nativeSignalGroup(pid, SIGKILL) }
-            runCatching { TerminalNative.nativeWait(pid) }
+            runCatching { TerminalNative.nativeSignalOwned(fd, pid, SIGKILL) }
+            runCatching { TerminalNative.nativeWaitOwned(fd, pid, -1) }
         } finally {
             TerminalNative.nativeClose(fd)
         }

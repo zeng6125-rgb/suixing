@@ -12,6 +12,58 @@ import com.suixing.agent.llm.ToolCallRequest
  * 这些函数只吃参数、不读引擎或某个 run 的可变状态，所以从 [AgentEngine.RunHandle] 里搬出来。
  */
 
+/** Assemble before mutating wire, so a cancelled native batch cannot leave missing source spans. */
+internal fun appendToWireBatch(
+    wire: MutableList<ChatMessage>,
+    messages: List<StoredMessage>,
+    settings: AppSettings,
+    checkpoint: (() -> Unit)? = null,
+): IntArray {
+    checkpoint?.invoke()
+    val sources = messages.toList()
+    val prepared = ArrayList<ChatMessage>()
+    val counts = IntArray(sources.size)
+    var offset = 0
+    while (offset < sources.size) {
+        checkpoint?.invoke()
+        val end = offset + minOf(NativeWireText.REPLAY_BATCH_SIZE, sources.size - offset)
+        val batch = sources.subList(offset, end)
+        val native = NativeWireText.replay(batch, settings, checkpoint)
+        if (native != null) {
+            prepared.addAll(native.messages)
+            native.counts.copyInto(counts, offset)
+        } else {
+            for ((index, message) in batch.withIndex()) {
+                checkpoint?.invoke()
+                val from = prepared.size
+                appendToWire(prepared, message, settings)
+                counts[offset + index] = prepared.size - from
+            }
+        }
+        offset = end
+    }
+    checkpoint?.invoke()
+    // Caller adds WireSpan records from counts immediately after this returns. No cancellation
+    // checkpoint runs between wire mutation and those records, matching the owned Default block.
+    wire.addAll(prepared)
+    return counts
+}
+
+/** Includes exactly one LF between rendered messages, with no extra leading/trailing separator. */
+internal fun renderSummaryBatch(messages: List<ChatMessage>, checkpoint: (() -> Unit)? = null): String {
+    checkpoint?.invoke()
+    val sources = messages.toList()
+    NativeWireText.summary(sources, checkpoint)?.let { checkpoint?.invoke(); return it }
+    return buildString {
+        for ((index, message) in sources.withIndex()) {
+            checkpoint?.invoke()
+            if (index > 0) append('\n')
+            append(renderForSummary(message))
+        }
+        checkpoint?.invoke()
+    }
+}
+
     internal fun renderForSummary(message: ChatMessage): String = buildString {
         append(message.role).append(": ")
         append(message.text)

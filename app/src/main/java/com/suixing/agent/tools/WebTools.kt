@@ -1,5 +1,6 @@
 package com.suixing.agent.tools
 
+import com.suixing.agent.core.parseCoreValue
 import com.suixing.agent.llm.readCancellable
 import com.suixing.agent.data.FileActivity
 import com.suixing.agent.data.FileActivityKind
@@ -232,7 +233,7 @@ private suspend fun fetch(args: JsonObject): ToolResult {
                         return@readCancellable ToolResult.failure("Search failed: HTTP ${response.code} ${body.take(200)}")
                     }
                     val results = runCatching {
-                        Json.parseToJsonElement(body).jsonObject["results"]?.jsonArray.orEmpty()
+                        Json.parseCoreValue(body).jsonObject["results"]?.jsonArray.orEmpty()
                     }.getOrElse { emptyList() }
                     if (results.isEmpty()) return@readCancellable ToolResult.success("No results found.")
                     ToolResult.success(

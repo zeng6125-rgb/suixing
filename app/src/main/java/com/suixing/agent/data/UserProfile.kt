@@ -1,5 +1,7 @@
 package com.suixing.agent.data
 
+import com.suixing.agent.core.decodeCoreObject
+import com.suixing.agent.core.encodeCoreBytes
 import android.content.Context
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -180,21 +182,24 @@ class UserProfileStore(private val context: Context) {
      */
     private fun readState(): ProfileState {
         if (!stateFile.exists()) return ProfileState()
-        return runCatching { json.decodeFromString<ProfileState>(stateFile.readText()) }
+        return runCatching { json.decodeCoreObject(ProfileState.serializer(), stateFile.readText()) }
             .getOrDefault(ProfileState())
     }
 
     private fun writeState(state: ProfileState) {
-        writeAtomically(stateFile, json.encodeToString(ProfileState.serializer(), state))
+        writeAtomically(stateFile, json.encodeCoreBytes(ProfileState.serializer(), state))
     }
 
-    private fun writeAtomically(target: File, value: String): Boolean = runCatching {
+    private fun writeAtomically(target: File, value: String): Boolean =
+        writeAtomically(target, value.toByteArray(Charsets.UTF_8))
+
+    private fun writeAtomically(target: File, bytes: ByteArray): Boolean = runCatching {
         target.parentFile?.mkdirs()
         // Write-then-rename, so a kill mid-save cannot leave a half-written file that [read]
         // would quarantine — the old profile survives instead.
         val temp = File(target.parentFile, "${target.name}.tmp")
         java.io.FileOutputStream(temp).use { out ->
-            out.write(value.toByteArray(Charsets.UTF_8))
+            out.write(bytes)
             out.fd.sync()
         }
         if (!temp.renameTo(target)) {
@@ -202,7 +207,7 @@ class UserProfileStore(private val context: Context) {
             // its exception has to stay visible rather than lose the text.
             try {
                 java.io.FileOutputStream(target).use { out ->
-                    out.write(value.toByteArray(Charsets.UTF_8))
+                    out.write(bytes)
                     out.fd.sync()
                 }
             } finally {

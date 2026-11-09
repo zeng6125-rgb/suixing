@@ -2,6 +2,9 @@ package com.suixing.agent.agent
 
 import com.suixing.agent.data.Roles
 import com.suixing.agent.data.StoredMessage
+import com.suixing.agent.core.NativeCore
+import com.suixing.agent.core.NativeCoreJni
+import java.io.IOException
 
 /** 裁完之后仍要有人问的那句话：裁到只剩一条工具结果时，请求会连一个问题都没有。 */
 internal fun ensureQuestionKept(
@@ -27,6 +30,7 @@ internal object HistoryTrim {
 
     fun apply(messages: List<StoredMessage>, budget: Int): List<StoredMessage> {
         if (budget <= 0 || messages.isEmpty()) return messages
+        if (NativeCore.available) return nativeApply(messages, budget)
         val kept = ArrayDeque<StoredMessage>()
         var used = 0
         for (message in messages.asReversed()) {
@@ -42,5 +46,29 @@ internal object HistoryTrim {
         val tail = kept.toList()
         val start = tail.indexOfFirst { it.role == Roles.USER }
         return if (start <= 0) tail else tail.subList(start, tail.size)
+    }
+
+    private fun nativeApply(messages: List<StoredMessage>, budget: Int): List<StoredMessage> {
+        var from = messages.size
+        var used = 0
+        var oldestUser = -1
+        while (from > 0) {
+            // Estimate the next suffix batch, then stop requesting batches at the budget boundary.
+            val count = minOf(8, from)
+            val costs = IntArray(count) { TokenEstimates.of(messages[from - 1 - it]) }
+            val users = ByteArray(count) { if (messages[from - 1 - it].role == Roles.USER) 1 else 0 }
+            val state = NativeCoreJni.nativeTrimChunk(costs, users, budget, used, messages.size - from)
+            if (state.size != 4 || state[1] !in 0..count || state[2] !in 0..1 ||
+                (state[1] == 0 && state[2] != 1) || state[3] !in (-1 until state[1])) {
+                throw IOException("原生历史裁剪响应无效")
+            }
+            used = state[0]
+            if (state[3] >= 0) oldestUser = from - 1 - state[3]
+            from -= state[1]
+            if (state[2] == 1) break
+        }
+        if (from == 0) return messages
+        if (oldestUser > from) from = oldestUser
+        return messages.subList(from, messages.size)
     }
 }

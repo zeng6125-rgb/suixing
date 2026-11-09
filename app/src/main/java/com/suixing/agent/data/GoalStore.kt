@@ -1,5 +1,6 @@
 package com.suixing.agent.data
 
+import com.suixing.agent.core.decodeCoreObject
 import com.suixing.agent.core.AtomicFiles
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -129,7 +130,7 @@ class GoalStore(private val file: File) {
 
     private fun load(): Goal {
         if (!file.exists()) return Goal()
-        return runCatching { json.decodeFromString<Goal>(file.readText()) }.getOrElse {
+        return runCatching { json.decodeCoreObject(Goal.serializer(), file.readText()) }.getOrElse {
             // A corrupt goal must not silently become a different objective: keep the bad
             // file for diagnosis and start clean rather than guessing at its text.
             runCatching {

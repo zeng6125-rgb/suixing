@@ -1,5 +1,7 @@
 package com.suixing.agent.agent
 
+import com.suixing.agent.core.decodeCoreObject
+import com.suixing.agent.core.encodeCoreBytes
 import android.util.AtomicFile
 import androidx.compose.runtime.Immutable
 import com.suixing.agent.core.Core
@@ -423,7 +425,7 @@ internal object SubagentRecords {
                         return@disk
                     }
                     try {
-                        output.write(json.encodeToString(ChildRunRecord.serializer(), value).toByteArray(Charsets.UTF_8))
+                        output.write(json.encodeCoreBytes(ChildRunRecord.serializer(), value))
                         atomic.finishWrite(output)
                         committed = true
                         val recovered = synchronized(entry.lock) {
@@ -514,7 +516,7 @@ internal object SubagentRecords {
 
     private fun readRecord(file: File): ChildRunRecord? = runCatching {
         AtomicFile(file).openRead().use { input ->
-            json.decodeFromString(ChildRunRecord.serializer(), input.readBytes().toString(Charsets.UTF_8))
+            json.decodeCoreObject(ChildRunRecord.serializer(), input.readBytes().toString(Charsets.UTF_8))
         }
     }.getOrNull()
 

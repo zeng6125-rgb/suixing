@@ -2,6 +2,8 @@ package com.suixing.agent.data
 
 import android.content.Context
 import android.util.Log
+import com.suixing.agent.core.decodeCoreValue
+import com.suixing.agent.core.encodeCoreBytes
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -77,7 +79,7 @@ class ChatRepository(
 
     /** 读回已落盘的恢复副本；损坏或不存在都返回 null（调用方按"不同"处理，保守重写）。 */
     private fun readSavedPayload(name: String): List<StoredMessage>? = runCatching {
-        json.decodeFromString(
+        json.decodeCoreValue(
             kotlinx.serialization.builtins.ListSerializer(StoredMessage.serializer()),
             File(dir, name).readText(),
         )
@@ -783,7 +785,7 @@ private fun readTailText(file: java.io.File, maxChars: Int = TAIL_MAX_CHARS): St
             // `previous != null && …` 永不成立 ⇒ 旧 payload 永远不删，长会话每次换 payload
             // 都留一个 MB 级孤儿文件。manifest 是磁盘上的真凭证，按它的名字删才准。
             val storedPayloadName = previous?.name ?: runCatching {
-                json.decodeFromString(LiveDraft.serializer(), liveFile(draft.chatId).readText())
+                json.decodeCoreValue(LiveDraft.serializer(), liveFile(draft.chatId).readText())
                     .messageSnapshot
             }.getOrNull()
             val payload = if (draft.messages.isEmpty()) null else {
@@ -796,14 +798,14 @@ private fun readTailText(file: java.io.File, maxChars: Int = TAIL_MAX_CHARS): St
                             "${draft.chatId}.live-${UUID.randomUUID()}.messages").also {
                             // Immutable payload first, then the small manifest. A crash can only
                             // leave an unused payload; it cannot invalidate the preceding draft.
-                            writeAtomically(File(dir, it.name), json.encodeToString(
+                            writeAtomically(File(dir, it.name), json.encodeCoreBytes(
                                 kotlinx.serialization.builtins.ListSerializer(StoredMessage.serializer()), snapshot))
                         }
                     }
             }
-            val text = json.encodeToString(LiveDraft.serializer(),
+            val bytes = json.encodeCoreBytes(LiveDraft.serializer(),
                 draft.copy(messages = emptyList(), messageSnapshot = payload?.name))
-            writeAtomically(liveFile(draft.chatId), text)
+            writeAtomically(liveFile(draft.chatId), bytes)
             if (payload != null) draftMessages[draft.chatId] = payload else draftMessages.remove(draft.chatId)
             // Only discard the prior payloads after the replacement manifest is durable.
             // 两个来源都收：内存缓存的（本次运行写过）与 manifest 记的（被淘汰过的那批）。
@@ -833,11 +835,11 @@ private fun readTailText(file: java.io.File, maxChars: Int = TAIL_MAX_CHARS): St
         val file = liveFile(chatId)
         if (!file.exists()) return@withLock null
         runCatching {
-            val draft = json.decodeFromString(LiveDraft.serializer(), file.readText())
+            val draft = json.decodeCoreValue(LiveDraft.serializer(), file.readText())
             val name = draft.messageSnapshot ?: return@runCatching draft // legacy inline format
             require(name.startsWith("$chatId.live-") && name.endsWith(".messages") &&
                 name == File(name).name) { "invalid draft message snapshot" }
-            val messages = json.decodeFromString(
+            val messages = json.decodeCoreValue(
                 kotlinx.serialization.builtins.ListSerializer(StoredMessage.serializer()), File(dir, name).readText())
             draft.copy(messages = messages, messageSnapshot = null)
         }
@@ -1103,15 +1105,18 @@ private fun readTailText(file: java.io.File, maxChars: Int = TAIL_MAX_CHARS): St
      * instead of a half-written file that [load] cannot parse. The temp name ends in
      * `.tmp` on purpose: [load] only picks up `*.json` (and skips [LIVE_SUFFIX]).
      */
-    private fun writeAtomically(target: File, text: String) {
+    private fun writeAtomically(target: File, text: String) =
+        writeAtomically(target, text.toByteArray(Charsets.UTF_8))
+
+    private fun writeAtomically(target: File, bytes: ByteArray) {
         val temp = File(target.parentFile, "${target.name}.tmp")
-        writeAndSync(temp, text)
+        writeAndSync(temp, bytes)
         if (!temp.renameTo(target)) {
             // renameTo reports failure by returning false instead of throwing. Fall back
             // to a direct write and let its exception surface: a silently swallowed save
             // is how a finished turn disappears from disk.
             try {
-                writeAndSync(target, text)
+                writeAndSync(target, bytes)
             } finally {
                 temp.delete()
             }
@@ -1132,9 +1137,12 @@ private fun readTailText(file: java.io.File, maxChars: Int = TAIL_MAX_CHARS): St
      * 而 `readLive` 解析失败会**直接删掉草稿** —— 于是"唯一副本"变成"读到坏的就丢"。
      * `ChatStore.writeAtomically` 早就带 `fd.sync()`，这份漏了。
      */
-    private fun writeAndSync(target: File, text: String) {
+    private fun writeAndSync(target: File, text: String) =
+        writeAndSync(target, text.toByteArray(Charsets.UTF_8))
+
+    private fun writeAndSync(target: File, bytes: ByteArray) {
         FileOutputStream(target).use { out ->
-            out.write(text.toByteArray(Charsets.UTF_8))
+            out.write(bytes)
             out.flush()
             out.fd.sync()
         }

@@ -1,5 +1,6 @@
 package com.suixing.agent.data
 
+import com.suixing.agent.core.decodeCoreValue
 import com.suixing.agent.data.SecretBox
 import android.content.Context
 import kotlinx.coroutines.Dispatchers
@@ -55,7 +56,7 @@ class McpStore(private val context: Context) {
         try {
             // env / headers 里常放 Token（issue #58 #4），落盘是密文，这里解回明文；
             // 旧文件里的明文不带 `enc1:` 前缀，`SecretBox.decrypt` 原样返回 ⇒ 无需单独迁移。
-            json.decodeFromString(ListSerializer(McpServerConfig.serializer()), file.readText())
+            json.decodeCoreValue(ListSerializer(McpServerConfig.serializer()), file.readText())
                 .map { it.copy(env = SecretBox.decrypt(it.env), headers = SecretBox.decrypt(it.headers)) }
         } catch (error: Exception) {
             // Never drop the user's definitions silently: keep the bad file next

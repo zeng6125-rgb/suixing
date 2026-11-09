@@ -1,4 +1,4 @@
-//! Bounded, case-sensitive literal file search behind a small C ABI.
+//! Bounded literal file search behind a small C ABI.
 //!
 //! Kotlin owns traversal order, permissions and tool formatting. A scan receives at most sixteen
 //! paths and returns UTF-16 snippets so Kotlin's `trim().take(200)` semantics are preserved.
@@ -177,6 +177,7 @@ struct Request<'a> {
     max_results: usize,
     context: usize,
     files_only: bool,
+    ignore_ascii_case: bool,
     query: &'a str,
     paths: Vec<&'a str>,
 }
@@ -190,18 +191,22 @@ impl<'a> Request<'a> {
         let count = input.u32()? as usize;
         let max_results = input.u32()? as usize;
         let context = input.u32()? as usize;
-        let files_only = input.u32()?;
+        let flags = input.u32()?;
         let max_file_bytes = input.u32()? as usize;
         if !(1..=MAX_PATHS).contains(&count)
             || !(1..=MAX_RESULTS).contains(&max_results)
             || context > 5
-            || files_only > 1
+            || flags > 3
             || max_file_bytes != MAX_FILE_BYTES
         {
             return None;
         }
         let query = input.string()?;
-        if query.is_empty() || query.len() > MAX_QUERY_BYTES {
+        let ignore_ascii_case = flags & 2 != 0;
+        if query.is_empty()
+            || query.len() > MAX_QUERY_BYTES
+            || (ignore_ascii_case && !query.is_ascii())
+        {
             return None;
         }
         let mut paths = Vec::with_capacity(count);
@@ -218,7 +223,8 @@ impl<'a> Request<'a> {
         Some(Self {
             max_results,
             context,
-            files_only: files_only != 0,
+            files_only: flags & 1 != 0,
+            ignore_ascii_case,
             query,
             paths,
         })
@@ -350,27 +356,32 @@ impl<'a> CancellationPoll<'a> {
 struct LiteralNeedle<'a> {
     bytes: &'a [u8],
     prefix: Vec<usize>,
+    ignore_ascii_case: bool,
 }
 
 impl<'a> LiteralNeedle<'a> {
-    fn new(query: &'a str, cancelled: &AtomicBool) -> Result<Self, i32> {
+    fn new(query: &'a str, ignore_ascii_case: bool, cancelled: &AtomicBool) -> Result<Self, i32> {
         let bytes = query.as_bytes();
         let mut prefix = vec![0; bytes.len()];
         let mut matched = 0;
         let mut poll = CancellationPoll::new(cancelled)?;
         for at in 1..bytes.len() {
             poll.advance(1)?;
-            while matched > 0 && bytes[at] != bytes[matched] {
+            while matched > 0 && !literal_byte_equal(bytes[at], bytes[matched], ignore_ascii_case) {
                 poll.advance(1)?;
                 matched = prefix[matched - 1];
             }
-            if bytes[at] == bytes[matched] {
+            if literal_byte_equal(bytes[at], bytes[matched], ignore_ascii_case) {
                 matched += 1;
             }
             prefix[at] = matched;
         }
         check_cancelled(cancelled)?;
-        Ok(Self { bytes, prefix })
+        Ok(Self {
+            bytes,
+            prefix,
+            ignore_ascii_case,
+        })
     }
 
     fn matches(&self, line: &str, cancelled: &AtomicBool) -> Result<bool, i32> {
@@ -383,11 +394,13 @@ impl<'a> LiteralNeedle<'a> {
             check_cancelled(cancelled)?;
             for &byte in chunk {
                 poll.advance(1)?;
-                while matched > 0 && byte != self.bytes[matched] {
+                while matched > 0
+                    && !literal_byte_equal(byte, self.bytes[matched], self.ignore_ascii_case)
+                {
                     poll.advance(1)?;
                     matched = self.prefix[matched - 1];
                 }
-                if byte == self.bytes[matched] {
+                if literal_byte_equal(byte, self.bytes[matched], self.ignore_ascii_case) {
                     matched += 1;
                     if matched == self.bytes.len() {
                         check_cancelled(cancelled)?;
@@ -398,6 +411,14 @@ impl<'a> LiteralNeedle<'a> {
         }
         check_cancelled(cancelled)?;
         Ok(false)
+    }
+}
+
+fn literal_byte_equal(first: u8, second: u8, ignore_ascii_case: bool) -> bool {
+    if ignore_ascii_case {
+        first.eq_ignore_ascii_case(&second)
+    } else {
+        first == second
     }
 }
 
@@ -492,7 +513,7 @@ fn open_regular(path: &str) -> io::Result<File> {
 
 fn scan(request: &Request<'_>, cancelled: &AtomicBool) -> Result<Vec<u8>, i32> {
     let mut response = Response::new();
-    let needle = LiteralNeedle::new(request.query, cancelled)?;
+    let needle = LiteralNeedle::new(request.query, request.ignore_ascii_case, cancelled)?;
     let mut processed = 0;
     let mut compatibility = NO_COMPATIBILITY_FILE;
     for (path_index, path) in request.paths.iter().enumerate() {
@@ -521,6 +542,10 @@ fn scan(request: &Request<'_>, cancelled: &AtomicBool) -> Result<Vec<u8>, i32> {
                 break;
             }
         };
+        if request.ignore_ascii_case && !text.is_ascii() {
+            compatibility = path_index as u32;
+            break;
+        }
         scan_lines(request, &needle, path_index, text, cancelled, &mut response)?;
     }
     if cancelled.load(Ordering::Acquire) {
@@ -634,3 +659,23 @@ fn emit(
     }
     Ok(())
 }
+
+// Feature modules share the parent buffer/cancellation ABI; JNI is a thin byte bridge.
+mod core_ops;
+mod drawer_order;
+mod edit_ops;
+mod file_find;
+mod json_document;
+mod json_encode;
+mod loop_policy;
+mod markdown_native;
+mod memory_prompt;
+#[cfg(target_os = "android")]
+mod pty_android;
+mod request_budget;
+mod skill_catalog;
+mod sse_stream;
+mod text_read;
+mod usage_aggregation;
+mod usage_projection;
+mod wire_text;

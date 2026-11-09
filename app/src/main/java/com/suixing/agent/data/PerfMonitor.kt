@@ -1,5 +1,7 @@
 package com.suixing.agent.data
 
+import com.suixing.agent.core.decodeCoreValue
+import com.suixing.agent.core.encodeCoreBytes
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import java.io.File
@@ -83,7 +85,7 @@ class PerfMonitor(private val file: File) {
             if (!file.exists()) return
             val text = runCatching { file.readText() }.getOrNull() ?: return
             val list = runCatching {
-                json.decodeFromString(
+                json.decodeCoreValue(
                     kotlinx.serialization.builtins.ListSerializer(PerfRecord.serializer()),
                     text,
                 )
@@ -153,9 +155,9 @@ class PerfMonitor(private val file: File) {
         runCatching {
             val tmp = File(file.absolutePath + ".tmp")
             tmp.parentFile?.mkdirs()
-            val text = json.encodeToString(PerfRecord.serializer().let { kotlinx.serialization.builtins.ListSerializer(it) }, records.toList())
+            val bytes = json.encodeCoreBytes(PerfRecord.serializer().let { kotlinx.serialization.builtins.ListSerializer(it) }, records.toList())
             java.io.FileOutputStream(tmp).use {
-                it.write(text.toByteArray(Charsets.UTF_8))
+                it.write(bytes)
                 it.fd.sync()
             }
             java.nio.file.Files.move(tmp.toPath(), file.toPath(), java.nio.file.StandardCopyOption.ATOMIC_MOVE, java.nio.file.StandardCopyOption.REPLACE_EXISTING)

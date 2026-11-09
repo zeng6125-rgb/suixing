@@ -93,12 +93,12 @@ internal fun rememberChatContextReadout(
     // **逐条缓存 token 估算**（审计 1§2）：`estimateTokens` 对正文做逐字符 CJK 判定，
     // 12 轮 + 工具输出可达 5~20 万字符 ⇒ 每次 revision 一次几 ms 的主线程尖峰，
     // 与 frame.log 里「成对 24ms+16ms、每 100~350 帧一次」的形态吻合。
-    // 消息是不可变值对象 ⇒ 按 id 缓存，用 text.hashCode()（String 自带缓存）验证内容未变。
+    // 按 id 缓存，指纹快速筛选后仍核对正文、工具字段和图片数，避免同长度编辑或哈希碰撞。
     //
     // **缓存改成进程级、不再按会话重建**（切换会话卡的主线程开销之一，见 tokenCache 的 KDoc）：
     // 原来是 `remember(state.conversationId)` ⇒ 每次切会话换一张**空表** ⇒ 整页正文被逐字符
     // 重估一遍（就发生在组合期、主线程）；切回来再估一遍。内容指纹（stamp）本来就在条目里，
-    // 全局表不会串数据；LRU 上限防内存。纯函数与单测见 TokenEstimateCache。
+    // 全局表核对完整估算输入；LRU 上限及弱引用避免保留大正文。
     // **估算移出组合期主线程**（issue #56 R39）：`estimateTokens` 对正文做逐字符 CJK 判定，
     // 一页 12 轮可达 5~20 万字符。原来整段跑在 `remember` 里 ⇒ 组合期（主线程）一次几 ms。
     // 切会话时只使用该会话的完整缓存；缓存不完整时等后台结果。发消息时保留本会话的

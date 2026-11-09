@@ -95,6 +95,64 @@ internal class PreparedMarkdownCache(
         }
     }
 
+    /** Claim cold owners together; cache hits and existing owners never enter native parsing. */
+    internal suspend fun getOrParseBatch(
+        texts: List<String>, parse: suspend (List<String>) -> Map<String, List<MdBlock>>,
+    ): Map<String, List<MdBlock>> {
+        val context = currentCoroutineContext()
+        context.ensureActive()
+        val lookups = synchronized(lock) {
+            texts.distinct().associateWith { text ->
+                entries[text]?.let { Lookup.Hit(it.blocks) }
+                    ?: inFlight[text]?.let { Lookup.Wait(it) }
+                    ?: Lookup.Compute(CompletableDeferred<List<MdBlock>>().also { inFlight[text] = it })
+            }
+        }
+        val owners = lookups.filterValues { it is Lookup.Compute }
+        val computed = LinkedHashMap<String, List<MdBlock>>()
+        try {
+            if (owners.isNotEmpty()) {
+                val parsed = parse(owners.keys.toList())
+                for ((text, lookup) in owners) {
+                    context.ensureActive()
+                    val blocks = checkNotNull(parsed[text]) { "Batch parser omitted a claimed document" }
+                    val completion = (lookup as Lookup.Compute).completion
+                    val weight = estimateMarkdownCacheBytes(text, blocks)
+                    synchronized(lock) {
+                        context.ensureActive()
+                        if (inFlight[text] === completion) retainIfWithinBudget(text, blocks, weight)
+                    }
+                    computed[text] = blocks
+                    completion.complete(blocks)
+                    removeInFlightIfOwned(text, completion)
+                }
+            }
+        } catch (failure: Throwable) {
+            owners.forEach { (text, lookup) ->
+                val completion = (lookup as Lookup.Compute).completion
+                removeInFlightIfOwned(text, completion)
+                completion.completeExceptionally(failure)
+            }
+            throw failure
+        }
+        return buildMap {
+            for ((text, lookup) in lookups) {
+                context.ensureActive()
+                val blocks = when (lookup) {
+                    is Lookup.Hit -> lookup.blocks
+                    is Lookup.Compute -> computed.getValue(text)
+                    is Lookup.Wait -> try { lookup.completion.await() } catch (cancelled: CancellationException) {
+                        context.ensureActive()
+                        // A cancelled owner released its reservation; this still-active waiter can
+                        // claim that source using the same parser and ordinary cache publication.
+                        getOrParse(text) { parse(listOf(text)).getValue(text) }
+                    }
+                }
+                put(text, blocks)
+            }
+        }
+    }
+
     /** Drop a retained parse after another cache becomes the preferred owner of the same key. */
     internal fun remove(text: String) {
         synchronized(lock) {
@@ -150,21 +208,26 @@ internal suspend fun prepareMarkdownTexts(texts: List<String>): Map<String, List
     if (required.isEmpty()) return emptyMap()
     return withContext(Dispatchers.Default) {
         val context = currentCoroutineContext()
-        buildMap {
-            for (text in required) {
-                context.ensureActive()
-                val settled = SettledBlocks.get(text)
-                val blocks = if (settled != null) {
-                    preparedMarkdownCache.remove(text)
-                    settled
-                } else {
-                    preparedMarkdownCache.getOrParse(text) {
-                        context.ensureActive()
-                        parseMarkdown(text) { context.ensureActive() }
-                    }
-                }
-                put(text, blocks)
-            }
+        val ready = LinkedHashMap<String, List<MdBlock>>()
+        val cold = ArrayList<String>()
+        for (text in required) {
+            context.ensureActive()
+            val settled = SettledBlocks.get(text)
+            if (settled != null) {
+                preparedMarkdownCache.remove(text)
+                ready[text] = settled
+            } else cold += text
         }
+        ready.putAll(preparedMarkdownCache.getOrParseBatch(cold) { owners ->
+            context.ensureActive()
+            val native = NativeMarkdown.parseBatch(owners)
+            buildMap {
+                for (text in owners) {
+                    context.ensureActive()
+                    put(text, native[text] ?: parseMarkdown(text) { context.ensureActive() })
+                }
+            }
+        })
+        required.associateWith { ready.getValue(it) }
     }
 }

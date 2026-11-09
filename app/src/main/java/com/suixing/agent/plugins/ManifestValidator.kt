@@ -1,5 +1,6 @@
 package com.suixing.agent.plugins
 
+import com.suixing.agent.core.decodeCoreValue
 import kotlinx.serialization.json.JsonObject
 
 /**
@@ -83,7 +84,7 @@ object ManifestValidator {
         val issues = mutableListOf<PluginIssue>()
 
         // 1. JSON 可解析 + schema_version + api_version
-        val spec = runCatching { PluginJson.decodeFromString<PluginSpec>(manifestJson) }
+        val spec = runCatching { PluginJson.decodeCoreValue<PluginSpec>(manifestJson) }
             .getOrElse { error ->
                 return InstallResult(
                     spec = null,

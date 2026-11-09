@@ -34,7 +34,7 @@ internal object NativeFileSearch {
     private const val MAX_REQUEST_BYTES = 1024 * 1024
     private const val MAX_QUERY_BYTES = 256 * 1024
     private const val MAX_FILE_BYTES = 2 * 1024 * 1024
-    private val available: Boolean by lazy {
+    internal val available: Boolean by lazy {
         try {
             System.loadLibrary("suixing_search")
             true
@@ -46,16 +46,18 @@ internal object NativeFileSearch {
     }
 
     fun supports(query: String, caseSensitive: Boolean, regex: Boolean): Boolean =
-        caseSensitive && !regex && query.isNotEmpty() &&
-            query.toByteArray(Charsets.UTF_8).let { it.size <= MAX_QUERY_BYTES && it.toString(Charsets.UTF_8) == query } &&
+        !regex && query.isNotEmpty() &&
+            query.toByteArray(Charsets.UTF_8).let { it.size <= MAX_QUERY_BYTES && it.toString(Charsets.UTF_8) == query &&
+                (caseSensitive || it.all { byte -> byte.toInt() >= 0 }) } &&
             available
 
     /** Library absence and unrepresentable paths fall back before any native work starts. */
     suspend fun scan(
         files: List<File>, query: String, context: Int, filesOnly: Boolean, limit: Int,
+        caseSensitive: Boolean = true,
     ): NativeSearchBatch? = withContext(Dispatchers.IO) {
         require(files.size in 1..BATCH_SIZE && context in 0..5 && limit in 1..500)
-        val request = encode(files, query, context, filesOnly, limit) ?: return@withContext null
+        val request = encode(files, query, context, filesOnly, limit, caseSensitive) ?: return@withContext null
         if (!available) return@withContext null
         suspendCancellableCoroutine { continuation ->
             val handle = NativeFileSearchJni.nativeCreate()
@@ -80,13 +82,14 @@ internal object NativeFileSearch {
         }
     }
 
-    private fun encode(files: List<File>, query: String, context: Int, filesOnly: Boolean, limit: Int): ByteArray? {
+    private fun encode(files: List<File>, query: String, context: Int, filesOnly: Boolean, limit: Int, caseSensitive: Boolean): ByteArray? {
         val strings = (listOf(query) + files.map { it.absolutePath }).map { value ->
             value.toByteArray(Charsets.UTF_8).also {
                 if (it.toString(Charsets.UTF_8) != value) return null
             }
         }
         if (strings.first().size > MAX_QUERY_BYTES) return null
+        if (!caseSensitive && strings.first().any { it.toInt() < 0 }) return null
         val size = 24L + strings.sumOf { 4L + it.size }
         if (size > MAX_REQUEST_BYTES) return null
         val output = ByteArrayOutputStream(size.toInt())
@@ -97,7 +100,7 @@ internal object NativeFileSearch {
         integer(files.size)
         integer(limit)
         integer(context)
-        integer(if (filesOnly) 1 else 0)
+        integer((if (filesOnly) 1 else 0) or (if (caseSensitive) 0 else 2))
         integer(MAX_FILE_BYTES)
         strings.forEach { integer(it.size); output.write(it) }
         return output.toByteArray()
