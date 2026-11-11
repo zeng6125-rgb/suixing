@@ -31,7 +31,9 @@ internal class RunLedger(maxRounds: Int = 0, capacity: Int = 96) {
         val argsHash = fingerprint { writeJson(this, args, root = true) }
         val resultHash = fingerprint {
             write(if (result.ok) "ok:" else "failed:")
-            writeString(this, result.output)
+            writeString(this, if (tool == "job_list") {
+                JOB_LIST_ELAPSED.replace(result.output, "$1")
+            } else result.output)
             result.imageBase64?.let { writeString(this, it) }
         }
         entries.addLast(Entry(step, tool, argsHash, result.ok, resultHash, System.currentTimeMillis()))
@@ -146,7 +148,8 @@ internal class RunLedger(maxRounds: Int = 0, capacity: Int = 96) {
         val NON_SEMANTIC_ARGS = setOf("timeout", "timeout_ms", "timeout_seconds", "deadline_ms", "wait_ms")
         const val HEX = "0123456789abcdef"
         val POLLING_TOOLS = setOf("wait_agents", "list_agents", "ui_dump", "ui_current_app", "ui_screenshot",
-            "terminal_read", "todo_read", "goal_read", "goal_status")
+            "terminal_read", "todo_read", "goal_read", "goal_status", "job_list")
+        val JOB_LIST_ELAPSED = Regex("""(?m)^(- \S+ \[(?:running|done|failed)\]) \d+\.\ds\b""")
         val DISCARD = object : OutputStream() {
             override fun write(value: Int) = Unit
             override fun write(buffer: ByteArray, offset: Int, length: Int) = Unit

@@ -10,39 +10,36 @@ package com.suixing.agent.data
  * 两种都表现为用户侧「发送失败」，而且看不出原因。原来它是 `AgentEngine` 的私有方法，
  * 一条测试都没有；抽出来之后这两个方向都能被断言钉住。
  *
- * 语义与原来**逐字一致**（先按"结果是否齐全"筛助手，再按"是否有人问过"筛工具结果）：
- * 两轮筛选必须一起做 —— 只丢助手会留下一堆孤儿工具结果，只丢工具结果会留下没人应答的声明，
- * 两种都会被端点拒绝。
+ * 每条工具声明只匹配它之后、下一条工具声明之前的结果，避免不同轮复用 call id 时
+ * 借用其它轮的结果。缺结果仍丢弃整批；同批重复结果只保留首次，普通消息保持原序。
  */
 internal object WireSanitize {
 
     fun apply(messages: List<StoredMessage>): List<StoredMessage> {
-        // ① 哪些 toolCallId 真的拿到了结果 —— **一趟扫完**（原来 filter+mapNotNull+toSet
-        // 三份中间集合）。② 丢掉"有呼叫但结果不全"的助手（并行里缺一条就不行）。
-        val answered = HashSet<String>()
-        for (message in messages) {
-            if (message.role == Roles.TOOL) message.toolCallId?.let { answered.add(it) }
-        }
-        val assistants = ArrayList<StoredMessage>(messages.size)
-        // ③ 反过来：哪些 toolCallId 还有被保留的助手问过（同一趟里顺手收集）。
-        val asked = HashSet<String>()
-        for (message in messages) {
-            if (message.role == Roles.ASSISTANT) {
-                if (message.toolCalls.any { it.id !in answered }) continue
-                for (call in message.toolCalls) asked.add(call.id)
+        val kept = BooleanArray(messages.size) { true }
+        var assistantAt = -1
+        var callIds: Set<String> = emptySet()
+        val results = HashMap<String, Int>()
+        fun finishBatch() {
+            if (assistantAt >= 0 && results.size < messages[assistantAt].toolCalls.size) {
+                kept[assistantAt] = false
+                for (at in results.values) kept[at] = false
             }
-            assistants.add(message)
+            results.clear()
         }
-        // ④ 丢掉没人问过的工具结果（含 toolCallId 缺失的那种）。
-        val out = ArrayList<StoredMessage>(assistants.size)
-        for (message in assistants) {
-            if (message.role != Roles.TOOL) {
-                out.add(message)
-                continue
+        for ((at, message) in messages.withIndex()) {
+            if (message.role == Roles.ASSISTANT && message.toolCalls.isNotEmpty()) {
+                finishBatch()
+                assistantAt = at
+                callIds = message.toolCalls.mapTo(HashSet()) { it.id }
+            } else if (message.role == Roles.TOOL) {
+                val id = message.toolCallId
+                if (id == null || id !in callIds || results.putIfAbsent(id, at) != null) {
+                    kept[at] = false
+                }
             }
-            val id = message.toolCallId ?: continue
-            if (id in asked) out.add(message)
         }
-        return out
+        finishBatch()
+        return messages.filterIndexed { at, _ -> kept[at] }
     }
 }

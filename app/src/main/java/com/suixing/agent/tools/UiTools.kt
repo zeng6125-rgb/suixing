@@ -11,6 +11,7 @@ import com.suixing.agent.capability.ShellTier
 import com.suixing.agent.service.SuixingAccessibilityService
 import com.suixing.agent.virtualscreen.VirtualScreenManager
 import com.suixing.agent.service.TouchFx
+import com.suixing.agent.service.uiOperationLabel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -187,8 +188,10 @@ class UiTools(
     override suspend fun execute(name: String, args: JsonObject): ToolResult {
         if (name == "ui_wait") {
             val ms = args.int("ms", 1000).coerceIn(100, 30_000)
-            delay(ms.toLong())
-            return ToolResult.success("已等待 $ms 毫秒")
+            return TouchFx.withUiOperation(context, uiOperationLabel(name, virtualDisplay())) {
+                delay(ms.toLong())
+                ToolResult.success("已等待 $ms 毫秒")
+            }
         }
 
         val service = accessibility()
@@ -201,53 +204,55 @@ class UiTools(
         fun input(command: String): String = if (vd >= 0) "input -d $vd $command" else "input $command"
         val fx: (() -> Unit)? = if (vd >= 0) null else { { } }
 
-        return when (name) {
-            "ui_dump" -> dump(service, args, vd)
-            "ui_screenshot" -> screenshot(service, args, vd)
-            "ui_tap" -> {
-                val x = args.int("x", 0).toFloat()
-                val y = args.int("y", 0).toFloat()
-                gesture(
-                    accessibilityAction = { it.tap(x, y, displayId = vd) },
-                    command = input("tap ${x.toInt()} ${y.toInt()}"),
-                    successText = "已点击 (${x.toInt()}, ${y.toInt()})",
-                    fx = if (vd >= 0) null else ({ TouchFx.tap(context, x, y) }),
-                )
-            }
+        return TouchFx.withUiOperation(context, uiOperationLabel(name, vd, args.str("path"))) {
+            when (name) {
+                "ui_dump" -> dump(service, args, vd)
+                "ui_screenshot" -> screenshot(service, args, vd)
+                "ui_tap" -> {
+                    val x = args.int("x", 0).toFloat()
+                    val y = args.int("y", 0).toFloat()
+                    gesture(
+                        accessibilityAction = { it.tap(x, y, displayId = vd) },
+                        command = input("tap ${x.toInt()} ${y.toInt()}"),
+                        successText = "已点击 (${x.toInt()}, ${y.toInt()})",
+                        fx = if (vd >= 0) null else ({ TouchFx.tap(context, x, y) }),
+                    )
+                }
 
-            "ui_long_press" -> {
-                val x = args.int("x", 0).toFloat()
-                val y = args.int("y", 0).toFloat()
-                gesture(
-                    accessibilityAction = { it.longPress(x, y, displayId = vd) },
-                    command = input("swipe ${x.toInt()} ${y.toInt()} ${x.toInt()} ${y.toInt()} 800"),
-                    successText = "已长按 (${x.toInt()}, ${y.toInt()})",
-                    fx = if (vd >= 0) null else ({ TouchFx.longPress(context, x, y) }),
-                )
-            }
+                "ui_long_press" -> {
+                    val x = args.int("x", 0).toFloat()
+                    val y = args.int("y", 0).toFloat()
+                    gesture(
+                        accessibilityAction = { it.longPress(x, y, displayId = vd) },
+                        command = input("swipe ${x.toInt()} ${y.toInt()} ${x.toInt()} ${y.toInt()} 800"),
+                        successText = "已长按 (${x.toInt()}, ${y.toInt()})",
+                        fx = if (vd >= 0) null else ({ TouchFx.longPress(context, x, y) }),
+                    )
+                }
 
-            "ui_swipe" -> {
-                val duration = args.int("duration", 300).coerceIn(60, 5000)
-                val x1 = args.int("x1", 0).toFloat()
-                val y1 = args.int("y1", 0).toFloat()
-                val x2 = args.int("x2", 0).toFloat()
-                val y2 = args.int("y2", 0).toFloat()
-                gesture(
-                    accessibilityAction = { it.swipe(x1, y1, x2, y2, duration.toLong(), displayId = vd) },
-                    command = input("swipe ${x1.toInt()} ${y1.toInt()} ${x2.toInt()} ${y2.toInt()} $duration"),
-                    successText = "已滑动",
-                    fx = if (vd >= 0) null else ({ TouchFx.swipe(context, x1, y1, x2, y2) }),
-                )
-            }
+                "ui_swipe" -> {
+                    val duration = args.int("duration", 300).coerceIn(60, 5000)
+                    val x1 = args.int("x1", 0).toFloat()
+                    val y1 = args.int("y1", 0).toFloat()
+                    val x2 = args.int("x2", 0).toFloat()
+                    val y2 = args.int("y2", 0).toFloat()
+                    gesture(
+                        accessibilityAction = { it.swipe(x1, y1, x2, y2, duration.toLong(), displayId = vd) },
+                        command = input("swipe ${x1.toInt()} ${y1.toInt()} ${x2.toInt()} ${y2.toInt()} $duration"),
+                        successText = "已滑动",
+                        fx = if (vd >= 0) null else ({ TouchFx.swipe(context, x1, y1, x2, y2) }),
+                    )
+                }
 
-            // 带 displayId：虚拟屏开着时这几个也必须作用在那块屏上，否则按文字点击/输入/按键
-            // 会落到主屏（issue #80）。
-            "ui_click_text" -> clickText(service, args, vd)
-            "ui_type" -> type(service, args, vd)
-            "ui_type_into" -> typeInto(service, args, vd)
-            "ui_key" -> key(service, args, vd)
-            "ui_current_app" -> currentApp(service, vd)
-            else -> ToolResult.failure("未知工具：$name")
+                // 带 displayId：虚拟屏开着时这几个也必须作用在那块屏上，否则按文字点击/输入/按键
+                // 会落到主屏（issue #80）。
+                "ui_click_text" -> clickText(service, args, vd)
+                "ui_type" -> type(service, args, vd)
+                "ui_type_into" -> typeInto(service, args, vd)
+                "ui_key" -> key(service, args, vd)
+                "ui_current_app" -> currentApp(service, vd)
+                else -> ToolResult.failure("未知工具：$name")
+            }
         }
     }
 
@@ -387,8 +392,6 @@ class UiTools(
         args: JsonObject,
         displayId: Int,
     ): ToolResult {
-        // 同上：截图也是 UI 操作（spec v2 §2）。
-        if (displayId < 0) TouchFx.noteToolActivity(context, "ui_screenshot")
         // 用 path 重新加载一张旧截图：出站时更早的截图会被省略（省带宽），占位里给出路径，
         // 模型需要再看一眼时用它把原图重新挂回 wire —— 不必重新截图、也不必让用户重做界面。
         args.str("path")?.trim()?.takeIf { it.isNotEmpty() }?.let { raw ->
@@ -462,7 +465,7 @@ class UiTools(
         withContext(Dispatchers.IO) { runCatching { file.delete() } }
         var result: ShellResult? = null
         val png = try {
-            result = shell("screencap -p ${file.absolutePath}") ?: return blocked()
+            result = TouchFx.withoutOperationStatus { shell("screencap -p ${file.absolutePath}") } ?: return blocked()
             withContext(Dispatchers.IO) {
                 runCatching { if (file.exists()) file.readBytes() else ByteArray(0) }.getOrDefault(ByteArray(0))
             }

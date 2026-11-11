@@ -1,6 +1,7 @@
 package com.suixing.agent.ui.chat
 
 import com.suixing.agent.agent.ApprovalGate
+import com.suixing.agent.agent.RunState
 import com.suixing.agent.data.AppSettings
 import com.suixing.agent.data.ChatRepository
 import com.suixing.agent.data.Conversation
@@ -8,16 +9,21 @@ import com.suixing.agent.data.GoalStore
 import com.suixing.agent.data.SettingsRepository
 import com.suixing.agent.data.StoredMessage
 import io.mockk.coVerify
+import io.mockk.coEvery
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.verify
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -60,6 +66,67 @@ class ChatRuntimeTest {
         assertEquals("", runtime.state.value.conversationId)
         coVerify(exactly = 0) { chats.readLastOpened() }
         coVerify(exactly = 0) { goals.read() }
+    }
+
+    @Test fun aNotificationConversationCannotBeOverwrittenBySuspendedStartupRecovery(): Unit = runBlocking {
+        val environment = environment(runtimeScope)
+        val original = Conversation(id = "a", title = "原会话", messageCount = 1)
+        val target = Conversation(id = "b", title = "通知会话", messageCount = 1)
+        val openedOriginal = original.copy(messages = listOf(StoredMessage("a-message", "user", "原问题")))
+        val openedTarget = target.copy(messages = listOf(StoredMessage("b-message", "user", "通知回复")))
+        every { environment.chats.conversations } returns MutableStateFlow(listOf(original, target))
+        every { environment.engine.stateOf(any()) } returns MutableStateFlow<RunState>(RunState.Idle)
+        coEvery { environment.settings.current() } returns AppSettings()
+        coEvery { environment.chats.readLastOpened() } returns original.id
+        coEvery { environment.chats.readLive(any()) } returns null
+        coEvery { environment.chats.readTailWindow(target.id) } returns null
+        coEvery { environment.chats.readTail(target.id) } returns openedTarget
+        val restoreStarted = CompletableDeferred<Unit>()
+        val releaseRestore = CompletableDeferred<Unit>()
+        lateinit var recoveryJob: Job
+        coEvery { environment.chats.readTail(original.id) } coAnswers {
+            recoveryJob = currentCoroutineContext()[Job]!!
+            restoreStarted.complete(Unit)
+            releaseRestore.await()
+            openedOriginal
+        }
+        val runtime = ChatRuntime(runtimeScope, environment)
+        runtime.observe()
+        withTimeout(5_000) { restoreStarted.await() }
+
+        runtime.openConversation(target)
+        withTimeout(5_000) {
+            runtime.state.first { it.conversationId == target.id && !it.loading && it.messages.isNotEmpty() }
+        }
+        releaseRestore.complete(Unit)
+        withTimeout(5_000) { recoveryJob.join() }
+
+        assertEquals(target.id, runtime.state.value.conversationId)
+        assertEquals(openedTarget.messages, runtime.state.value.messages)
+        assertEquals(target.id, runtime.lastOpenedId)
+    }
+
+    @Test fun normalStartupRecoveryRestoresTheSavedConversationAndItsMessages(): Unit = runBlocking {
+        val environment = environment(runtimeScope)
+        val original = Conversation(id = "a", title = "原会话", messageCount = 1)
+        val opened = original.copy(messages = listOf(StoredMessage("a-message", "user", "原问题")))
+        every { environment.chats.conversations } returns MutableStateFlow(listOf(original))
+        every { environment.engine.stateOf(any()) } returns MutableStateFlow<RunState>(RunState.Idle)
+        coEvery { environment.settings.current() } returns AppSettings()
+        coEvery { environment.chats.readLastOpened() } returns original.id
+        coEvery { environment.chats.readLive(any()) } returns null
+        lateinit var recoveryJob: Job
+        coEvery { environment.chats.readTail(original.id) } coAnswers {
+            recoveryJob = currentCoroutineContext()[Job]!!
+            opened
+        }
+        val runtime = ChatRuntime(runtimeScope, environment)
+        runtime.observe()
+        withTimeout(5_000) { runtime.state.first { it.conversationId == original.id && !it.loading } }
+        withTimeout(5_000) { recoveryJob.join() }
+
+        assertEquals(opened.messages, runtime.state.value.messages)
+        assertEquals(original.id, runtime.lastOpenedId)
     }
 
     @Test fun draftsAndAttachmentsBelongToTheirOwnConversation() = runBlocking {

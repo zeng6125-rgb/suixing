@@ -2,7 +2,7 @@ package com.suixing.agent.tools
 
 import kotlinx.serialization.json.JsonObject
 
-/** One-shot app-uid Bash calls share shell execution, not its privileged capability gate. */
+/** One-shot Bash calls resolve the user's configured tier through the shared shell path. */
 class BashTools(private val shellTools: ShellTools) : ToolGroup() {
     override val tier: String = TIER_NONE
     override val group: String = "Shell"
@@ -10,8 +10,9 @@ class BashTools(private val shellTools: ShellTools) : ToolGroup() {
     override val specs: List<ToolSpec> = listOf(
         ToolSpec(
             "bash",
-            "Run a one-shot command in the bundled GNU Bash as the app uid. Supports Bash syntax, " +
-                "arrays and process substitution. No Shizuku/root selection and no fallback to sh. " +
+            "Run a one-shot command in the bundled GNU Bash using the privilege tier allowed in Settings " +
+                "(root, Shizuku, or app uid). Supports Bash syntax, arrays and process substitution. " +
+                "Never falls back to sh or exceeds the configured privilege tier. " +
                 "Returns stdout, stderr and exit code; commands have a 45-second limit. " +
                 "Use terminal tools for interactive sessions.",
             Schema.objectOf(

@@ -12,6 +12,7 @@ import android.os.StatFs
 import com.suixing.agent.data.MemoryStore
 import com.suixing.agent.data.UserProfileStore
 import com.suixing.agent.service.TouchFx
+import com.suixing.agent.service.uiOperationLabel
 import com.suixing.agent.virtualscreen.VirtualScreenControl
 import com.suixing.agent.virtualscreen.VirtualScreenManager
 import kotlinx.coroutines.Dispatchers
@@ -213,28 +214,30 @@ class SystemTools(
         if (target.isEmpty()) return ToolResult.failure("缺少参数 target")
         // Bind the destination before lookup suspends; closing it must not redirect this call to the main screen.
         val display = VirtualScreenManager.state.value
-        // The lookup scans every installed app (queryIntentActivities + loadLabel), which is a
-        // visible stall on the main thread; only the launch itself stays there.
-        val found = withContext(Dispatchers.IO) { runCatching { resolveLaunchIntent(target) } }
-        val intent = found.getOrElse { error ->
-            return ToolResult.failure(error.message ?: "打开应用失败：${error.javaClass.simpleName}")
-        }
-        if (display.running) {
-            return try {
-                val id = VirtualScreenControl.launchIntent(context, intent, display.displayId)
-                ToolResult.success("已在虚拟屏 $id 打开 ${intent.component?.packageName ?: target}")
-            } catch (cancelled: kotlinx.coroutines.CancellationException) {
-                throw cancelled
-            } catch (error: Exception) {
-                ToolResult.failure(error.message ?: "虚拟屏应用启动失败")
+        return TouchFx.withUiOperation(context, uiOperationLabel("open_app", if (display.running) display.displayId else -1)) {
+            // The lookup scans every installed app (queryIntentActivities + loadLabel), which is a
+            // visible stall on the main thread; only the launch itself stays there.
+            val found = withContext(Dispatchers.IO) { runCatching { resolveLaunchIntent(target) } }
+            val intent = found.getOrElse { error ->
+                return@withUiOperation ToolResult.failure(error.message ?: "打开应用失败：${error.javaClass.simpleName}")
             }
+            if (display.running) {
+                return@withUiOperation try {
+                    val id = VirtualScreenControl.launchIntent(context, intent, display.displayId)
+                    ToolResult.success("已在虚拟屏 $id 打开 ${intent.component?.packageName ?: target}")
+                } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                    throw cancelled
+                } catch (error: Exception) {
+                    ToolResult.failure(error.message ?: "虚拟屏应用启动失败")
+                }
+            }
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            context.startActivity(intent)
+            // The screen is about to belong to another app. There is no touch point to draw a ring
+            // around, so the edge flash is the whole signal that the agent did this.
+            TouchFx.handoff(context)
+            ToolResult.success("已打开 ${intent.component?.packageName ?: target}")
         }
-        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        context.startActivity(intent)
-        // The screen is about to belong to another app. There is no touch point to draw a ring
-        // around, so the edge flash is the whole signal that the agent did this.
-        TouchFx.handoff(context)
-        return ToolResult.success("已打开 ${intent.component?.packageName ?: target}")
     }
 
     /** PackageManager lookups only, off the main thread; throws when nothing matches. */
@@ -252,16 +255,20 @@ class SystemTools(
             ?: throw IllegalStateException("找到应用但没有启动入口：${match.activityInfo?.packageName}")
     }
 
-    private fun openUrl(args: JsonObject): ToolResult = runCatching {
+    private suspend fun openUrl(args: JsonObject): ToolResult {
         val url = args.str("url")?.trim().orEmpty()
         if (url.isEmpty()) return ToolResult.failure("缺少参数 url")
-        val intent = Intent(Intent.ACTION_VIEW, android.net.Uri.parse(url))
-            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        context.startActivity(intent)
-        // A URL usually lands in a browser, which is the same handoff as launching an app.
-        TouchFx.handoff(context)
-        ToolResult.success("已打开 $url")
-    }.getOrElse { ToolResult.failure("打开网址失败：${it.message ?: it.javaClass.simpleName}") }
+        return TouchFx.withUiOperation(context, "正在打开应用") {
+            runCatching {
+                val intent = Intent(Intent.ACTION_VIEW, android.net.Uri.parse(url))
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                context.startActivity(intent)
+                // A URL usually lands in a browser, which is the same handoff as launching an app.
+                TouchFx.handoff(context)
+                ToolResult.success("已打开 $url")
+            }.getOrElse { ToolResult.failure("打开网址失败：${it.message ?: it.javaClass.simpleName}") }
+        }
+    }
 
     private suspend fun clipboardRead(): ToolResult {
         val manager = context.getSystemService(ClipboardManager::class.java)

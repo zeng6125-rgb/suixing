@@ -37,6 +37,8 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.input.pointer.util.VelocityTracker
 import kotlin.math.abs
 import kotlinx.coroutines.Job
@@ -412,6 +414,8 @@ internal fun SuixingDrawer(
     content: @Composable () -> Unit,
 ) {
     val panelPx = with(LocalDensity.current) { DRAWER_SHEET_WIDTH.dp.toPx() }
+    val focusManager = LocalFocusManager.current
+    val keyboardController = LocalSoftwareKeyboardController.current
 
     // Pointer callbacks only update this accumulator. One frame consumer samples its latest
     // target, so high-rate input cannot queue one Animatable mutation per event.
@@ -465,10 +469,12 @@ internal fun SuixingDrawer(
                 // finally; a normal release clears the owner first so finally cannot settle.
                 var ownedSession: DrawerGestureSession? = null
                 var ownedGeneration: Long? = null
+                var dismissKeyboardOnOpen = false
                 try {
                     // Callbacks only append deltas; the frame consumer owns snaps.
                     detectHorizontalDragGestures(
                         onDragStart = {
+                            dismissKeyboardOnOpen = !state.homeShieldActive
                             // 固定起点并累计 delta：不能每个 pointer event 都读 `progress.value`
                             // 再叠加，因为 frame consumer 可能还没应用上一批 delta。
                             val session = state.beginGesture()
@@ -477,6 +483,11 @@ internal fun SuixingDrawer(
                             tracker.resetTracking()
                         },
                         onHorizontalDrag = { change, dragAmount ->
+                            if (dismissKeyboardOnOpen && dragAmount > 0f) {
+                                dismissKeyboardOnOpen = false
+                                keyboardController?.hide()
+                                focusManager.clearFocus(force = true)
+                            }
                             change.consume()
                             ownedGeneration?.let { dragAccumulator.dragBy(it, dragAmount) }
                             tracker.trackDrawerPointer(change)

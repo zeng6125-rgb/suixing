@@ -52,6 +52,8 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavGraph.Companion.findStartDestination
@@ -64,6 +66,7 @@ import com.suixing.agent.data.AppSettings
 import com.suixing.agent.data.Assistant
 import com.suixing.agent.data.Conversation
 import com.suixing.agent.service.FloatConsoleService
+import com.suixing.agent.service.ChatCompletionNotifications
 import com.suixing.agent.ui.assistant.AssistantEditor
 import com.suixing.agent.ui.assistant.AssistantSheet
 import com.suixing.agent.ui.capability.CapabilityScreen
@@ -99,6 +102,7 @@ import com.suixing.agent.ui.tasks.TasksScreen
 import com.suixing.agent.ui.theme.LocalDarkTheme
 import com.suixing.agent.ui.theme.LocalDrawerSurfaceColor
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.CoroutineStart
@@ -323,6 +327,17 @@ fun SuixingApp() {
             chat.openConversation(conversation)
         }
     }
+    LaunchedEffect(chat) {
+        ChatCompletionNotifications.openRequested.collectLatest { id ->
+            if (id == null) return@collectLatest
+            if (Core.chats.conversations.value.isEmpty()) Core.chats.load()
+            Core.chats.conversations.value.firstOrNull { it.id == id }?.let { conversation ->
+                chatFromDrawer()
+                chat.openConversation(conversation)
+            }
+            ChatCompletionNotifications.openRequested.compareAndSet(id, null)
+        }
+    }
     // 返回上一页：顶栏按钮与系统返回都走这里。
     val goBack: () -> Unit = {
         switchIntents.invalidate()
@@ -360,8 +375,12 @@ fun SuixingApp() {
             )
         }
     }
-    val openSidebar: () -> Unit = remember(scope, drawerState, switchIntents) { {
+    val focusManager = LocalFocusManager.current
+    val keyboardController = LocalSoftwareKeyboardController.current
+    val openSidebar: () -> Unit = remember(scope, drawerState, switchIntents, focusManager, keyboardController) { {
         if (routeNow == "empty") {
+            keyboardController?.hide()
+            focusManager.clearFocus(force = true)
             switchIntents.invalidate()
             scope.launch(start = CoroutineStart.UNDISPATCHED) {
                 // Claim the shared motion before the next frame, just like close and conversation switch.

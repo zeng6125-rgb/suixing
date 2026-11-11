@@ -81,6 +81,7 @@ fun UiAutomationScreen(onBack: () -> Unit, onOpen: (String) -> Unit) {
         ) {
             item(key = "virtual-screen") { VirtualScreenCard() }
             item(key = "edge-light") { EdgeLightCard() }
+            item(key = "automation-prompt") { AutomationPromptCard() }
             item(key = "automation-permissions") { AutomationPermissionsCard { onOpen("capability") } }
         }
     }
@@ -322,6 +323,42 @@ private fun EdgeLightCard() {
         SettingRow(title = "在 JAgent 前台显示", subtitle = "总开关关闭时不生效。", control = {
             SettingsSwitch(checked = settings?.second == true, enabled = settings?.first == true,
                 onCheckedChange = { on -> saveEdgePreference(on, foregroundOnly = true) })
+        })
+    }
+}
+
+@Composable
+private fun AutomationPromptCard() {
+    val settings by remember {
+        Core.settings.flow.map<AppSettings, Pair<Boolean, Boolean>?> {
+            it.uiAutomationPrompt to it.uiAutomationPromptInForeground
+        }.distinctUntilChanged()
+    }.collectAsStateWithLifecycle(initialValue = null)
+    val scope = rememberCoroutineScope()
+    fun savePromptPreference(on: Boolean, foregroundOnly: Boolean) {
+        val suppression = if (!on) TouchFx.suppressPromptForPreferenceChange(foregroundOnly) else null
+        scope.launch {
+            var saved = false
+            try {
+                saved = Core.settings.update {
+                    if (foregroundOnly) it.copy(uiAutomationPromptInForeground = on) else it.copy(uiAutomationPrompt = on)
+                }
+            } finally {
+                if (!saved && suppression != null) TouchFx.cancelPromptPreferenceChange(suppression)
+            }
+        }
+    }
+    SuixingCard {
+        AutomationCardHeader(title = "自动化提示", icon = R.drawable.ic_pointer,
+            subtitle = if (settings == null) "正在读取设置…" else "操作状态与任务控制条，独立于圆形悬浮窗。")
+        Spacer(Modifier.height(SettingsStyle.FieldGap))
+        SettingRow(title = "显示自动化提示", control = {
+            SettingsSwitch(checked = settings?.first == true, enabled = settings != null,
+                onCheckedChange = { on -> savePromptPreference(on, foregroundOnly = false) })
+        })
+        SettingRow(title = "在 JAgent 前台显示", subtitle = "总开关关闭时不生效。", control = {
+            SettingsSwitch(checked = settings?.second == true, enabled = settings?.first == true,
+                onCheckedChange = { on -> savePromptPreference(on, foregroundOnly = true) })
         })
     }
 }

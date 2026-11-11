@@ -444,6 +444,10 @@ data class AppSettings(
      * **不独立**：`edgeLight` 为 false 时这一项无效（一律不显示）。
      */
     val edgeLightInForeground: Boolean = true,
+    /** 自动化操作提示总开关，只控制 UiOperationOverlay 的显示。 */
+    val uiAutomationPrompt: Boolean = true,
+    /** 自动化提示在 JAgent 前台是否显示；总开关关闭时无效。 */
+    val uiAutomationPromptInForeground: Boolean = true,
     /**
      * 打字机效果：**正在流式**的正文与思考逐字放出来，而不是每 80ms 整块跳一次
      * （节拍见 ChatViewModel 的 `DELTA_PUBLISH_MS`、放字逻辑见 ui/chat/Typewriter.kt）。
@@ -643,7 +647,9 @@ const val DEFAULT_SYSTEM_PROMPT = """你是 JAgent，运行在用户安卓手机
 - 涉及删除、发送、支付、卸载等不可逆操作时，先向用户说明再执行。
 - 用简洁的中文回答，必要时用短列表。"""
 
-class SettingsRepository(private val context: Context) {
+class SettingsRepository internal constructor(private val dataStore: DataStore<Preferences>) {
+    constructor(context: Context) : this(context.settingsDataStore)
+
     private val failures = kotlinx.coroutines.flow.MutableSharedFlow<String>(extraBufferCapacity = 4)
     val writeFailures: kotlinx.coroutines.flow.SharedFlow<String> = failures
 
@@ -673,7 +679,7 @@ class SettingsRepository(private val context: Context) {
 
     private val snapshots = SnapshotDecoder(::decodeUncached)
 
-    val flow: Flow<AppSettings> = context.settingsDataStore.data
+    val flow: Flow<AppSettings> = dataStore.data
         .map { prefs -> prefs[key] }
         .distinctUntilChanged()
         .map { raw -> decode(raw) }
@@ -683,7 +689,7 @@ class SettingsRepository(private val context: Context) {
 
     /** Persist explicit supplier cleanup on model-page entry, without adding work to cold startup. */
     suspend fun cleanupEmptyProviders() = persist {
-        context.settingsDataStore.edit { prefs ->
+        dataStore.edit { prefs ->
             val raw = prefs[key] ?: return@edit
             val parsed = runCatching { json.decodeCoreObject(AppSettings.serializer(), raw) }.getOrNull() ?: return@edit
             val clean = parsed.withoutEmptyProviders()
@@ -694,13 +700,13 @@ class SettingsRepository(private val context: Context) {
     }
 
     suspend fun save(settings: AppSettings): Boolean = persist {
-        context.settingsDataStore.edit { prefs ->
+        dataStore.edit { prefs ->
             prefs[key] = json.encodeToString(AppSettings.serializer(), settings.encryptedForStorage())
         }
     }
 
     suspend fun update(block: (AppSettings) -> AppSettings): Boolean = persist {
-        context.settingsDataStore.edit { prefs ->
+        dataStore.edit { prefs ->
             val stored = decode(prefs[key])
             prefs[key] = json.encodeToString(AppSettings.serializer(), block(stored).encryptedForStorage())
         }
@@ -739,9 +745,9 @@ class SettingsRepository(private val context: Context) {
         // 原来每次启动都走一遍 `edit`：① 要解密/加密 ⇒ 碰 Keystore（每次进程首次 ~150ms）；
         // ② `edit` 会**写**一次 DataStore ⇒ 设置流多发一次 ⇒ 聊天页整体重组一次
         // （每条消息的 Markdown 重新渲染）。老用户早就迁完了，却天天付这两笔。
-        val raw = context.settingsDataStore.data.first()[key] ?: return@persist
+        val raw = dataStore.data.first()[key] ?: return@persist
         if (!hasPlainSecret(raw)) return@persist
-        context.settingsDataStore.edit { prefs ->
+        dataStore.edit { prefs ->
             val current = prefs[key] ?: return@edit
             val encrypted = json.encodeToString(
                 AppSettings.serializer(),

@@ -6,6 +6,7 @@ import com.suixing.agent.capability.Shell
 import com.suixing.agent.capability.ShellResult
 import com.suixing.agent.capability.ShellTier
 import com.suixing.agent.service.TouchFx
+import com.suixing.agent.service.shellToolDrivesUi
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonObject
@@ -159,9 +160,9 @@ class ShellTools(
         else -> ToolResult.failure("未知工具：$name")
     }
 
-    /** Pin both selectors so the native entry cannot inherit auto privileges or silently choose sh. */
+    /** Use the configured privilege tier while requiring real Bash on every channel. */
     internal suspend fun runBash(args: JsonObject): ToolResult = runShell(
-        JsonObject(args + mapOf("mode" to JsonPrimitive("local"), "shell" to JsonPrimitive("bash"))),
+        JsonObject(args + mapOf("mode" to JsonPrimitive("auto"), "shell" to JsonPrimitive("bash"))),
         toolName = "bash",
     )
 
@@ -170,41 +171,42 @@ class ShellTools(
         if (command.isEmpty()) return@withContext ToolResult.failure("缺少参数 command")
         val mode = args.str("mode")?.trim()?.lowercase() ?: "auto"
         val shell = args.str("shell")?.trim()?.lowercase() ?: "auto"
-        drawInputFx(command, tool = toolName)
         if (mode == "root") capabilities.ensureRootProbed()
         val chosen = shellChannel(mode, capabilities.shellTier())
         val explicit = (args["observe_paths"] as? kotlinx.serialization.json.JsonArray).orEmpty()
             .mapNotNull { (it as? JsonPrimitive)?.content?.takeIf { value -> java.io.File(value).isAbsolute }?.let { value -> java.io.File(value) } }
-        return@withContext observeFileChanges(fileObservationRoots(runCatching { workspaceDir(context) }.getOrNull(), command, explicit)) {
-            // The local selector is strict for the native Bash entry. Root has its own bundled-Bash
-            // route; Shizuku remains a system shell, and neither is selected by runBash.
-            val result: ShellResult = when (chosen) {
-                "root" -> Shell.root(command)
-                "shizuku" -> Shell.shizuku(command)
-                else -> Shell.local(command, shell = shell)
-            }
-            // **bundledBash() 只探一次**（优化清单 tools-P2）：它是 NativeLib 目录上的 file.exists 探测，
-            // 原来在同一次调用里最多探两次。
-            val bundled = Shell.bundledBash() != null
-            val label = when (chosen) {
-                // root 档现在也走随包 bash（见 Shell.root），前缀照实标出来：没接上时仍写 root。
-                "root" -> if (bundled) "root+bash" else "root"
-                "shizuku" -> "shizuku(shell)"
-                else -> if (chosen == "local" && bundled && shell != "sh") {
-                    "local(app)+bash"
-                } else {
-                    "local(app)"
+        return@withContext TouchFx.withUiOperation(context, if (shellToolDrivesUi(toolName, command)) "正在操作屏幕" else null) {
+            drawInputFx(command, tool = toolName)
+            observeFileChanges(fileObservationRoots(runCatching { workspaceDir(context) }.getOrNull(), command, explicit)) {
+                val strictBash = toolName == "bash"
+                val result: ShellResult = when (chosen) {
+                    "root" -> if (strictBash) Shell.root(command, "bash") else Shell.root(command)
+                    "shizuku" -> if (strictBash) Shell.shizuku(command, "bash") else Shell.shizuku(command)
+                    else -> Shell.local(command, shell = shell)
                 }
-            }
-            val prefix = "[$label] exit=${result.exitCode}\n"
-            if (result.ok) {
-                // **写系统状态要读回核验**（issue #44 第一项）：`exit=0` 不等于生效 ——
-                // SELinux 拒绝、namespace 写错（system/secure/global）、wrong user 都可能静默失败。
-                // 模型看到 success 就继续下一步，要等几轮后才暴露。
-                val verify = verifySettingWrite(command, chosen, localShell = shell)
-                ToolResult.success(prefix + result.render() + (verify ?: ""))
-            } else {
-                ToolResult.failure(prefix + result.render())
+                // **bundledBash() 只探一次**（优化清单 tools-P2）：它是 NativeLib 目录上的 file.exists 探测，
+                // 原来在同一次调用里最多探两次。
+                val bundled = Shell.bundledBash() != null
+                val label = when (chosen) {
+                    // root 档现在也走随包 bash（见 Shell.root），前缀照实标出来：没接上时仍写 root。
+                    "root" -> if (bundled) "root+bash" else "root"
+                    "shizuku" -> if (strictBash && bundled) "shizuku(shell)+bash" else "shizuku(shell)"
+                    else -> if (chosen == "local" && bundled && shell != "sh") {
+                        "local(app)+bash"
+                    } else {
+                        "local(app)"
+                    }
+                }
+                val prefix = "[$label] exit=${result.exitCode}\n"
+                if (result.ok) {
+                    // **写系统状态要读回核验**（issue #44 第一项）：`exit=0` 不等于生效 ——
+                    // SELinux 拒绝、namespace 写错（system/secure/global）、wrong user 都可能静默失败。
+                    // 模型看到 success 就继续下一步，要等几轮后才暴露。
+                    val verify = verifySettingWrite(command, chosen, localShell = shell, strictBash = strictBash)
+                    ToolResult.success(prefix + result.render() + (verify ?: ""))
+                } else {
+                    ToolResult.failure(prefix + result.render())
+                }
             }
         }
     }
@@ -215,13 +217,13 @@ class ShellTools(
      * 读回走**同一档位**（root 写就 root 读）：换身份读会读不到或读到别人的值，误报成"未生效"。
      * 不匹配写命令时返回 null（读命令、普通命令不加任何东西，避免噪音）。
      */
-    private suspend fun verifySettingWrite(command: String, chosen: String, localShell: String): String? {
+    private suspend fun verifySettingWrite(command: String, chosen: String, localShell: String, strictBash: Boolean): String? {
         val write = parseSettingWrite(command) ?: return null
         val getCmd = "settings get ${write.ns} ${write.key}"
         val actual = runCatching {
             val r = when (chosen) {
-                "root" -> Shell.root(getCmd)
-                "shizuku" -> Shell.shizuku(getCmd)
+                "root" -> if (strictBash) Shell.root(getCmd, "bash") else Shell.root(getCmd)
+                "shizuku" -> if (strictBash) Shell.shizuku(getCmd, "bash") else Shell.shizuku(getCmd)
                 else -> Shell.local(getCmd, shell = localShell)
             }
             r.takeIf { it.ok }?.stdout?.trim()?.trim('"')
@@ -317,34 +319,36 @@ class ShellTools(
         }
         // `action=start` runs `monkey`, which launches an app: the same handoff `open_app` draws.
         // After the privilege check, so nothing flashes for a command that never runs.
-        drawInputFx(command, tool = "app_action")
         val root = channel == ShellTier.ROOT
-        val result = if (root) Shell.root(command) else Shell.shizuku(command)
-        val label = if (root) "root" else "shizuku(shell)"
-        val prefix = "[$label] exit=${result.exitCode}\n"
-        if (!result.ok) return@withContext ToolResult.failure(prefix + result.render())
-        // **enable/disable 要读回核验**（issue #44 第一项的延伸）：`pm disable-user` 返回 0
-        // 也不代表状态真的变了（用户 0 之外的 profile、系统应用受保护等）。读回一次
-        // `pm list packages -d`（＝已停用列表）对照，不匹配就把"未生效"明确说出来。
-        val verify = when (action) {
-            "disable", "enable" -> {
-                val disabled = runCatching {
-                    val r = if (root) Shell.root("pm list packages -d") else Shell.shizuku("pm list packages -d")
-                    r.render()
-                }.getOrNull()
-                if (disabled == null) {
-                    "\n[verify] 读回失败，无法确认是否生效 —— 请勿假设已修改"
-                } else {
-                    val isDisabled = disabled.lineSequence().any { it.trim() == "package:$pkg" }
-                    val expected = action == "disable"
-                    val ok = isDisabled == expected
-                    "\n[verify] $pkg disabled=$isDisabled expected=$expected verified=$ok" +
-                        if (!ok) " — 未生效，请勿假设已修改" else ""
+        return@withContext TouchFx.withUiOperation(context, if (action == "start") "正在打开应用" else null) {
+            drawInputFx(command, tool = "app_action")
+            val result = if (root) Shell.root(command) else Shell.shizuku(command)
+            val label = if (root) "root" else "shizuku(shell)"
+            val prefix = "[$label] exit=${result.exitCode}\n"
+            if (!result.ok) return@withUiOperation ToolResult.failure(prefix + result.render())
+            // **enable/disable 要读回核验**（issue #44 第一项的延伸）：`pm disable-user` 返回 0
+            // 也不代表状态真的变了（用户 0 之外的 profile、系统应用受保护等）。读回一次
+            // `pm list packages -d`（＝已停用列表）对照，不匹配就把"未生效"明确说出来。
+            val verify = when (action) {
+                "disable", "enable" -> {
+                    val disabled = runCatching {
+                        val r = if (root) Shell.root("pm list packages -d") else Shell.shizuku("pm list packages -d")
+                        r.render()
+                    }.getOrNull()
+                    if (disabled == null) {
+                        "\n[verify] 读回失败，无法确认是否生效 —— 请勿假设已修改"
+                    } else {
+                        val isDisabled = disabled.lineSequence().any { it.trim() == "package:$pkg" }
+                        val expected = action == "disable"
+                        val ok = isDisabled == expected
+                        "\n[verify] $pkg disabled=$isDisabled expected=$expected verified=$ok" +
+                            if (!ok) " — 未生效，请勿假设已修改" else ""
+                    }
                 }
+                else -> ""
             }
-            else -> ""
+            ToolResult.success(prefix + result.render() + verify)
         }
-        ToolResult.success(prefix + result.render() + verify)
     }
 
     /**

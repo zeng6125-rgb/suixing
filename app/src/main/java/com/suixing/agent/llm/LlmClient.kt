@@ -492,7 +492,10 @@ class LlmClient(http: OkHttpClient? = null) {
                             throw AttemptFailure(
                                 code = response.code,
                                 retryAfterSeconds = parseRetryAfter(response.header("Retry-After")),
-                                failure = LlmException(friendlyHttp(response.code, errBody)),
+                                failure = LlmException(
+                                    friendlyHttp(response.code, errBody) + if (response.code == 400)
+                                        "（模型：${settings.model}，协议：${protocol.ifBlank { "openai" }}）" else "",
+                                ),
                             )
                         }
                         val stream = StreamTurn(protocol).also { partial = it }
@@ -1026,10 +1029,45 @@ class LlmClient(http: OkHttpClient? = null) {
         protocol: String,
     ): JsonObject = buildRequestBody(settings, messages, tools, protocol, null)
 
-    private fun buildRequestBody(settings: AppSettings, messages: List<ChatMessage>, tools: List<ToolSpec>, protocol: String, strings: WireStringParts?): JsonObject = when (protocol) {
-        PROTOCOL_ANTHROPIC -> anthropicBody(settings, messages, tools)
-        PROTOCOL_RESPONSES -> responsesBodyStreaming(settings, messages, tools, strings)
-        else -> chatCompletionsBodyStreaming(settings, messages, tools, strings)
+    private fun buildRequestBody(settings: AppSettings, messages: List<ChatMessage>, tools: List<ToolSpec>, protocol: String, strings: WireStringParts?): JsonObject {
+        val ordered = orderedToolResults(messages)
+        return when (protocol) {
+            PROTOCOL_ANTHROPIC -> anthropicBody(settings, ordered, tools)
+            PROTOCOL_RESPONSES -> responsesBodyStreaming(settings, ordered, tools, strings)
+            else -> chatCompletionsBodyStreaming(settings, ordered, tools, strings)
+        }
+    }
+
+    /** Keep tool results together on the request without changing transcript/source spans. */
+    private fun orderedToolResults(messages: List<ChatMessage>): List<ChatMessage> {
+        var ordered: ArrayList<ChatMessage>? = null
+        var outstanding: MutableSet<String>? = null
+        var delayed: ArrayList<ChatMessage>? = null
+        var delayedAt = 0
+        for ((index, message) in messages.withIndex()) {
+            if (message.role == Roles.ASSISTANT && message.toolCalls.isNotEmpty()) {
+                delayed?.let { ordered?.addAll(it) }
+                delayed = null
+                outstanding = message.toolCalls.mapTo(HashSet()) { it.id }
+                ordered?.add(message)
+            } else if (message.role == Roles.TOOL && message.toolCallId?.let { outstanding?.remove(it) } == true) {
+                if (delayed != null && ordered == null) {
+                    ordered = ArrayList<ChatMessage>(messages.size).also { it.addAll(messages.subList(0, delayedAt)) }
+                }
+                ordered?.add(message)
+                if (outstanding?.isEmpty() == true) {
+                    delayed?.let { ordered?.addAll(it) }
+                    delayed = null
+                }
+            } else if (outstanding?.isNotEmpty() == true) {
+                val pendingMessages = delayed ?: ArrayList<ChatMessage>().also { delayed = it; delayedAt = index }
+                pendingMessages.add(message)
+            } else {
+                ordered?.add(message)
+            }
+        }
+        delayed?.let { ordered?.addAll(it) }
+        return ordered ?: messages
     }
 
     private fun chatCompletionsBody(
@@ -1280,7 +1318,7 @@ class LlmClient(http: OkHttpClient? = null) {
                 put("type", JsonPrimitive("function_call"))
                 put("call_id", JsonPrimitive(call.id))
                 put("name", JsonPrimitive(call.name))
-                put("arguments", JsonPrimitive(call.arguments.ifBlank { "{}" }))
+                put("arguments", JsonPrimitive(call.arguments.toJsonObjectArgumentsOrEmpty()))
             }
         }
         return items
@@ -1343,10 +1381,8 @@ class LlmClient(http: OkHttpClient? = null) {
                                 "function",
                                 buildJsonObject {
                                     put("name", JsonPrimitive(call.name))
-                                    // 空参数一律发 `{}`（用户报的 HTTP 400「invalid function call
-                                    // parameters」）：网关会校验历史里每个 tool_call 的 arguments
-                                    // 是不是合法 JSON 对象，空字符串（无参调用、旧存档）会被直接拒。
-                                    put("arguments", JsonPrimitive(call.arguments.ifBlank { "{}" }))
+                                    // 历史调用参数必须是 JSON 对象，避免本地已报错的调用使下一轮请求被拒。
+                                    put("arguments", JsonPrimitive(call.arguments.toJsonObjectArgumentsOrEmpty()))
                                 },
                             )
                         })
@@ -1639,14 +1675,20 @@ internal fun extractApiError(body: String): String {
     if (trimmed.isEmpty()) return ""
     val parsed = runCatching { Json.parseCoreValue(trimmed) as? JsonObject }.getOrNull()
     if (parsed != null) {
-        val message = when (val error = parsed["error"]) {
+        val error = parsed["error"]
+        val message = when (error) {
             is JsonObject -> error["message"].asText()
             is JsonPrimitive -> error.takeIf { it !is JsonNull }?.content
             else -> null
         } ?: parsed["message"].asText()
             ?: parsed["detail"].asText()
             ?: parsed["msg"].asText()
-        if (!message.isNullOrBlank()) return message.take(300)
+        if (!message.isNullOrBlank()) return buildString {
+            append(message.take(300))
+            val envelope = error as? JsonObject
+            envelope?.get("param").asText()?.let { append("；param=").append(it) }
+            envelope?.get("code").asText()?.let { append("；code=").append(it) }
+        }
     }
     return trimmed.take(200).replace(WHITESPACE_RUN, " ")
 }
@@ -1700,6 +1742,12 @@ private fun JsonElement?.intOrNull(): Int? =
 private fun String.toJsonObjectOrEmpty(): JsonObject =
     runCatching { Json.parseCoreValue(ifBlank { "{}" }) as? JsonObject }.getOrNull()
         ?: JsonObject(emptyMap())
+
+/** Keep valid argument strings verbatim; rejected historical calls still need an object on the wire. */
+private fun String.toJsonObjectArgumentsOrEmpty(): String {
+    if (isBlank()) return "{}"
+    return if (runCatching { Json.parseCoreValue(this) is JsonObject }.getOrDefault(false)) this else "{}"
+}
 
 /**
  * Both non-OpenAI wires name a token-limit stop differently from OpenAI, and the engine

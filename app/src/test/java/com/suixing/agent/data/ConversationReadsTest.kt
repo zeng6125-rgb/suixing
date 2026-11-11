@@ -120,4 +120,68 @@ class ConversationReadsTest {
         unread(reads, setOf("b"))
         persisted(disk, setOf("b"))
     }
+
+    @Test fun `a background completion posts a notification through the live event path`() = runBlocking<Unit> {
+        val scope = owner()
+        val disk = preferences(scope)
+        val notified = Channel<String>(Channel.UNLIMITED)
+        val reads = ConversationReads(disk, scope, onUnreadCompletion = { notified.trySend(it) })
+        reads.completed("a")
+        persisted(disk, setOf("a"))
+        assertEquals("a", notified.tryReceive().getOrNull())
+    }
+
+    @Test fun `only a completion outside the currently viewed conversation notifies`() = runBlocking<Unit> {
+        val scope = owner()
+        val disk = preferences(scope)
+        val notified = Channel<String>(Channel.UNLIMITED)
+        val reads = ConversationReads(disk, scope, onUnreadCompletion = { notified.trySend(it) })
+        reads.viewing("a")
+        reads.completed("a")
+        reads.completed("b")
+        persisted(disk, setOf("b"))
+        assertEquals(listOf("b", null), listOf(notified.tryReceive().getOrNull(), notified.tryReceive().getOrNull()))
+    }
+
+    @Test fun `another completed run notifies even while its conversation is already unread`() = runBlocking<Unit> {
+        val scope = owner()
+        val disk = preferences(scope)
+        val notified = Channel<String>(Channel.UNLIMITED)
+        val reads = ConversationReads(disk, scope, onUnreadCompletion = { notified.trySend(it) })
+        reads.completed("a")
+        reads.completed("a")
+        reads.completed("b")
+        persisted(disk, setOf("a", "b"))
+        assertEquals(listOf("a", "a", "b"), List(3) { notified.tryReceive().getOrNull() })
+    }
+
+    @Test fun `viewing a conversation clears only its own completion notification`() = runBlocking<Unit> {
+        val scope = owner()
+        val disk = preferences(scope)
+        val viewed = Channel<String>(Channel.UNLIMITED)
+        val reads = ConversationReads(disk, scope, onViewed = { viewed.trySend(it) })
+        reads.completed("a")
+        reads.completed("b")
+        persisted(disk, setOf("a", "b"))
+        reads.viewing("a")
+        persisted(disk, setOf("b"))
+        assertEquals(listOf("a", null), listOf(viewed.tryReceive().getOrNull(), viewed.tryReceive().getOrNull()))
+    }
+
+    @Test fun `deletion after a queued completion cancels its notification in event order`() = runBlocking<Unit> {
+        val scope = owner()
+        val disk = preferences(scope)
+        val notifications = Channel<String>(Channel.UNLIMITED)
+        val reads = ConversationReads(
+            disk,
+            scope,
+            onUnreadCompletion = { notifications.trySend("show:$it") },
+            onViewed = { notifications.trySend("cancel:$it") },
+        )
+        reads.completed("a")
+        reads.forget("a")
+        persisted(disk, emptySet())
+        assertEquals(listOf("show:a", "cancel:a"), List(2) { notifications.tryReceive().getOrNull() })
+        assertEquals(emptySet<String>(), reads.unread.value)
+    }
 }

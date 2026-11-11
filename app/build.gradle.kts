@@ -14,8 +14,8 @@ android {
         minSdk = 26
         targetSdk = 37
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        versionCode = 726
-        versionName = "0.8.705"
+        versionCode = 729
+        versionName = "0.9.1"
         resourceConfigurations += listOf("zh", "en")
     }
 
@@ -90,8 +90,8 @@ android {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
-        // bash / busybox 以 `jniLibs/arm64-v8a/libbash.so`、`libbusybox.so` 随包分发（GPL 静态
-        // 二进制，来源 Debian bash-static / busybox-static，AArch64）。**必须 legacy packaging**：
+        // Bash 使用四 ABI 的 Android/Bionic 构建及共享依赖，BusyBox 保留 Debian ARM64 静态包。
+        // 可执行文件均以 jniLibs/<ABI>/lib*.so 随包分发。**必须 legacy packaging**：
         // AGP 默认把 .so 留在 APK 里靠 mmap 加载，那样没有可执行文件路径，execve 起不来。
         // 解压后它们落在 nativeLibraryDir —— 那是 Android 10+ 唯一允许 app 执行自己文件的目录
         // （filesDir 因 W^X 被禁）。

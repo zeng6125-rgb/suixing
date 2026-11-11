@@ -11,7 +11,6 @@ import android.graphics.Rect
 import android.graphics.RectF
 import android.graphics.SweepGradient
 import android.hardware.display.DisplayManager
-import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
@@ -77,6 +76,10 @@ internal class FxView(
     private val density = resources.displayMetrics.density
 
     private fun dp(value: Float): Float = value * density
+
+    init {
+        importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO
+    }
 
     /**
      * The edge light's own paint, kept apart from [paint] because it carries a shader: a shader
@@ -237,12 +240,10 @@ internal class FxView(
         }
         for (trail in trails) drawTrail(canvas, trail, now)
 
-        // 亮度是连续量：先算这一帧该到哪（目标 + 呼吸涟漪），再朝它走一步。两个硬状态换成"缓动逼近"
-        // 正是这一轮要的连续性 —— 目标从 1.0 掉到 0.26 时看到的是斜坡，不是一次闪。
+        // 浅呼吸只调节当前亮度；目标归零时随之淡出，不在回合中途熄灭。
         val phase = ((now - litStart) % FX_BREATH_PERIOD_MS).toFloat() / FX_BREATH_PERIOD_MS
         val wave = (1f - cos(phase * 2f * PI.toFloat())) / 2f
-        // 涟漪只在有目标时叠加：归零时不能再有涟漪，否则灯永远淡不尽（也就永远排帧）。
-        val aim = (targetAlpha + if (targetAlpha > 0f) FX_BREATH_DEPTH * wave else 0f).coerceIn(0f, 1f)
+        val aim = targetAlpha * (1f - FX_BREATH_DEPTH * wave)
         drawnAlpha = if (aim > drawnAlpha) {
             (drawnAlpha + FX_FADE_STEP).coerceAtMost(aim)
         } else {
@@ -373,7 +374,8 @@ internal class FxView(
             for (band in 0 until FX_HALO_BANDS) {
                 val endT = (band + 1) / FX_HALO_BANDS.toFloat()
                 val path = haloBandCache[band] ?: Path().also { haloBandCache[band] = it }
-                path.set(outer)
+                // Each band begins at the previous inner boundary, so their opacity does not stack.
+                path.set(if (band == 0) outer else haloInner)
                 haloInnerBoundary(fadeWidth * endT)
                 path.op(haloInner, Path.Op.DIFFERENCE)
             }

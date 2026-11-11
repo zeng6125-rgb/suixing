@@ -11,6 +11,7 @@ import android.graphics.Rect
 import android.graphics.RectF
 import android.graphics.SweepGradient
 import android.hardware.display.DisplayManager
+import android.hardware.input.InputManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
@@ -37,7 +38,9 @@ import java.util.Locale
 import java.util.concurrent.Executors
 import kotlin.math.PI
 import kotlin.math.cos
+import kotlin.math.floor
 import kotlin.math.pow
+import kotlin.math.sqrt
 
 /**
  * 触摸特效的全部可调参数与几条纯策略函数（尺寸、时长、光环档位、边缘光阈值）。
@@ -68,6 +71,13 @@ internal fun edgeLightVisible(
     showInForeground: Boolean,
     inForeground: Boolean,
 ): Boolean = masterOn && (showInForeground || !inForeground)
+
+/** The effects and status windows share Android's combined obscuring-opacity limit. */
+internal fun feedbackOverlayAlpha(host: Context, accessibility: Boolean): Float {
+    if (accessibility || Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return 1f
+    val maximum = host.getSystemService(InputManager::class.java)?.maximumObscuringOpacityForTouch ?: 0.8f
+    return floor((1f - sqrt(1f - maximum)) * 100f) / 100f
+}
 
 internal const val FX_EDGE_DURATION_MS = 350L
 
@@ -118,52 +128,33 @@ internal const val FX_HALO_MAX_WIDTH_DP = 24f
 /**
  * 彩虹环的颜色：绕屏幕中心一圈的角度渐变，**首尾同色**，所以 0° 那里没有接缝。
  *
- * 红 → 橙 → 黄 → 绿 → 青 → 蓝 → 品红 → 红，八段等分（`SweepGradient` 的 positions 传 null）。
+ * 天蓝 → 淡紫 → 玫瑰 → 浅金 → 薄荷 → 水青 → 天蓝，六段等分，明度接近。
  * 颜色不透明，亮度由 `Paint.alpha` 调（shader 的输出会被 paint 的 alpha 调制，所以呼吸与闪光
  * 的 alpha 仍然有效）。
  */
 internal val FX_RAINBOW = intArrayOf(
-    0xFFFF0000.toInt(),
-    0xFFFF7F00.toInt(),
-    0xFFFFFF00.toInt(),
-    0xFF00FF00.toInt(),
-    0xFF00FFFF.toInt(),
-    0xFF0000FF.toInt(),
-    0xFFFF00FF.toInt(),
-    0xFFFF0000.toInt(),
+    0xFF8AB8F8.toInt(),
+    0xFFB69AE8.toInt(),
+    0xFFE89ABA.toInt(),
+    0xFFEDBF88.toInt(),
+    0xFF83CFB1.toInt(),
+    0xFF83D0DB.toInt(),
+    0xFF8AB8F8.toInt(),
 )
 
 /**
- * 色相转一圈的时间：2s，即 0.18°/ms。
+ * 色相转一圈的时间：8s，即 0.045°/ms。
  *
- * 取模之后再算角度，不是图省事：`uptimeMillis` 开机一天就是 8 位数，直接乘 0.18 会让结果落进
- * float 精度不够的区间（间隔 2°），色相就会一跳一跳。
+ * 取模之后再算角度，避免开机时间增长后的 float 精度损失。
  */
-internal const val FX_HUE_PERIOD_MS = 2000L
+internal const val FX_HUE_PERIOD_MS = 8000L
 
-/**
- * The breathing edge: the same stroke, turned up until it is seen at a glance without becoming
- * a band that fights the screen for attention, and taken through a slow wave.
- *
- * The user's verdict on the first attempt was 「不太明显」, and the numbers are the whole of
- * that judgement: a 10px stroke at 0.16~0.40 alpha on a dark wallpaper is a rumour. Wider
- * stroke, higher floor, and a ceiling that is still short of solid.
- */
-internal const val FX_BREATH_PERIOD_MS = 2400L
+/** A slow, shallow breath keeps an active operation visibly lit through the whole cycle. */
+internal const val FX_BREATH_PERIOD_MS = 4800L
 
-/**
- * The two brightness levels the light aims at, and the ripple it breathes around them.
- *
- * Brightness is a **continuous quantity**, not a switch: the view eases toward the target every
- * frame (see `FxView.onDraw`), so nothing ever steps from dark to bright or back. The ripple rides
- * on top of whatever the target is, which is what makes a long run read as *alive* rather than as a
- * lamp that was left on.
- *
- * 1.0 while the phone is actually being operated, 0.26 while the run that drove it is still going —
- * dim enough to be peripheral, bright enough to say "don't touch it, I am still working".
- */
+/** Active brightness breathes between 94% and 100%, then eases to zero when the run ends. */
 internal const val FX_ALPHA_HOT = 1f
-internal const val FX_BREATH_DEPTH = 0.10f
+internal const val FX_BREATH_DEPTH = 0.06f
 
 /**
  * 边缘光的语义（v3，会话制）：**亮 = 一次 UI 控制会话还活着**。
@@ -189,12 +180,28 @@ internal val FX_UI_EPISODE_TOOLS = setOf(
 
 /** Shell commands only drive the UI when they actually contain a screen operation. */
 internal val FX_SHELL_UI_RE = Regex(
-    """\binput\s+(tap|swipe|text|keyevent|drag|roll)|\bam\s+start\b""",
+    """\binput(?:\s+-d\s+(-?\d+))?\s+(?:tap|swipe|text|keyevent|longpress|draganddrop|drag|roll)\b|\bam\s+start\b([^;&|\n]*)|\bmonkey\b([^;&|\n]*)""",
 )
+private val FX_AM_DISPLAY_RE = Regex("""(?:^|\s)--display\s+(-?\d+)\b""")
+private val FX_MONKEY_DISPLAY_RE = Regex("""(?:^|\s)--display-id\s+(-?\d+)\b""")
+private val FX_MONKEY_PACKAGE_RE = Regex("""(?:^|\s)-p\s+\S+""")
 
-internal fun shellToolDrivesUi(tool: String, detail: String?): Boolean =
-    (tool == "run_shell" || tool == "bash") &&
-        detail?.let { FX_SHELL_UI_RE.containsMatchIn(it) } == true
+internal fun shellToolDrivesUi(tool: String, detail: String?): Boolean {
+    if ((tool != "run_shell" && tool != "bash") || detail == null) return false
+    return FX_SHELL_UI_RE.findAll(detail).any { command ->
+        val appArgs = command.groups[2]?.value
+        val monkeyArgs = command.groups[3]?.value
+        val display = when {
+            appArgs != null -> FX_AM_DISPLAY_RE.find(appArgs)?.groupValues?.get(1)
+            monkeyArgs != null -> {
+                if (!FX_MONKEY_PACKAGE_RE.containsMatchIn(monkeyArgs)) return@any false
+                FX_MONKEY_DISPLAY_RE.find(monkeyArgs)?.groupValues?.get(1)
+            }
+            else -> command.groups[1]?.value
+        }
+        display == null || display == "0"
+    }
+}
 
 /**
  * How far the drawn brightness moves toward its target per frame.

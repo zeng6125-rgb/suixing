@@ -46,6 +46,14 @@ import java.io.File
 import java.util.concurrent.Executors
 import kotlin.math.abs
 
+internal fun floatingConsoleVisible(
+    foreground: Boolean,
+    resident: Boolean,
+    whileRunning: Boolean,
+    running: Boolean,
+    automationActive: Boolean,
+): Boolean = !foreground && !automationActive && (resident || (whileRunning && running))
+
 /**
  * A floating console for the run that is in progress: a ball that expands into a
  * panel showing how the agent is doing, with a stop button and a box to say
@@ -303,6 +311,9 @@ class FloatConsoleService : Service() {
                 palette = paletteFor(settings.themeMode, settings.paletteMode)
                 buildConsole()
                 observeRun()
+                scope.launch {
+                    UiOperationStatus.shared.ownersFlow.collect { refreshVisibility() }
+                }
                 watchAccessibility()
                 ProcessLifecycleOwner.get().lifecycle.addObserver(appLifecycle)
                 trace("service=start")
@@ -442,10 +453,9 @@ class FloatConsoleService : Service() {
                     WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
                 }
                 if (wanted == windowType) return@collect
-                val wasAttached = attached
                 detach()
                 createWindow()
-                if (wasAttached) attach()
+                refreshVisibility()
             }
         }
     }
@@ -469,6 +479,10 @@ class FloatConsoleService : Service() {
     private fun detach() {
         resetBallTouchFeedback()
         if (!attached) return
+        if (::steerInput.isInitialized && steerInput.hasFocus()) {
+            getSystemService(InputMethodManager::class.java)?.hideSoftInputFromWindow(steerInput.windowToken, 0)
+            steerInput.clearFocus()
+        }
         runCatching { windowManager.removeView(root) }
         attached = false
         // Stop the eye loop with the window it draws into. A delayed frame callback against a
@@ -489,11 +503,12 @@ class FloatConsoleService : Service() {
         val foreground = lifecycle.isAtLeast(Lifecycle.State.STARTED)
         val running = Core.engine.runsFlow.value.isNotEmpty()
         // 前台一律不显示；不在前台时：常驻 ⇒ 一直显示，否则看 B（运行时才显示）。
-        val visible = !foreground &&
-            (settings.resident || (settings.whileRunning && running))
+        val automationActive = UiOperationStatus.shared.hasSession
+        val visible = floatingConsoleVisible(foreground, settings.resident, settings.whileRunning, running, automationActive)
         trace(
             "state lifecycle=$lifecycle foreground=$foreground running=$running " +
-                "resident=${settings.resident} whileRunning=${settings.whileRunning} visible=$visible attached=$attached",
+                "resident=${settings.resident} whileRunning=${settings.whileRunning} automation=$automationActive " +
+                "visible=$visible attached=$attached",
         )
         if (visible) attach() else detach()
         // A transient console has no further work once its final run has ended —— 但只能

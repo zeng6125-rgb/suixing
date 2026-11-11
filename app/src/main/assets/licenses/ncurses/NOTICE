@@ -1,0 +1,4 @@
+ncurses 6.6.20260307+really6.5.20250830, MIT license.
+Source: https://github.com/ThomasDickey/ncurses-snapshots/tree/5f58399b2de47ed14bdfe3a0cb149293b27893d5
+LICENSE retains the original copyright notices and license text.
+The application modifies only fixed-length ELF dependency names and RUNPATH strings.

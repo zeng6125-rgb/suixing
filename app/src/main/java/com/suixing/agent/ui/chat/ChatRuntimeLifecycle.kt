@@ -10,6 +10,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 internal fun ChatRuntime.observe() {
+    val startupNavigation = navIntents.current()
     viewModelScope.launch(Dispatchers.IO) { environment.goals.read() }
     // The engine keys its runs by conversation, so this screen subscribes to the
     // state of whichever conversation is on display: a run elsewhere neither
@@ -97,18 +98,25 @@ internal fun ChatRuntime.observe() {
         // memory the state above is the real one, and loading them again would only
         // make the screen wait for something it already has.
         loadedChats.await()
+        if (!navIntents.isCurrent(startupNavigation)) return@launch
         val conversations = environment.chats.conversations.value
         // The conversation the user was last in — and only if it is still there: the
         // marker can outlive its conversation (deleted from another entry point), and
         // opening a chat that no longer exists would leave the screen on nothing. The
         // in-memory id is preferred because it is what this process last showed; the
         // file is the cold-start answer.
-        val reopened = savedOpened.await()?.let { id ->
+        val restoredId = savedOpened.await()
+        if (!navIntents.isCurrent(startupNavigation)) return@launch
+        val reopened = restoredId?.let { id ->
             conversations.firstOrNull { it.id == id }
         }
         val existing = reopened ?: conversations.firstOrNull()
         if (existing == null) {
             val created = environment.chats.create()
+            if (!navIntents.isCurrent(startupNavigation)) {
+                runCatchingCancellable { environment.chats.delete(created.id) }
+                return@launch
+            }
             _state.value = ChatUiState(
                 conversationId = created.id,
                 title = created.title,
@@ -119,6 +127,7 @@ internal fun ChatRuntime.observe() {
             // **正文只读尾部**（#30）：`existing` 来自只读 meta 的列表，`messages` 是空的。
             // `readTail` 读最近 OPEN_TURNS 轮；读不到（老格式且未迁移）时它内部回退到旧文件。
             val opened = environment.chats.readTail(existing.id) ?: existing
+            if (!navIntents.isCurrent(startupNavigation)) return@launch
         // 冷启动自动打开这条入口原来**完全不写缓存** ⇒ 水位对它无效（S1 只修了"点开"那一半）。
         // 从盘读到就记成"已落盘"，合并草稿时才敢清。
         if (opened.messages.isNotEmpty()) {

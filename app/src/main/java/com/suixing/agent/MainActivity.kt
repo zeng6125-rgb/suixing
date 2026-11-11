@@ -28,6 +28,7 @@ import kotlinx.coroutines.flow.collect
 import com.suixing.agent.core.Core
 import com.suixing.agent.data.AppSettings
 import com.suixing.agent.service.FloatConsoleService
+import com.suixing.agent.service.ChatCompletionNotifications
 import com.suixing.agent.ui.SuixingApp
 import com.suixing.agent.ui.theme.SuixingTheme
 import kotlinx.coroutines.launch
@@ -54,14 +55,15 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: android.content.Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        consumeTerminalIntent()
+        consumeNavigationIntent()
     }
 
-    private fun consumeTerminalIntent() {
+    private fun consumeNavigationIntent() {
         if (intent.getBooleanExtra(com.suixing.agent.service.TerminalForegroundService.OPEN_TERMINAL, false)) {
             intent.removeExtra(com.suixing.agent.service.TerminalForegroundService.OPEN_TERMINAL)
             Core.terminals.openRequested.value = true
         }
+        ChatCompletionNotifications.consumeIntent(intent)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -101,7 +103,7 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
-        consumeTerminalIntent()
+        consumeNavigationIntent()
         setContent {
             // **按字段订阅**（性能审计 P0.2）：整份 `AppSettings` 订阅 ⇒ 任何一次写设置都让
             // 根重组，而根一重组，下面那份 ColorScheme 也跟着重建（见 Theme 的 remember）。

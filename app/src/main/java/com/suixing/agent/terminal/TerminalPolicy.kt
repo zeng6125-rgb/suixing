@@ -5,7 +5,11 @@ import kotlin.coroutines.CoroutineContext
 import kotlinx.coroutines.flow.asStateFlow
 
 /** Set by the engine after its ordinary approval gate, never taken from model arguments. */
-internal class TerminalCaller(val chatId: String, val runId: String) :
+internal class TerminalCaller(
+    val chatId: String,
+    val runId: String,
+    val cancelRun: (() -> Boolean)? = null,
+) :
     AbstractCoroutineContextElement(Key) {
     companion object Key : CoroutineContext.Key<TerminalCaller>
 }

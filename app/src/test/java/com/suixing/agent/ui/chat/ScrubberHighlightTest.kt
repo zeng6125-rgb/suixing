@@ -1,5 +1,9 @@
 package com.suixing.agent.ui.chat
 
+import androidx.compose.animation.core.MutableTransitionState
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.updateTransition
 import androidx.compose.runtime.AbstractApplier
 import androidx.compose.runtime.BroadcastFrameClock
 import androidx.compose.runtime.DisposableEffect
@@ -7,6 +11,7 @@ import androidx.compose.runtime.Recomposer
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshots.Snapshot
 import androidx.compose.ui.graphics.Color
@@ -304,6 +309,125 @@ class ScrubberHighlightTest {
         }
     }
 
+    @Test
+    fun `releasing the rail keeps the outgoing label after its window recenters`() = runBlocking {
+        withScrubber(initial = narrow) {
+            labelShown = true
+            incomingLabel = ScrubberLabelPayload("turn 14", -60.5f)
+            awaitComposition(compositions)
+            awaitLabelIdle()
+
+            labelShown = false
+            incomingLabel = ScrubberLabelPayload("turn 8", -60.5f)
+            awaitComposition(compositions)
+            repeat(4) {
+                assertFalse(labelVisibility.isIdle)
+                assertEquals(ScrubberLabelPayload("turn 14", -60.5f), labelPayload)
+                pumpFrame()
+            }
+        }
+    }
+
+    @Test
+    fun `a short press during label exit cannot move or rename the outgoing label`() = runBlocking {
+        withScrubber(initial = narrow) {
+            labelShown = true
+            incomingLabel = ScrubberLabelPayload("turn 14", -60.5f)
+            awaitComposition(compositions)
+            awaitLabelIdle()
+            labelShown = false
+            incomingLabel = ScrubberLabelPayload("turn 8", -60.5f)
+            awaitComposition(compositions)
+
+            incomingLabel = ScrubberLabelPayload("turn 16", 27.5f)
+            awaitComposition(compositions)
+            assertFalse(labelVisibility.isIdle)
+            assertEquals(ScrubberLabelPayload("turn 14", -60.5f), labelPayload)
+        }
+    }
+
+    @Test
+    fun `showing a label again follows the new gesture and retains its latest visible target`() = runBlocking {
+        withScrubber(initial = narrow) {
+            labelShown = true
+            incomingLabel = ScrubberLabelPayload("turn 14", -60.5f)
+            awaitComposition(compositions)
+            awaitLabelIdle()
+            labelShown = false
+            incomingLabel = ScrubberLabelPayload("turn 8", -60.5f)
+            awaitComposition(compositions)
+
+            labelShown = true
+            incomingLabel = ScrubberLabelPayload("turn 16", 27.5f)
+            awaitComposition(compositions)
+            assertEquals(ScrubberLabelPayload("turn 16", 27.5f), labelPayload)
+            incomingLabel = ScrubberLabelPayload("turn 18", 49.5f)
+            awaitComposition(compositions)
+            assertEquals(ScrubberLabelPayload("turn 18", 49.5f), labelPayload)
+            awaitLabelIdle()
+
+            labelShown = false
+            incomingLabel = ScrubberLabelPayload("turn 12", -60.5f)
+            awaitComposition(compositions)
+            assertEquals(ScrubberLabelPayload("turn 18", 49.5f), labelPayload)
+        }
+    }
+
+    @Test
+    fun `a new conversation does not retain the previous outgoing label`() = runBlocking {
+        withScrubber(initial = narrow) {
+            labelShown = true
+            incomingLabel = ScrubberLabelPayload("turn 14", -60.5f)
+            awaitComposition(compositions)
+            awaitLabelIdle()
+            labelShown = false
+            awaitComposition(compositions)
+
+            conversationId = "conversation-b"
+            incomingLabel = ScrubberLabelPayload("turn 31", 5f)
+            awaitComposition(compositions)
+            assertEquals(ScrubberLabelPayload("turn 31", 5f), labelPayload)
+        }
+    }
+
+    @Test
+    fun `a hidden short press can position the label after its exit finishes`() = runBlocking {
+        withScrubber(initial = narrow) {
+            labelShown = true
+            incomingLabel = ScrubberLabelPayload("turn 14", -60.5f)
+            awaitComposition(compositions)
+            awaitLabelIdle()
+            labelShown = false
+            incomingLabel = ScrubberLabelPayload("turn 8", -60.5f)
+            awaitComposition(compositions)
+            awaitLabelIdle()
+
+            incomingLabel = ScrubberLabelPayload("turn 16", 27.5f)
+            awaitComposition(compositions)
+            assertTrue(labelVisibility.isIdle)
+            assertFalse(labelVisibility.targetState)
+            assertEquals(27.5f, requireNotNull(labelPayload).offsetPx, 0.001f)
+        }
+    }
+
+    @Test
+    fun `releasing during label entrance preserves the last visible payload through exit`() = runBlocking {
+        withScrubber(initial = narrow) {
+            labelShown = true
+            incomingLabel = ScrubberLabelPayload("turn 14", -60.5f)
+            awaitComposition(compositions)
+            pumpFrames(2)
+            assertFalse(labelVisibility.currentState)
+            assertFalse(labelVisibility.isIdle)
+
+            labelShown = false
+            incomingLabel = ScrubberLabelPayload("turn 8", -60.5f)
+            awaitComposition(compositions)
+            assertFalse(labelVisibility.isIdle)
+            assertEquals(ScrubberLabelPayload("turn 14", -60.5f), labelPayload)
+        }
+    }
+
     private fun assertStyle(
         expected: ScrubberTickStyle,
         actual: ScrubberTickStyle?,
@@ -343,6 +467,14 @@ class ScrubberHighlightTest {
         var settling by mutableStateOf(initialSettling)
         var presented by mutableStateOf(false)
         var entrance by mutableStateOf(0f)
+        lateinit var labelVisibility: MutableTransitionState<Boolean>
+            private set
+        var labelShown: Boolean
+            get() = labelVisibility.targetState
+            set(value) { labelVisibility.targetState = value }
+        var incomingLabel by mutableStateOf(ScrubberLabelPayload("", 0f))
+        var labelPayload: ScrubberLabelPayload? = null
+            private set
         var mounts = 0
             private set
         var disposals = 0
@@ -378,6 +510,16 @@ class ScrubberHighlightTest {
             }
             composition.setContent {
                 compositions++
+                val visibility = remember(conversationId) { MutableTransitionState(false) }
+                labelVisibility = visibility
+                val labelTransition = updateTransition(visibility, label = "scrubber_label_test")
+                labelTransition.animateFloat(
+                    transitionSpec = {
+                        tween(if (targetState) SCRUBBER_LABEL_IN_MS else SCRUBBER_LABEL_OUT_MS)
+                    },
+                    label = "scrubber_label_alpha",
+                ) { shown -> if (shown) 1f else 0f }
+                labelPayload = scrubberLabelPayload(conversationId, visibility, incomingLabel)
                 if (usePresentationGate) {
                     ScrubberPresentation(conversationId, presented = { presented }, entrance = { entrance }) {
                         SideEffect { presentationCompositions++ }
@@ -405,6 +547,15 @@ class ScrubberHighlightTest {
 
         suspend fun pumpFrames(count: Int, stepNanos: Long = FRAME_NANOS) {
             repeat(count) { pumpFrame(stepNanos) }
+        }
+
+        suspend fun awaitLabelIdle(maxFrames: Int = 20) {
+            var frames = 0
+            while (!labelVisibility.isIdle && frames < maxFrames) {
+                pumpFrame()
+                frames++
+            }
+            check(labelVisibility.isIdle) { "label transition did not finish within $maxFrames frames" }
         }
 
         /** Steps the clock only until the composition has run, at most [maxFrames] times. */

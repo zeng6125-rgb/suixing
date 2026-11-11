@@ -47,7 +47,7 @@ class BashToolsTest {
         every { TouchFx.traceCall(any(), tool = any(), detail = any(), matched = any()) } just Runs
         coEvery { Shell.local(any(), any(), any()) } returns ShellResult(true, "native output", "", 0)
         capabilities = mockk(relaxed = true)
-        every { capabilities.shellTier() } returns ShellTier.ROOT
+        every { capabilities.shellTier() } returns ShellTier.LOCAL
         shellTools = ShellTools(mockk<Context>(relaxed = true), capabilities)
         bashTools = BashTools(shellTools)
         registry = ToolRegistry::class.java.getDeclaredConstructor().let {
@@ -72,24 +72,57 @@ class BashToolsTest {
         assertTrue(toolCopyZh("bash", "fallback").contains("原生 Bash"))
     }
 
-    @Test fun registryExecutionPinsRealBashAndLocalUidEvenWhenOverridesRequestRootAndSh() = runBlocking {
+    @Test fun registryExecutionHonorsLocalCeilingAndRealBashEvenWhenOverridesRequestRootAndSh() = runBlocking {
         val result = run("""{"command":"printf native","mode":"root","shell":"sh"}""")
         assertTrue(result.ok)
         assertTrue(result.output.startsWith("[local(app)+bash] exit=0\n"))
         assertTrue(result.output.contains("native output"))
         coVerify(exactly = 1) { Shell.local("printf native", "bash", null) }
-        coVerify(exactly = 0) { Shell.root(any()) }
-        coVerify(exactly = 0) { Shell.shizuku(any()) }
+        coVerify(exactly = 0) { Shell.root(any(), any()) }
+        coVerify(exactly = 0) { Shell.shizuku(any(), any()) }
         coVerify(exactly = 0) { capabilities.ensureRootProbed() }
         verify(exactly = 1) { TouchFx.traceCall(any(), tool = "bash", detail = "printf native", matched = any()) }
     }
 
     @Test fun legacyRunShellStillUsesItsExistingAutoPrivilegeRoute() = runBlocking {
+        every { capabilities.shellTier() } returns ShellTier.ROOT
         coEvery { Shell.root("printf legacy") } returns ShellResult(true, "legacy output", "", 0)
         val result = registry.find("run_shell")!!.run(args("""{"command":"printf legacy"}"""))
         assertTrue(result.ok)
         assertTrue(result.output.startsWith("[root+bash] exit=0\n"))
         coVerify(exactly = 1) { Shell.root("printf legacy") }
+        coVerify(exactly = 0) { Shell.local(any(), any(), any()) }
+    }
+
+    @Test fun nativeBashUsesGrantedRootWithoutSwitchingToSh() = runBlocking {
+        every { capabilities.shellTier() } returns ShellTier.ROOT
+        coEvery { Shell.root("printf native", "bash") } returns ShellResult(true, "native root output", "", 0)
+        val result = run("""{"command":"printf native"}""")
+        assertTrue(result.ok)
+        assertTrue(result.output.startsWith("[root+bash] exit=0\n"))
+        coVerify(exactly = 1) { Shell.root("printf native", "bash") }
+        coVerify(exactly = 0) { Shell.local(any(), any(), any()) }
+    }
+
+    @Test fun nativeBashUsesGrantedShizukuWithoutSwitchingToSh() = runBlocking {
+        every { capabilities.shellTier() } returns ShellTier.SHIZUKU
+        coEvery { Shell.shizuku("printf native", "bash") } returns ShellResult(true, "native shell output", "", 0)
+        val result = run("""{"command":"printf native"}""")
+        assertTrue(result.ok)
+        assertTrue(result.output.startsWith("[shizuku(shell)+bash] exit=0\n"))
+        coVerify(exactly = 1) { Shell.shizuku("printf native", "bash") }
+        coVerify(exactly = 0) { Shell.local(any(), any(), any()) }
+        coVerify(exactly = 0) { Shell.root(any(), any()) }
+    }
+
+    @Test fun deniedShizukuBashFailsWithoutTryingRootOrLocalShell() = runBlocking {
+        every { capabilities.shellTier() } returns ShellTier.SHIZUKU
+        coEvery { Shell.shizuku("printf native", "bash") } returns ShellResult(false, "", "permission denied", 13)
+        val result = run("""{"command":"printf native"}""")
+        assertFalse(result.ok)
+        assertTrue(result.output.contains("exit=13"))
+        assertTrue(result.output.contains("permission denied"))
+        coVerify(exactly = 0) { Shell.root(any(), any()) }
         coVerify(exactly = 0) { Shell.local(any(), any(), any()) }
     }
 

@@ -80,10 +80,11 @@ internal fun ChatRuntime.send(text: String, imagesBase64: List<String> = emptyLi
     // 打开会话只读最近 OPEN_TURNS 轮，`_state.value.messages` 就是那个窗口；
     // 直接拿它当历史 ⇒ 模型看不到更早的对话，**不报错、只是变笨**，比崩溃难查得多。
     //
-    // `send()` 不是挂起函数（它是输入框的回调），所以：屏幕上的历史已经是完整的
-    // （`messageCount == messages.size`，短会话）就直接发；否则先进协程把完整 wire 读出来再发。
+    // 用接受前的窗口与最新落盘总量判定完整性，新增消息不能把部分窗口凑成完整历史。
+    // 完整窗口直接发；否则先进协程读取摘要与完整尾部。
     val shownMessages = snapshot.messages
-    if (snapshot.messageCount <= shownMessages.size) {
+    val storedCount = environment.chats.conversations.value.firstOrNull { it.id == chatId }?.messageCount ?: 0
+    if (maxOf(before.messageCount, storedCount) <= before.messages.size) {
         try {
             start(chatId, fresh, shownMessages, snapshot, initialTool)
         } catch (cancelled: CancellationException) {
@@ -138,12 +139,12 @@ internal fun ChatRuntime.send(text: String, imagesBase64: List<String> = emptyLi
                 // 在这里写等于白写；而下一次 `start` 之后用户已经看到消息发出去了，
                 // 再补一条红条只会让人以为这一轮失败了。上下文不完整是次要的，
                 // 而且坏数据本身已经在 `ChatStore` 层被记下（`LogDamaged`/`LogMismatch`）。
-                val wire = runCatchingCancellable { environment.chats.readWire(chatId) }.getOrNull()
+                val wire = runCatchingCancellable { environment.chats.readWire(chatId, snapshot.checkpoints) }.getOrNull()
                 // **不要因为用户切走就丢掉这一条**（issue #76 F-03）：run 属于原会话，
                 // `start()` 只在当前显示的仍是它时才画到屏幕上；后台会话的流式内容
                 // 会进 `sessions`，跑完后由 `endSession` 落盘。
-                val history = sendHistory(wire, shownMessages, user)
-                start(chatId, fresh, history, snapshot, initialTool)
+                val history = sendHistory(wire?.messages, shownMessages, user)
+                start(chatId, fresh, history, snapshot, initialTool, resumeCheckpoint = wire?.checkpoint)
             } finally {
                 sendGate.finish(chatId)
             }
@@ -203,18 +204,27 @@ internal fun ChatRuntime.regenerate() {
             liveRunId = fresh,
         )
     }
-    if (snapshot.messageCount <= snapshot.messages.size) {
+    val acceptedSnapshot = _state.value
+    val storedCount = environment.chats.conversations.value
+        .firstOrNull { it.id == snapshot.conversationId }?.messageCount ?: 0
+    if (maxOf(snapshot.messageCount, storedCount) <= snapshot.messages.size) {
         start(fresh, prompt)
     } else {
         viewModelScope.launch {
-            val wire = runCatchingCancellable { environment.chats.readWire(snapshot.conversationId) }.getOrNull()
+            val wire = runCatchingCancellable { environment.chats.readWire(snapshot.conversationId, snapshot.checkpoints) }.getOrNull()
+            var resumeCheckpoint = wire?.checkpoint
+            var fullPrompt = wire?.messages?.takeIf { it.isNotEmpty() }?.let {
+                Transcript.withoutLastAnswer(Transcript.active(it, snapshot.activeRuns))
+            } ?: prompt
+            if (resumeCheckpoint != null && fullPrompt.none { it.id == resumeCheckpoint.toMessageId }) {
+                val full = runCatchingCancellable { environment.chats.readAll(snapshot.conversationId) }.getOrNull()
+                fullPrompt = full?.let { Transcript.withoutLastAnswer(Transcript.active(it, snapshot.activeRuns)) } ?: prompt
+                resumeCheckpoint = null
+            }
             if (_state.value.conversationId != snapshot.conversationId ||
                 environment.engine.isRunning(snapshot.conversationId)
             ) return@launch
-            val fullPrompt = wire?.takeIf { it.isNotEmpty() }?.let {
-                Transcript.withoutLastAnswer(Transcript.active(it, snapshot.activeRuns))
-            } ?: prompt
-            start(fresh, fullPrompt)
+            start(snapshot.conversationId, fresh, fullPrompt, acceptedSnapshot, resumeCheckpoint = resumeCheckpoint)
         }
     }
 }

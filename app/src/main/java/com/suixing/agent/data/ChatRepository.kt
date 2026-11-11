@@ -47,6 +47,8 @@ internal fun sameSavedDraftMessages(
     incoming: List<StoredMessage>,
 ): Boolean = saved != null && saved == incoming
 
+data class WireHistory(val messages: List<StoredMessage>, val checkpoint: ContextCheckpoint? = null)
+
 class ChatRepository(
     private val context: Context,
     private val onDeleted: suspend (String) -> Unit = {},
@@ -98,6 +100,7 @@ class ChatRepository(
      * 缓存后只有第一轮扫，之后 O(1)（换代或换 checkpoint 会自动失效）。
      */
     private val checkpointOffsets = OffsetCache()
+    private val checkpointStartOffsets = OffsetCache()
 
     /** The new format, keyed under the same `chats` directory but in its own `store/` child. */
     private val store = ChatStore(File(context.filesDir, "chats"))
@@ -423,24 +426,29 @@ private fun readTailText(file: java.io.File, maxChars: Int = TAIL_MAX_CHARS): St
     }
 
     /**
-     * The history the model is given: everything from the last checkpoint forward.
+     * The verified summary and its contiguous transcript tail, read from one committed generation.
      *
      * Same cut the engine makes today (`history.drop(resumeAt + 1)`), but read from disk instead of
      * from a fully materialised list — so opening a 30 MB chat no longer costs 30 MB to send a turn.
+     * A supplied checkpoint list limits reuse to summaries retained by the request snapshot.
      */
-    suspend fun readWire(id: String): List<StoredMessage> = withContext(Dispatchers.IO) {
+    suspend fun readWire(id: String, checkpoints: List<ContextCheckpoint>? = null): WireHistory = withContext(Dispatchers.IO) {
         lock.withLock {
-            val meta = store.readMeta(id) ?: return@withLock emptyList()
-            // No checkpoint yet: the whole transcript is the wire, which is what the engine does
-            // when `resumeAt` is null. Memory is still bounded by the checkpoint when there is one.
-            val checkpointId = meta.checkpoints.lastOrNull()?.toMessageId
-                ?: return@withLock store.all(meta)
-            val from = checkpointOffsets.get(meta.id, meta.gen, checkpointId)
-                ?: store.offsetOf(meta, checkpointId)?.also {
-                    checkpointOffsets.put(meta.id, meta.gen, checkpointId, it)
-                }
-                ?: return@withLock store.all(meta)
-            store.from(meta, from)
+            val meta = store.readMeta(id) ?: return@withLock WireHistory(emptyList())
+            val anchored = meta.checkpoints.asReversed().firstNotNullOfOrNull { checkpoint ->
+                if (checkpoint.summary.isBlank() || (checkpoints != null && checkpoint !in checkpoints))
+                    return@firstNotNullOfOrNull null
+                val start = checkpointStartOffsets.get(meta.id, meta.gen, checkpoint.fromMessageId)
+                    ?: store.offsetOf(meta, checkpoint.fromMessageId)?.also {
+                        checkpointStartOffsets.put(meta.id, meta.gen, checkpoint.fromMessageId, it)
+                    } ?: return@firstNotNullOfOrNull null
+                val end = checkpointOffsets.get(meta.id, meta.gen, checkpoint.toMessageId)
+                    ?: store.offsetOf(meta, checkpoint.toMessageId)?.also {
+                        checkpointOffsets.put(meta.id, meta.gen, checkpoint.toMessageId, it)
+                    } ?: return@firstNotNullOfOrNull null
+                if (start <= end) checkpoint to end else null
+            } ?: return@withLock WireHistory(store.all(meta))
+            WireHistory(store.from(meta, anchored.second), anchored.first)
         }
     }
 

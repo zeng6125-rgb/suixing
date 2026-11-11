@@ -66,7 +66,7 @@ object Shell {
     private const val ROOT_PROBE_TIMEOUT_MS = 8_000L
 
     /**
-     * 随 APK 分发的静态 bash / busybox 所在目录（`nativeLibraryDir`，由 `Core.init` 写入）。
+     * 随 APK 分发的 Bash、动态依赖和 BusyBox 所在目录（由 `Core.init` 写入）。
      *
      * 为什么放 nativeLibraryDir 而不是 filesDir：Android 10 起 targetSdk≥29 的 app **不能执行**
      * 自己数据目录里的文件（W^X），而 nativeLibraryDir 里的 `lib*.so` 是可执行的。所以两个二进制
@@ -158,7 +158,7 @@ object Shell {
             put("PATH", "$binDir:/system/bin:/system/xbin")
             put("TERM", "dumb")
         }
-        val result = run(arrayOf(bash, "-lc", command), env, cwd = cwd)
+        val result = run(arrayOf(bash, "--noprofile", "--norc", "-c", command), env, cwd = cwd)
         // 自带 bash 在本进程里可能被系统的 seccomp 过滤器杀掉（exit 159 = 128+SIGSYS）：app 派生的
         // 子进程**继承**那份过滤器，而 su 起的是另一棵进程树、不继承，所以只有 local 档会中招。
         //
@@ -171,7 +171,7 @@ object Shell {
                 false,
                 "",
                 "自带 bash 被系统的 seccomp 过滤器拦下（exit 159 / SIGSYS），而调用方要求 shell=bash，" +
-                    "所以没有改用 sh 重试。把 shell 改成 auto 可以自动回退。",
+                    "所以没有改用 sh 重试。可用 run_shell 的自动模式执行兼容的系统 sh 命令。",
                 result.exitCode,
             )
         }
@@ -179,11 +179,16 @@ object Shell {
         return retry.copy(stdout = SECCOMP_FALLBACK_NOTE + retry.stdout)
     }
 
-    suspend fun shizuku(command: String): ShellResult {
+    suspend fun shizuku(command: String, shell: String = "sh"): ShellResult {
         val method = newProcess
             ?: return ShellResult(false, "", "当前 Shizuku 版本不提供 newProcess（需要 13.x）", -1)
+        val line = if (shell == "bash") {
+            val bash = bundledBash()
+                ?: return ShellResult(false, "", "这个构建没有可执行的随包 Bash", -1)
+            bashCommand(bash, command)
+        } else command
         return runCatching {
-            val process = method.invoke(null, arrayOf("sh", "-c", command), null, null) as Process
+            val process = method.invoke(null, arrayOf("sh", "-c", line), null, null) as Process
             collect(process)
         }.getOrElse { error ->
             // A stop has to travel as a stop: without this, runCatching would turn the
@@ -194,25 +199,29 @@ object Shell {
         }
     }
 
-    suspend fun root(command: String): ShellResult = runCatching {
+    suspend fun root(command: String, shell: String = "auto"): ShellResult = runCatching {
         // root 档也走随包 bash（用户要求）：su 起来后由自带 bash 解释命令，环境与 local 档对齐
         // （PATH 带 binDir、BusyBox 以 $BB 暴露）。没有自带 bash（未打包或不可执行）时退回原形态：
         // su -c 直接交给系统 sh。命令与路径都过 [quote]，避免二次分词。
         val bash = bundledBash()
+        if (bash == null && shell == "bash") {
+            return@runCatching ShellResult(false, "", "这个构建没有可执行的随包 Bash", -1)
+        }
         val line = if (bash == null) {
             command
         } else {
-            val prelude = buildString {
-                append("PATH=").append(quote("$binDir:/system/bin:/system/xbin")).append(' ')
-                bundledBusybox()?.let { append("BB=").append(quote(it)).append(' ') }
-                append("TERM=dumb ")
-            }
-            prelude + quote(bash) + " -lc " + quote(command)
+            bashCommand(bash, command)
         }
         collect(ProcessBuilder("su", "-c", line).start())
     }.getOrElse { error ->
         if (error is CancellationException) throw error
         ShellResult(false, "", "无法获取 root：${error.message ?: error.javaClass.simpleName}", -1)
+    }
+
+    private fun bashCommand(bash: String, command: String): String = buildString {
+        append("PATH=").append(quote("$binDir:/system/bin:/system/xbin")).append(' ')
+        bundledBusybox()?.let { append("BB=").append(quote(it)).append(' ') }
+        append("TERM=dumb ").append(quote(bash)).append(" --noprofile --norc -c ").append(quote(command))
     }
 
     suspend fun rootAvailable(): Boolean = runCatching {

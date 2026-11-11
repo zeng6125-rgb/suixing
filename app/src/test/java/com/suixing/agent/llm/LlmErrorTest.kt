@@ -49,6 +49,23 @@ class LlmErrorTest {
     }
 
     @Test
+    fun `retains the upstream parameter and error code`() {
+        val text = extractApiError("""{"error":{"message":"Invalid request parameters","param":"reasoning_effort","code":"unsupported_parameter"}}""")
+        assertTrue(text, text.contains("Invalid request parameters"))
+        assertTrue(text, text.contains("reasoning_effort"))
+        assertTrue(text, text.contains("unsupported_parameter"))
+    }
+
+    @Test
+    fun `retains a code without a parameter and preserves plain errors`() {
+        val text = extractApiError("""{"error":{"message":"Invalid request parameters","code":"invalid_tool_arguments"}}""")
+        assertTrue(text, text.contains("Invalid request parameters"))
+        assertTrue(text, text.contains("invalid_tool_arguments"))
+        assertEquals("Invalid request parameters",
+            extractApiError("""{"error":{"message":"Invalid request parameters","param":null,"code":null}}"""))
+    }
+
+    @Test
     fun `falls back to raw text when the body is not json`() {
         assertTrue(extractApiError("<html>\n  502 Bad Gateway  </html>").contains("502"))
     }

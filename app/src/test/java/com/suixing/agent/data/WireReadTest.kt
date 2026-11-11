@@ -5,6 +5,7 @@ import io.mockk.every
 import io.mockk.mockk
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -62,10 +63,11 @@ class WireReadTest {
         store.append(store.newMeta(chat).copy(checkpoints = listOf(checkpoint)), chat.messages)
 
         val wire = repository.readWire(chat.id)
-        assertTrue("必须有内容", wire.isNotEmpty())
-        assertEquals("最后一个 checkpoint 之后的内容必须以它开头", checkpoint.toMessageId, wire.first().id)
-        assertEquals("并且一直到最后一条", chat.messages.last().id, wire.last().id)
-        assertTrue("不应该把 checkpoint 之前的内容也发出去", wire.none { it.id == "w1-u1" })
+        assertEquals("摘要与尾部来自同一次磁盘读取", checkpoint, wire.checkpoint)
+        assertTrue("必须有内容", wire.messages.isNotEmpty())
+        assertEquals("最后一个 checkpoint 之后的内容必须以它开头", checkpoint.toMessageId, wire.messages.first().id)
+        assertEquals("并且一直到最后一条", chat.messages.last().id, wire.messages.last().id)
+        assertTrue("不应该把 checkpoint 之前的内容也发出去", wire.messages.none { it.id == "w1-u1" })
     }
 
     @Test
@@ -77,6 +79,46 @@ class WireReadTest {
         // 第一次会扫日志并写缓存，第二次应当直接命中 —— 两者结果必须一致。
         val first = repository.readWire(chat.id)
         val second = repository.readWire(chat.id)
-        assertEquals("缓存不能改变结果", first.map { it.id }, second.map { it.id })
+        assertEquals("缓存不能改变结果", first, second)
+    }
+
+    @Test
+    fun `a checkpoint removed from the request snapshot cannot cut the history`() = runBlocking {
+        val repository = repository()
+        val (chat, checkpoint) = chatWithCheckpoint("snapshot")
+        store.append(store.newMeta(chat).copy(checkpoints = listOf(checkpoint)), chat.messages)
+
+        val wire = repository.readWire(chat.id, emptyList())
+        assertNull(wire.checkpoint)
+        assertEquals(chat.messages, wire.messages)
+    }
+
+    @Test
+    fun `a changed summary in the request snapshot cannot reuse the stored summary`() = runBlocking {
+        val repository = repository()
+        val (chat, checkpoint) = chatWithCheckpoint("changed")
+        store.append(store.newMeta(chat).copy(checkpoints = listOf(checkpoint)), chat.messages)
+
+        val wire = repository.readWire(chat.id, listOf(checkpoint.copy(summary = "新的摘要")))
+        assertNull(wire.checkpoint)
+        assertEquals(chat.messages, wire.messages)
+    }
+
+    @Test
+    fun `an invalid latest checkpoint preserves the earlier valid summary`() = runBlocking {
+        val repository = repository()
+        for ((index, change) in listOf<(ContextCheckpoint) -> ContextCheckpoint>(
+            { it.copy(id = "blank", summary = " ") },
+            { it.copy(id = "missing-from", fromMessageId = "missing") },
+            { it.copy(id = "missing-to", toMessageId = "missing") },
+            { it.copy(id = "reversed", fromMessageId = it.toMessageId.removeSuffix("a4") + "u5") },
+        ).withIndex()) {
+            val (chat, checkpoint) = chatWithCheckpoint("invalid-$index")
+            store.append(store.newMeta(chat).copy(checkpoints = listOf(checkpoint, change(checkpoint))), chat.messages)
+
+            val wire = repository.readWire(chat.id)
+            assertEquals(checkpoint, wire.checkpoint)
+            assertEquals(checkpoint.toMessageId, wire.messages.first().id)
+        }
     }
 }

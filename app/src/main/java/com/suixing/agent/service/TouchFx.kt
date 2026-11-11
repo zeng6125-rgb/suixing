@@ -17,6 +17,7 @@ import android.os.Looper
 import android.os.SystemClock
 import android.provider.Settings
 import android.view.Display
+import android.view.Choreographer
 import android.view.RoundedCorner
 import android.view.View
 import android.view.WindowManager
@@ -28,11 +29,18 @@ import androidx.lifecycle.ProcessLifecycleOwner
 import com.suixing.agent.MainActivity
 import com.suixing.agent.core.Core
 import com.suixing.agent.ui.theme.AppearancePalette
+import com.suixing.agent.tools.ToolResult
+import com.suixing.agent.terminal.TerminalCaller
 import com.suixing.agent.virtualscreen.VirtualScreenManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.Locale
 import java.util.concurrent.Executors
@@ -80,7 +88,7 @@ private val FX_TRACE_TEXT = Regex("""input\s+text\s+.*""")
  * 把「Agent 正在操作你的屏幕」画出来：点击画环、拖动画线、手势开始时边缘闪一下。
  *
  * 闪 = 刚刚发生了一次动作；呼吸 = UI 自动化回合仍在进行（整轮 run 结束就灭，非 UI 工具是中性的）。
- * 只在真正驱动屏幕时亮 —— 只看屏幕或只回答文字的 run 不亮。
+ * 主屏 UI 调用开启会话，所属 run 结束时收尾；只回答文字的 run 不亮。
  *
  * 本类不参与决策：无障碍服务在**决定要派发手势之后**才调用它。窗口优先挂在无障碍服务上
  * （TYPE_ACCESSIBILITY_OVERLAY，无需权限、MIUI 后台也不隐藏），否则回退到应用上下文
@@ -122,6 +130,8 @@ object TouchFx {
      */
     private var windowUp = false
     private var lastEdgeFlashAt = 0L
+    private val operations = UiOperationStatus.shared
+    private var watchingSessions = false
 
     /**
      * The application context every effect is built from — and the one [returnToApp] starts from.
@@ -150,18 +160,7 @@ object TouchFx {
     @Volatile
     private var serviceContext: Context? = null
 
-    /**
-     * The runs that were in flight when the agent last drove the screen.
-     *
-     * Volatile because it is written from the tool dispatcher and read from the ticker on the
-     * main thread; a tick that misses an update simply lights the edge a second later.
-     *
-     * Volatile alone is not enough for the two *writers*, though: both do a read-modify-write
-     * ([noteDriving] adds the ids of the runs it just saw, the ticker drops the ones that ended),
-     * and two of those interleaved lose one update — an id that never arrives means the light never
-     * comes on for that run, and [returnToApp] never fires for it either. Hence [drivingLock], held
-     * for exactly those two assignments and nothing else.
-     */
+    /** Main-engine run departures retained for the existing automatic return behavior. */
     @Volatile
     private var drivingIds: Set<String> = emptySet()
 
@@ -191,7 +190,7 @@ object TouchFx {
      */
     @Volatile
     private var edgeLightOn = false
-    private var edgeSettingsReady = false
+    private var feedbackSettingsReady = false
     private var edgePreferenceToken = 0L
     private var pendingMasterDisable: Long? = null
     private var pendingForegroundDisable: Long? = null
@@ -211,9 +210,37 @@ object TouchFx {
         apply("settings-write-not-saved")
     }
 
-    private fun edgeAllowed(inForeground: Boolean): Boolean = edgeSettingsReady &&
+    private fun edgeAllowed(inForeground: Boolean): Boolean = feedbackSettingsReady &&
         pendingMasterDisable == null && (!inForeground || pendingForegroundDisable == null) &&
         edgeLightVisible(edgeLightOn, edgeLightInForeground, inForeground)
+
+    @Volatile
+    private var promptOn = false
+    @Volatile
+    private var promptInForeground = true
+    private var promptPreferenceToken = 0L
+    private var pendingPromptMasterDisable: Long? = null
+    private var pendingPromptForegroundDisable: Long? = null
+
+    fun suppressPromptForPreferenceChange(foregroundOnly: Boolean): Long {
+        val token = ++promptPreferenceToken
+        if (foregroundOnly) pendingPromptForegroundDisable = token else pendingPromptMasterDisable = token
+        if (!foregroundOnly || foreground()) {
+            UiOperationOverlay.hide()
+            UiOperationOverlay.release()
+        }
+        return token
+    }
+
+    fun cancelPromptPreferenceChange(token: Long) {
+        if (pendingPromptMasterDisable == token) pendingPromptMasterDisable = null
+        if (pendingPromptForegroundDisable == token) pendingPromptForegroundDisable = null
+        apply("prompt-settings-write-not-saved")
+    }
+
+    private fun promptAllowed(inForeground: Boolean): Boolean = feedbackSettingsReady &&
+        pendingPromptMasterDisable == null && (!inForeground || pendingPromptForegroundDisable == null) &&
+        promptOn && (promptInForeground || !inForeground)
 
     /**
      * 边缘光在**前台是否显示**（`AppSettings.edgeLightInForeground`，默认开 = 保持 issue #6）。
@@ -259,24 +286,43 @@ object TouchFx {
                 Core.settings.flow.collect { s ->
                     // 边缘光跟当前配色的 primary，不再留一套固定墨绿。
                     fxBrandColor = brandColorFor(s.themeMode, s.paletteMode)
-                    val changed = !edgeSettingsReady || edgeLightOn != s.edgeLight ||
-                        edgeLightInForeground != s.edgeLightInForeground
+                    val changed = !feedbackSettingsReady || edgeLightOn != s.edgeLight ||
+                        edgeLightInForeground != s.edgeLightInForeground ||
+                        promptOn != s.uiAutomationPrompt || promptInForeground != s.uiAutomationPromptInForeground
                     edgeLightOn = s.edgeLight
                     edgeLightInForeground = s.edgeLightInForeground
+                    promptOn = s.uiAutomationPrompt
+                    promptInForeground = s.uiAutomationPromptInForeground
                     if (!s.edgeLight) pendingMasterDisable = null
                     if (!s.edgeLightInForeground) pendingForegroundDisable = null
-                    edgeSettingsReady = true
+                    if (!s.uiAutomationPrompt) pendingPromptMasterDisable = null
+                    if (!s.uiAutomationPromptInForeground) pendingPromptForegroundDisable = null
+                    feedbackSettingsReady = true
                     if (changed) apply("settings")
                 }
             }.onFailure { error ->
                 // Unknown preferences must never briefly enable a saved-disabled effect.
-                edgeSettingsReady = false
+                feedbackSettingsReady = false
                 edgeLightOn = false
+                promptOn = false
                 view?.setEdgeEnabled(false)
+                UiOperationOverlay.hide()
+                UiOperationOverlay.release()
                 watchingSettings = false
                 appContext?.let {
                     trace(it, "entry=settings-collect-failed ${error.javaClass.simpleName}: ${error.message}")
                 }
+            }
+        }
+    }
+
+    private fun watchSessions() {
+        if (watchingSessions) return
+        watchingSessions = true
+        settingsScope.launch {
+            operations.ownersFlow.collect {
+                main.removeCallbacks(ticker)
+                main.post(ticker)
             }
         }
     }
@@ -327,9 +373,11 @@ object TouchFx {
         appContext = service.applicationContext
         // A window created earlier from the application context is a TYPE_APPLICATION_OVERLAY one:
         // it is up and drawing, but it is the kind MIUI hides in the background. Dropping it here
-        // means the next effect rebuilds it as an accessibility overlay, so turning the service on
-        // upgrades the effects without waiting for a process restart.
-        main.post { release("accessibility-connected") }
+        // lets active feedback immediately rebuild on the accessibility host.
+        main.post {
+            release("accessibility-connected")
+            if (operations.hasSession) apply("accessibility-connected")
+        }
     }
 
     /**
@@ -339,11 +387,14 @@ object TouchFx {
      * disconnects, without telling the app. Leaving [view] pointing at that dead window would make
      * every later effect a silent no-op — [overlay] would happily return the stale view — which is
      * precisely the 「要显示的时候不显示」 failure this rewrite is meant to remove. Clearing it lets
-     * the next effect rebuild a window from whatever host is still available.
+     * active feedback immediately rebuild a window from the remaining host.
      */
     fun unbindService(context: Context) {
         serviceContext = null
-        main.post { release("accessibility-disconnected") }
+        main.post {
+            release("accessibility-disconnected")
+            if (operations.hasSession) apply("accessibility-disconnected", context)
+        }
     }
 
     /**
@@ -354,6 +405,7 @@ object TouchFx {
      * removal the system refuses is ignored — there is nothing to do about a window that is already gone.
      */
     private fun release(reason: String) {
+        UiOperationOverlay.release()
         val fx = view ?: return
         val windowManager = manager
         val app = appContext
@@ -376,6 +428,91 @@ object TouchFx {
         manager = null
         windowUp = false
         if (app != null) noteOverlay(app, "released（$reason）")
+    }
+
+    internal suspend inline fun withUiOperation(context: Context, label: String?, crossinline block: suspend () -> ToolResult): ToolResult {
+        if (label == null) return block()
+        val caller = currentCoroutineContext()[TerminalCaller]
+        val token = beginUiOperation(context, label, caller?.let { UiOperationOwner(it.chatId, it.runId) }, caller?.cancelRun)
+        var completed = false
+        var cancelled = false
+        return try {
+            val result = if (uiOperationInjectsInput(label)) withoutInputControls { block() } else block()
+            result.also { completed = it.ok }
+        } catch (cancel: CancellationException) {
+            cancelled = true
+            throw cancel
+        } finally {
+            endUiOperation(token, completed, cancelled)
+        }
+    }
+
+    internal fun beginUiOperation(
+        context: Context,
+        label: String,
+        owner: UiOperationOwner? = null,
+        cancelRun: (() -> Boolean)? = null,
+    ): Long {
+        appContext = context.applicationContext
+        val token = operations.begin(label, owner, cancelRun)
+        main.removeCallbacks(ticker)
+        main.post(ticker)
+        return token
+    }
+
+    internal fun endUiOperation(token: Long, completed: Boolean, cancelled: Boolean = false) {
+        val held = operations.end(token, completed, SystemClock.uptimeMillis(), cancelled)
+        main.post {
+            apply("operation-ended")
+            if (held) main.postDelayed({ apply("operation-expired") }, UI_OPERATION_HOLD_MS)
+        }
+    }
+
+    internal suspend fun <T> withoutInputControls(block: suspend () -> T): T {
+        var entered = false
+        try {
+            withContext(Dispatchers.Main.immediate) {
+                UiOperationOverlay.beginInput()
+                entered = true
+                awaitOverlayFrame()
+            }
+            return block()
+        } finally {
+            if (entered) withContext(NonCancellable + Dispatchers.Main.immediate) {
+                UiOperationOverlay.endInput()
+            }
+        }
+    }
+
+    internal suspend fun <T> withoutOperationStatus(block: suspend () -> T): T {
+        var hidden = false
+        try {
+            withContext(Dispatchers.Main.immediate) {
+                operations.hideForCapture()
+                hidden = true
+                val fx = view
+                fx?.visibility = View.INVISIBLE
+                UiOperationOverlay.setCaptureHidden(true)
+                awaitOverlayFrame()
+            }
+            return block()
+        } finally {
+            if (hidden) withContext(NonCancellable + Dispatchers.Main.immediate) {
+                operations.restoreAfterCapture()
+                UiOperationOverlay.setCaptureHidden(operations.hiddenForCapture)
+                apply("screenshot-finished")
+            }
+        }
+    }
+
+    private suspend fun awaitOverlayFrame() {
+        suspendCancellableCoroutine<Unit> { continuation ->
+            Choreographer.getInstance().postFrameCallback {
+                main.post {
+                    if (continuation.isActive) continuation.resumeWith(Result.success(Unit))
+                }
+            }
+        }
     }
 
     fun tap(context: Context, x: Float, y: Float) {
@@ -422,25 +559,7 @@ object TouchFx {
         }
     }
 
-    /**
-     * The agent has just driven the interface — a tap, a swipe, a launch, a typed line.
-     *
-     * The breathing edge is not "a run is going", it is "this run is operating the phone", and
-     * this is where that difference is recorded. Every entry point above calls it, so anything
-     * that draws a ring or a flash counts as driving. 读屏（`ui_dump` / `ui_screenshot`）走的是另一条
-     * 入口 [noteToolActivity]：spec v2 里它同样是 UI 操作，只是不画环。
-     * The run ids are captured here rather than passed in from the tools: the run that drove is
-     * the one whose ending has to put the light out, and the engine already knows which those are.
-     *
-     * Ids are added, never replaced: a run that drove keeps the light for as long as it lives,
-     * even if the next action is taken while a different set of runs happens to be in flight.
-     * Ids that have ended are dropped by the ticker, so a later run in the same conversation
-     * starts from nothing rather than inheriting the light from the one before it.
-     *
-     * 没有任何 run 在飞时这里什么也不点亮（原来的 job 窗口已删）：后台定时任务本身也是 run
-     * （SchedulerService 走 Core.engine.startRun），所以「没有 run 的一次驱动动作」不是任务，
-     * 它只该留下那一圈光晕，不该让边缘一直亮着 —— 用户报的正是这个。
-     */
+    /** Record a screen action for episode traces and automatic return bookkeeping. */
     fun noteDriving(context: Context) {
         appContext = context.applicationContext
         val running = Core.engine.runsFlow.value.keys
@@ -454,18 +573,7 @@ object TouchFx {
         main.post(ticker)
     }
 
-    /**
-     * 工具层的一次调用：命中触发集就开启/续期回合，否则**什么都不做**（中性）。
-     *
-     * 中性是关键：read_file / web_search / 只读 `run_shell` / list_dir 既不点亮也不熄灭 —— 它们只是
-     * 「不是 UI 操作」。回合的结束由静默超时或整轮 run 结束决定，不由某个工具决定（v1「每个工具各自
-     * 亮灭」正是语义错乱的来源）。任何线程可调；碰 view 的部分由 [armEpisode] 投到主线程。
-     *
-     * 触发集的判定放在这里而不是各工具里，是因为 [traceCall] 已经拿到了工具名与命令原文（含被掩码的
-     * 输入文本，掩码只影响日志，不影响这里的正则）。读屏那两个工具不走 [traceCall]，而是在
-     * `tools/UiTools.kt` 各自的入口直接调这里（`dump()` 传 `"ui_dump"`、`screenshot()` 传
-     * `"ui_screenshot"`）。
-     */
+    /** Record tool activity for traces and automatic return; dispatch opens owned UI sessions. */
     fun noteToolActivity(context: Context, tool: String, detail: String? = null) {
         // These tools follow the active virtual display. Their main-screen feedback
         // must be decided at the actual dispatch site, where the target is known.
@@ -477,18 +585,11 @@ object TouchFx {
         val triggers = tool in FX_UI_EPISODE_TOOLS ||
             shellToolDrivesUi(tool, detail)
         if (triggers) {
-            // **读屏也要登记成"驱动"**（issue #2）：改判据之后灯由 [drivingIds] 决定，
-            // 只 arm 不登记的话，一轮只做 ui_dump / ui_screenshot 的任务永远点不亮
-            // （issue 的时间线里 21:08:35 那次 reason=tool=ui_dump 就是这种情况）。
-            // 与 [noteDriving] 同一条口径：这一轮碰过屏幕，灯就归它。
             val running = Core.engine.runsFlow.value.keys
             synchronized(drivingLock) { drivingIds = drivingIds + running }
             armEpisode(context, "tool=$tool")
             return
         }
-        // **非 UI 工具是中性事件**（issue #2）：read_file / web_search / 只读 run_shell / list_dir
-        // 只说明「这一次不是 UI 操作」，不说明「控制结束了」—— agent 在两次点击之间读文件、跑命令、
-        // 等模型推理都是常态。灯由 [apply] 按「驱动过屏幕的 run 还活着」决定，这里什么也不改。
         trace(context, "entry=neutral tool=$tool")
     }
 
@@ -519,7 +620,7 @@ object TouchFx {
             episodeTraced = true
             traceEpisode(app, if (wasLive) "extend" else "start", source)
             main.removeCallbacks(episodeEnd)
-            // 目标交给 apply 算（它知道 run 是否还在、是不是驱动过手机），这里只负责"这一下算 UI 操作"。
+            // apply 按共享会话算目标；这里登记最近一次 UI 活动。
             // 不自己 setLit：亮度已经是连续量，谁都能定目标就等于两处打架。
             apply("ui", app)
             // 回合的静默收尾照旧排表 —— 它现在只写日志（见 [endEpisode]），不再决定灯亮不亮，
@@ -533,7 +634,7 @@ object TouchFx {
      *
      * 20 秒没有新的 UI 操作只说明「最近没碰屏幕」，不说明这一轮控制结束了 —— 真机实测两次
      * UI 操作之间 p50=18.9s、最长 191.7s，agent 读文件/跑命令/等推理都在这段间隔里。灯亮不亮
-     * 由 [apply] 按「驱动过屏幕的 run 还活着」决定，所以这里把回合 latch 归零、写一行
+     * 由 [apply] 按共享会话决定，所以这里把回合 latch 归零、写一行
      * `episode=quiet`，灯不动。
      *
      * 每次 [armEpisode] 都会重排它，所以这里只需回答「真的静默够久了吗」；不够就按剩余时间再排一次。
@@ -580,7 +681,7 @@ object TouchFx {
      * 回合 latch 还活着吗：最后一次 UI 操作在 [EPISODE_QUIET_MS] 之内。
      *
      * **它不再决定灯亮不亮**（issue #2）：只用来在日志里分辨 `episode=start` 与 `extend`。
-     * 亮不亮由 [apply] 按「驱动过屏幕的 run 还活着」回答。
+     * 亮不亮由 [apply] 按共享会话回答。
      */
     private fun episodeLive(now: Long): Boolean =
         lastUiAt != 0L && now - lastUiAt < EPISODE_QUIET_MS
@@ -590,19 +691,6 @@ object TouchFx {
         trace(app, "episode=$kind reason=$reason", episode = kind)
     }
 
-    /**
-     * The light mirrors a state that lives in the engine, so it is polled rather than pushed — and
-     * every path that changes one of its inputs re-asks [apply] instead of waiting for the next tick.
-     *
-     * Nothing has to switch it off, which is the point: a run that dies without telling anyone
-     * cannot leave the light on, because the next tick sees that its id is gone. The ticker
-     * stops itself once the light is out **and** no driving run is left, so no timer runs while
-     * the agent is idle — a dark ticker with a run still in flight is the one that watches for
-     * the departure that brings the user back to the app.
-     *
-     * 亮不亮由 [apply] 按「驱动过屏幕的 run 还活着」回答：所以每一 tick 都重新问一遍，窗口中途被
-     * 重建（跳转 / 服务重连）也不会留下一块暗着的画布。
-     */
     /**
      * How long the way home is held back after the last driving run ends.
      *
@@ -628,34 +716,17 @@ object TouchFx {
         }
     }
 
-    /**
-     * 重新按当前状态对一次灯，并返回这一次是否显示（回合还活着且不在前台）。
-     *
-     * 每个会改变输入的路径都走这里，而不是只等一秒一次的 ticker：进出前台（[watchForeground]）、
-     * 窗口重建（[overlay]）、回合的开关（[armEpisode]/[endEpisode]）。Main thread only.
-     */
+    /** Apply the shared session and display preferences to both feedback windows. Main thread. */
     private fun apply(reason: String, context: Context? = null): Boolean {
         val app = appContext ?: context ?: return false
         watchForeground()
         watchSettings()
+        watchSessions()
         val now = SystemClock.uptimeMillis()
         val running = Core.engine.runsFlow.value.keys
         val inForeground = foreground()
         lastForeground = inForeground
-        // 「这个 run 驱动过手机，而且整轮还没结束」—— 用来兜住控制序列里的**长**思考间隔
-        // （真机实测 UI→UI 间隔 p50=18.9s、最长 191.7s，任何超时窗都追不上；追就会变回一直亮）。
-        val drivingAlive = drivingIds.any { it in running }
-        // **亮 = 这一轮驱动过屏幕的 run 还活着**（issue #2）。两个旧条件都删了：
-        //  · 静默超时（[episodeLive]）—— p50 已 18.9s，20 秒窗会在一半的控制间隔里误灭；
-        //  · 非 UI 工具（原 nonUiSinceLastUi）—— read_file / web_search 只是「不是 UI 操作」，
-        //    不是「控制结束了」，把它们当熄灭信号会让一次连续任务亮灭十几次。
-        // 现在熄灭只有一条路：驱动过屏幕的 run 全部离场（ticker 把 drivingIds 与 running 取交集）。
-        // 单一亮度，没有暗档 —— 暗档正是「看着像中断」的来源。
-        val sessionAlive = drivingAlive
-        // **前台不再是熄灭条件**（issue #6，用户：「JAgent自己在前台时也要显示」）：
-        // 亮不亮只看这一轮驱动过屏幕的 run 还活不活着，前台/后台一视同仁。
-        // `inForeground` 仍然照常传给 [traceLight]，日志里的 `fg=self|other` 不丢。
-        // 外观页的开关是最后一道门：关掉只是不显示，驱动判定与自动返回照旧。
+        val sessionAlive = operations.hasSession
         val edgeEnabled = edgeAllowed(inForeground)
         val target = if (sessionAlive && edgeEnabled) {
             FX_ALPHA_HOT
@@ -664,10 +735,18 @@ object TouchFx {
         }
         traceLight(app, reason, target, sessionAlive, running, now, inForeground)
         // 目标值而不是开关：view 自己逐帧缓动逼近，所以亮起/熄灭都是斜坡，不会「啪」地闪。
+        val operation = operations.snapshot(now)
+        val promptEnabled = promptAllowed(inForeground)
         val fx = (if (target > 0f) overlay(app) else view)
         // Explicitly disabling the feature clears both the breath and any in-flight flash.
         fx?.setEdgeEnabled(edgeEnabled)
         fx?.setTarget(target)
+        fx?.visibility = if (operations.hiddenForCapture) View.INVISIBLE else View.VISIBLE
+        if (operation != null && promptEnabled) UiOperationOverlay.show(app, serviceContext, operation)
+        else if (!operations.hiddenForCapture) {
+            UiOperationOverlay.hide()
+            if (!promptEnabled) UiOperationOverlay.release()
+        }
         // **停摆兜底**（issue #7）：窗口脱离窗口树之后 `postInvalidateDelayed` 不再排帧，
         // `onDraw` 停摆、`drawnAlpha` 冻在最后一帧 —— 日志里 `target=0.0 alpha=1.0` 挂几分钟就是它。
         // 正常淡出 0.8 秒，所以「目标归零超过 [FX_STALL_MS] 还亮着」只能是没在画，直接清零。
@@ -685,16 +764,16 @@ object TouchFx {
                 trace(app, "entry=stalled-reset alpha=$stuck 停了 ${now - targetZeroAt}ms")
             }
         }
-        return target > 0f
+        return target > 0f || (operation != null && promptEnabled)
     }
 
     /**
      * 判死用的一行：回合的输入 + 结论 + 是谁问的。
      *
-     * `session` 是**真正决定灯亮不亮的那个判据**（驱动过屏幕的 run 还活着），不是 20 秒静默窗 ——
+     * `session` 是**真正决定灯亮不亮的那个判据**（实际调用者的会话还活着），不是 20 秒静默窗 ——
      * 两者从 issue #2 起就不是同一件事，日志里写错一个就会把下一次排查引到错的分支上。`sinceUi` 是
      * 距上次 UI 操作的毫秒数、`quiet=20000ms` 是同一行的对照值（它现在只划日志边界，见 [episodeEnd]）。
-     * `drivingAlive` 与 `session` 同源，留着只为对照 `running` / `drivingIds` 两个集合的大小。
+     * `drivingAlive` 保留自动返回的旧 run 判据；`session` 来自实际调用者的共享会话。
      *
      * 变化时必写，另外每 [FX_LIGHT_TRACE_MS] 写一次心跳 —— 一次复现就能看出「谁把灯点亮的」和
      * 「谁没把它熄掉」。Main thread only, like [apply].
@@ -719,7 +798,7 @@ object TouchFx {
                 "foreground=$foreground sinceUi=${if (lastUiAt == 0L) "-" else "${now - lastUiAt}ms"} " +
                 "quiet=${EPISODE_QUIET_MS}ms " +
                 "drivingAlive=${drivingIds.any { it in running }} running=${running.size} " +
-                "drivingIds=${drivingIds.size}",
+                "drivingIds=${drivingIds.size} owners=${operations.ownersFlow.value.size}",
         )
     }
 
@@ -777,16 +856,15 @@ object TouchFx {
             // The trim happens here rather than in [apply] on purpose — the departure above needs
             // the id to still be in the set on the tick that sees it.
             synchronized(drivingLock) { drivingIds = drivingIds.intersect(running) }
-            // 整轮结束 ⇒ 立刻收尾，不等 3 秒静默（spec v2 用例 ⑦）。ticker 一秒一跳，所以最坏一秒内
-            // 灭到 0 —— 这比让引擎反向回调进来少一条依赖。
-            if (running.isEmpty()) endEpisode("run-idle")
+            // 共享会话结束后记录日志收尾；主引擎离场仍负责自动返回。
+            if (running.isEmpty() && !operations.hasSession) endEpisode("run-idle")
             val lit = apply("tick")
             // 亮着就还要人熄灯（静默 3 秒），前台里虽然不亮、但活着的驱动 run 还等着离场（自动返回
             // 就靠这一 tick 发现），所以两种都要继续；只有「灭 + 没有活着的驱动 run」才停表。
             // **停表条件不能看 `view.edgeAlpha`**（issue #8）：屏幕上可能挂着一块孤儿窗口，而 `view`
             // 指向的是另一个实例 —— 读到 0 就停表，`apply()` 的停摆兜底从此成了死代码。
             // 现在只要**相信窗口还在**（[windowUp]）就继续跳；1 秒一跳的代价可以忽略。
-            if (lit || drivingIds.any { it in running }) {
+            if (lit || operations.hasSession || drivingIds.any { it in running }) {
                 main.postDelayed(this, FX_BREATH_TICK_MS)
             } else if (windowUp) {
                 // 窗口常驻、没有会话：放慢到 5 秒一跳。跳的意义只有一个 —— 让 [apply] 还有机会
@@ -978,6 +1056,7 @@ object TouchFx {
         }
         val bounds = displayBounds(host)
         val fx = FxView(host, bounds, screenCornerRadius(host)) { displayBounds(it) }
+        if (operations.hiddenForCapture) fx.visibility = View.INVISIBLE
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.MATCH_PARENT,
@@ -994,6 +1073,7 @@ object TouchFx {
                 WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT,
         ).apply {
+            alpha = feedbackOverlayAlpha(host, accessibility)
             // These two are what actually make the window full-screen, and why the light never
             // reached the status bar without them.
             //
@@ -1056,11 +1136,10 @@ object TouchFx {
         // 新画布，「该多亮」不是：窗口被收走 / 服务重连 / 跳转重建之后新 view 的灯是关的，只有按
         // 当前状态立刻对一遍，光才不会跟着旧画布一起消失。这里直接算、直接给目标（不经过 [apply]，
         // 免得 [apply] → 建窗 → 再 [apply] 绕回来），所以 ticker 停了也照样亮。
-        // 与 [apply] 同一条会话判定（issue #2）：驱动过屏幕的 run 还活着就亮，静默和非 UI 工具都不参与。
-        val sessionAlive = drivingIds.any { it in running }
+        val sessionAlive = operations.hasSession
         // 前台不压制（issue #6）：与 [apply] 同一口径，窗口重建后不能又暗下去。
         // 外观页开关同理（关掉时窗口重建也不该亮）。
-        val target = if (sessionAlive && edgeLightVisible(edgeLightOn, edgeLightInForeground, inForeground)) {
+        val target = if (sessionAlive && edgeAllowed(inForeground)) {
             FX_ALPHA_HOT
         } else {
             0f

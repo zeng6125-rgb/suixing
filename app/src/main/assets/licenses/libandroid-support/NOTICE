@@ -1,0 +1,4 @@
+libandroid-support 29-1, Apache-2.0 and MIT.
+Sources: https://github.com/termux/libandroid-support/tree/v29 and https://github.com/termux/wcwidth/tree/v4
+LICENSE and LICENSE-wcwidth retain the original author notices and license text.
+The application modifies only the fixed-length ELF RUNPATH string.

@@ -8,6 +8,7 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.AnimationVector1D
 import androidx.compose.animation.core.CubicBezierEasing
+import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
@@ -99,6 +100,33 @@ internal val SCRUBBER_GAP = 3.dp
 internal fun scrubberNudgeNeeded(previous: Int, current: Int, pressRow: Int, shown: Boolean): Boolean =
     previous != current && pressRow < 0 && !shown
 
+/** Enter a reading window from the adjacent tick without changing layout or hit geometry. */
+internal suspend fun animateScrubberNudge(
+    nudge: Animatable<Float, AnimationVector1D>,
+    shift: Float?,
+    nudgeVelocity: FloatArray,
+) {
+    if (shift != null) {
+        if (nudge.value == 0f) {
+            nudge.snapTo(shift)
+        } else {
+            nudge.animateTo(
+                shift,
+                spring(dampingRatio = 1f, stiffness = 1_500f),
+                initialVelocity = nudgeVelocity[0],
+            ) { nudgeVelocity[0] = velocity }
+        }
+    }
+    if (nudge.value != 0f) {
+        nudge.animateTo(
+            0f,
+            spring(dampingRatio = 0.85f, stiffness = 420f),
+            initialVelocity = nudgeVelocity[0],
+        ) { nudgeVelocity[0] = velocity }
+    }
+    nudgeVelocity[0] = 0f
+}
+
 /** How far the finger travels before a press turns into a drag. Aether's own threshold. */
 internal val SCRUBBER_DRAG_THRESHOLD = 18.dp
 
@@ -140,6 +168,23 @@ internal const val SCRUBBER_TOUCH_SCALE = 1.12f
 
 /** Aether's motion curve, borrowed for the row scale and the label's entry and exit. */
 internal val SCRUBBER_EASING = CubicBezierEasing(0.22f, 0.84f, 0.18f, 1f)
+
+internal data class ScrubberLabelPayload(
+    val text: String,
+    val offsetPx: Float,
+)
+
+@Composable
+internal fun scrubberLabelPayload(
+    conversationId: String,
+    visibility: MutableTransitionState<Boolean>,
+    incoming: ScrubberLabelPayload,
+): ScrubberLabelPayload {
+    val lastVisible = remember(conversationId) { arrayOf(incoming) }
+    val shown = visibility.targetState
+    if (shown) SideEffect { lastVisible[0] = incoming }
+    return if (!shown && !visibility.isIdle) lastVisible[0] else incoming
+}
 
 /** One tick's target look: the values the rail draws when it is not animating. */
 internal data class ScrubberTickStyle(
@@ -319,13 +364,13 @@ internal fun TurnScrubber(
     if (rows.isEmpty()) return
     val rowCount = rows.size
     // >12 轮时窗口在中间滑动，条子本身始终居中 ⇒ 集合换了但视觉没动。
-    // 读到的轮次一变，就让整条 rail 在绘制期做一个顺着阅读方向的小幅往返位移，
-    // 位置仍常驻中间，但能看出「读到别处了」。首帧不触发；手指在 rail 上时不触发，
+    // 阅读窗口换一轮时，让 rail 从相邻条的位置单次滑入当前居中位置，
+    // 形成高亮切换到另一条的过渡。首帧不触发；手指在 rail 上时不触发，
     // 免得和拖动手势打架。
-    val nudgePx = with(LocalDensity.current) { 6.dp.toPx() }
+    val nudgePx = with(LocalDensity.current) { 10.dp.toPx() }
     val nudge = remember(conversationId) { Animatable(0f) }
     // Cancellation resets Animatable's velocity; retain the sampled velocity for a continuous
-    // handoff when another window change arrives before the previous pulse has settled.
+    // handoff when another window change arrives before the previous entry has settled.
     val nudgeVelocity = remember(conversationId) { floatArrayOf(0f) }
     // 信号用「阅读窗口」的起点：同一个纯函数，但不带 unlocked / pinnedCurrentTurn。
     //  · 中间滑动时它随 currentTurn 变 → 触发；
@@ -357,11 +402,11 @@ internal fun TurnScrubber(
     // All three are cleared when the finger lifts, so no frame can leave the rail stuck open.
     var pressRow by remember(conversationId, rowCount) { mutableIntStateOf(-1) }
     var selectionRow by remember(conversationId, rowCount) { mutableIntStateOf(0) }
-    var shown by remember(conversationId, rowCount) { mutableStateOf(false) }
+    val labelVisibility = remember(conversationId, rowCount) { MutableTransitionState(false) }
+    val shown = labelVisibility.targetState
     val selected = selectionRow.coerceIn(0, rowCount - 1)
-    // Follow the current displacement instead of snapping back to the pulse's starting point
-    // on every crossed turn. Gestures advance the baseline too, so releasing cannot replay a
-    // window change that already happened while the finger was down.
+    // Gestures advance the reading baseline too, so releasing cannot replay a window change
+    // already observed while the finger was down.
     val lastReadingStart = remember(conversationId) { intArrayOf(readingWindowStart) }
     val railInteracting = pressRow >= 0 || shown
     LaunchedEffect(conversationId, readingWindowStart, settling, railInteracting) {
@@ -372,22 +417,10 @@ internal fun TurnScrubber(
             nudgeVelocity[0] = 0f
             return@LaunchedEffect
         }
-        if (scrubberNudgeNeeded(previous, readingWindowStart, pressRow, shown)) {
-            val direction = if (readingWindowStart > previous) -1f else 1f
-            nudge.animateTo(
-                direction * nudgePx,
-                spring(dampingRatio = 1f, stiffness = 1_500f),
-                initialVelocity = nudgeVelocity[0],
-            ) { nudgeVelocity[0] = velocity }
-        }
-        if (nudge.value != 0f) {
-            nudge.animateTo(
-                0f,
-                spring(dampingRatio = 1f, stiffness = 600f),
-                initialVelocity = nudgeVelocity[0],
-            ) { nudgeVelocity[0] = velocity }
-        }
-        nudgeVelocity[0] = 0f
+        val shift = if (scrubberNudgeNeeded(previous, readingWindowStart, pressRow, shown)) {
+            if (readingWindowStart > previous) -nudgePx else nudgePx
+        } else null
+        animateScrubberNudge(nudge, shift, nudgeVelocity)
     }
     val animationScope = rememberCoroutineScope()
     val rowScales = remember(conversationId, animationScope) { ScrubberScales(animationScope) }
@@ -411,11 +444,21 @@ internal fun TurnScrubber(
     // measured off the rail's vertical centre: the strip itself is centred on the reading
     // area and its height changes with the number of turns in the window.
     val railHeightPx = rowPx * rowCount + gapPx * (rowCount - 1)
+    val labelPayload = scrubberLabelPayload(
+        conversationId,
+        labelVisibility,
+        ScrubberLabelPayload(
+            text = if (shown) {
+                latestRows.getOrNull(selected)?.takeIf { it > 0 }?.let(labelOf).orEmpty()
+            } else "",
+            offsetPx = selected * (rowPx + gapPx) + rowPx / 2f - railHeightPx / 2f,
+        ),
+    )
     // Animated, not computed straight from the row: dragging the finger down three lines then
     // has the label glide to each one instead of teleporting, which is what makes the drag read
     // as moving along the strip rather than as three separate taps.
     val labelDyPx = animateFloatAsState(
-        targetValue = selected * (rowPx + gapPx) + rowPx / 2f - railHeightPx / 2f,
+        targetValue = labelPayload.offsetPx,
         animationSpec = spring(dampingRatio = 0.9f, stiffness = 900f),
         label = "scrubber_label_dy",
     )
@@ -431,7 +474,7 @@ internal fun TurnScrubber(
     Box(modifier = modifier.fillMaxWidth()) {
         Column(
             modifier = Modifier
-                // 窗口滑动时的往返位移只在绘制期读，布局和命中盒都不参与。
+                // 窗口切换的入位动画只在绘制期读，布局和命中盒都不参与。
                 .graphicsLayer { translationY = nudge.value }
                 // The touch area is the rail and nothing else: exactly the width of the longest
                 // line drawn, and the height of the rows plus their gaps.
@@ -482,7 +525,7 @@ internal fun TurnScrubber(
                             pinnedCurrentTurn = latestCurrentTurn
                             pressRow = startRow
                             selectionRow = startRow
-                            shown = false
+                            labelVisibility.targetState = false
                             var travel = 0f
                             // Only a gesture that really moved is eligible for the off-rail cancel
                             // below; a tap and a still hold always jump.
@@ -505,7 +548,7 @@ internal fun TurnScrubber(
                                     // （用户要求"长按导航条时显示高亮并定位到对应位置"；
                                     // 原来只亮标签、非要等抬手才跳，长按像没反应）。
                                     waiting = false
-                                    shown = true
+                                    labelVisibility.targetState = true
                                     val target = latestRows.getOrNull(selectionRow)?.takeIf { it > 0 }
                                     if (target != null) {
                                         holdJumped = target
@@ -532,7 +575,7 @@ internal fun TurnScrubber(
                                     // hold and starts previewing turns at once.
                                     waiting = false
                                     dragged = true
-                                    shown = true
+                                    labelVisibility.targetState = true
                                     selectionRow = scrubberRowFor(
                                         change.position.y,
                                         hitRowPx,
@@ -593,7 +636,7 @@ internal fun TurnScrubber(
                             // Also runs when pointerInput is cancelled (including a slot-count
                             // change), so a hold cannot leave its window pinned or rail highlighted.
                             pressRow = -1
-                            shown = false
+                            labelVisibility.targetState = false
                             // Recenter on the resulting current turn and forget this pull.
                             unlocked = 0
                             pinnedCurrentTurn = null
@@ -649,7 +692,7 @@ internal fun TurnScrubber(
             }
         }
         AnimatedVisibility(
-            visible = shown,
+            visibleState = labelVisibility,
             modifier = Modifier
                 .align(Alignment.CenterEnd)
                 // Layout-neutral on purpose: the label hangs off the rail's left edge and must
@@ -670,7 +713,7 @@ internal fun TurnScrubber(
             ),
         ) {
             Text(
-                text = latestRows.getOrNull(selected)?.takeIf { it > 0 }?.let(labelOf).orEmpty(),
+                text = labelPayload.text,
                 // labelMedium rather than labelSmall, and a roomier box: the bubble floats
                 // over the transcript for as long as a finger holds the rail, so it has to be
                 // read at a glance. Still one line, and still capped at SCRUBBER_LABEL_MAX, so

@@ -21,6 +21,7 @@ import androidx.annotation.RequiresApi
 import com.suixing.agent.core.Core
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancelChildren
 import kotlinx.coroutines.delay
@@ -513,46 +514,65 @@ class SuixingAccessibilityService : AccessibilityService() {
         maxWidth: Int = 1080,
         quality: Int = 72,
         displayId: Int = Display.DEFAULT_DISPLAY,
-    ): ByteArray? =
+    ): ByteArray? {
+        var captured: ScreenshotResult? = null
+        var encoding: Job? = null
+        try {
+            if (displayId == Display.DEFAULT_DISPLAY) {
+                TouchFx.withoutOperationStatus { captured = captureScreenshot(displayId) }
+            } else {
+                captured = captureScreenshot(displayId)
+            }
+            val screenshot = captured ?: return null
+            val buffer = screenshot.hardwareBuffer
+            return suspendCancellableCoroutine { continuation ->
+                // **整段解码/缩放/压缩挪到后台线程**（优化清单 tools-P0）：
+                // 回调注册在 `mainExecutor` 上，原来这一整串（wrapHardwareBuffer →
+                // copy(ARGB_8888) → createScaledBitmap → JPEG 压缩）都在**主线程**跑，
+                // 一张全尺寸位图就是几十毫秒，期间 UI 完全不动。
+                // ScreenshotResult 的 hardwareBuffer 在 close 之前有效，可以跨线程使用。
+                // Completion owns the buffer even if cancellation prevents dispatch.
+                val work = screenshotScope.launch {
+                    val bytes = runCatching {
+                        var wrapped: Bitmap? = null
+                        var software: Bitmap? = null
+                        var scaled: Bitmap? = null
+                        try {
+                            if (!continuation.isActive) return@runCatching null
+                            wrapped = Bitmap.wrapHardwareBuffer(buffer, screenshot.colorSpace)
+                            software = wrapped?.copy(Bitmap.Config.ARGB_8888, false)
+                            software?.let { bitmap ->
+                                scaled = scaleTo(bitmap, maxWidth.coerceAtLeast(1))
+                                toJpeg(scaled!!, quality)
+                            }
+                        } finally {
+                            if (scaled !== software) scaled?.recycle()
+                            software?.recycle()
+                            wrapped?.recycle()
+                        }
+                    }.getOrNull()
+                    if (continuation.isActive) continuation.resume(bytes)
+                }
+                encoding = work
+                continuation.invokeOnCancellation { work.cancel() }
+                work.invokeOnCompletion {
+                    buffer.close()
+                    if (continuation.isActive) continuation.resume(null)
+                }
+            }
+        } finally {
+            // Cancellation can arrive after capture, before the encoding job takes ownership.
+            if (encoding == null) captured?.hardwareBuffer?.close()
+        }
+    }
+
+    @RequiresApi(Build.VERSION_CODES.R)
+    private suspend fun captureScreenshot(displayId: Int): ScreenshotResult? =
         suspendCancellableCoroutine { continuation ->
             val callback = object : TakeScreenshotCallback {
                 override fun onSuccess(screenshot: ScreenshotResult) {
-                    // **整段解码/缩放/压缩挪到后台线程**（优化清单 tools-P0）：
-                    // 回调注册在 `mainExecutor` 上，原来这一整串（wrapHardwareBuffer →
-                    // copy(ARGB_8888) → createScaledBitmap → JPEG 压缩）都在**主线程**跑，
-                    // 一张全尺寸位图就是几十毫秒，期间 UI 完全不动。
-                    // ScreenshotResult 的 hardwareBuffer 在 close 之前有效，可以跨线程使用。
-                    val buffer = screenshot.hardwareBuffer
-                    // A cancelled launch may never enter its body: completion owns the buffer
-                    // from the callback onward, including cancellation before dispatch.
-                    val work = screenshotScope.launch {
-                        val bytes = runCatching {
-                            var wrapped: Bitmap? = null
-                            var software: Bitmap? = null
-                            var scaled: Bitmap? = null
-                            try {
-                                if (!continuation.isActive) return@runCatching null
-                                wrapped = Bitmap.wrapHardwareBuffer(buffer, screenshot.colorSpace)
-                                software = wrapped?.copy(Bitmap.Config.ARGB_8888, false)
-                                software?.let { bitmap ->
-                                    scaled = scaleTo(bitmap, maxWidth.coerceAtLeast(1))
-                                    toJpeg(scaled!!, quality)
-                                }
-                            } finally {
-                                if (scaled !== software) scaled?.recycle()
-                                software?.recycle()
-                                wrapped?.recycle()
-                            }
-                        }.getOrNull()
-                        if (continuation.isActive) continuation.resume(bytes)
-                    }
-                    continuation.invokeOnCancellation { work.cancel() }
-                    work.invokeOnCompletion {
-                        buffer.close()
-                        if (continuation.isActive) continuation.resume(null)
-                    }
+                    continuation.resume(screenshot) { _, unused, _ -> unused.hardwareBuffer.close() }
                 }
-
                 override fun onFailure(errorCode: Int) {
                     if (continuation.isActive) continuation.resume(null)
                 }

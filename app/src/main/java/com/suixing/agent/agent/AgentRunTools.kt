@@ -9,8 +9,6 @@ import com.suixing.agent.plugins.PluginRuntime
 import com.suixing.agent.plugins.HookDecl
 import com.suixing.agent.plugins.HookVerdict
 import com.suixing.agent.plugins.PluginSpec
-import com.suixing.agent.core.Core
-import com.suixing.agent.service.TouchFx
 import com.suixing.agent.tools.GOAL_TOOL_NAMES
 import com.suixing.agent.tools.TIER_NONE
 import com.suixing.agent.tools.TIER_ROOT
@@ -59,7 +57,9 @@ internal suspend fun AgentRun.executeToolRequests(
             }
             val outcome = if (call.name == "goal_update" && calls.size > 1) {
                 ToolOutcome(call, ToolResult.failure("Call goal_update by itself, after the other tools have returned."),
-                    0, call.arguments.take(600))
+                    0, call.arguments.take(600), withContext(Dispatchers.Default) {
+                        runCatching { parseToolArguments(call.arguments) }.getOrNull()
+                    })
             } else {
                 executeOneTool(
                     call, registry, table.plugins, table.hooks, capabilities, gate, settings, chatId, onEvent,
@@ -133,26 +133,26 @@ internal suspend fun AgentRun.executeOneTool(
     val args = try {
         parseToolArguments(call.arguments)
     } catch (failure: IllegalArgumentException) {
-        return ToolOutcome(call, ToolResult.failure("工具参数不是合法 JSON 对象，请重新生成调用"), 0, argsPreview)
+        return ToolOutcome(call, ToolResult.failure("工具参数不是合法 JSON 对象，请重新生成调用"), 0, argsPreview, null)
     }
     childConfig?.denialReason(call.name, args)?.let { reason ->
-        return ToolOutcome(call, ToolResult.failure(reason), 0, argsPreview)
+        return ToolOutcome(call, ToolResult.failure(reason), 0, argsPreview, args)
     }
     if (registry.isHidden(call.name)) return ToolOutcome(call,
-        ToolResult.failure("当前人设已禁用此工具"), 0, argsPreview)
+        ToolResult.failure("当前人设已禁用此工具"), 0, argsPreview, args)
     val startsGoal = call.name == "goal_resume" ||
         (call.name == "goal" && (args["text"] as? JsonPrimitive)?.content?.isNotBlank() == true)
     if (userInvoked && startsGoal && registry.find("goal_update") == null) {
-        return ToolOutcome(call, ToolResult.failure("当前助手禁用了目标进度工具，无法启动目标"), 0, argsPreview)
+        return ToolOutcome(call, ToolResult.failure("当前助手禁用了目标进度工具，无法启动目标"), 0, argsPreview, args)
     }
     if (call.name in SUBAGENT_TOOL_NAMES) {
         val pool = subagents
         if (pool == null || registry.isHidden(call.name)) return ToolOutcome(call,
-            ToolResult.failure("当前运行未启用此子任务工具"), 0, argsPreview)
+            ToolResult.failure("当前运行未启用此子任务工具"), 0, argsPreview, args)
         onEvent(AgentEvent.ToolStarted(call.name, argsPreview))
         val started = System.currentTimeMillis()
         val result = pool.execute(call.name, args)
-        return ToolOutcome(call, result, System.currentTimeMillis() - started, argsPreview)
+        return ToolOutcome(call, result, System.currentTimeMillis() - started, argsPreview, args)
     }
     // 「压缩上下文」是引擎自己的虚拟工具（用户：「要有压缩上下文的指令工具」）：不进 registry
     // （没有要跑的实现、没有能力档），在分发前拦截 —— 置 [compressNow]，本轮边界上由
@@ -167,6 +167,7 @@ internal suspend fun AgentRun.executeOneTool(
             ),
             toolMs = 0,
             argsPreview = argsPreview,
+            args = args,
         )
     }
     val tool = registry.find(call.name)
@@ -242,11 +243,6 @@ internal suspend fun AgentRun.executeOneTool(
         } else {
             liveLine = "🔧 ${call.name}…"
             onEvent(AgentEvent.ToolStarted(call.name, argsPreview))
-            // 边缘光的**单一埋点**（v3 会话制）：所有真正开跑的工具调用（内置 + 插件）都过这里，
-            // TouchFx 据此判定「UI 操作＝开会话 / 非 UI 工具＝显式结束会话」。以前埋点散在
-            // ShellTools/UiTools 两处，read_file / web_search / 插件工具都不经过 ⇒ 覆盖洞会让
-            // 「不控制就不灭」失效。参数原文（未掩码）给 TouchFx 判 run_shell 里是否真碰 UI。
-            runCatching { TouchFx.noteToolActivity(Core.appContext, call.name, call.arguments) }
             // AUTO 档**不弹任何授权**（用户多次明确要求）：插件的 require_confirm
             // 不再把 AUTO 升级成「问一次」——它降级为日志（preExecute 里已记）。
             // deny 仍拦（不弹窗，只让那次调用失败并说明原因）；ASK/DENY 档与
@@ -270,7 +266,7 @@ internal suspend fun AgentRun.executeOneTool(
                 runCatching {
                     withContext(Dispatchers.IO + terminalCaller + FileCancellationSink { changes ->
                         val interrupted = changes.attach(ToolResult.failure("工具已中断；已验证的文件变更仍予保留"))
-                        interruptedFileTools[call.id] = ToolOutcome(call, interrupted, System.currentTimeMillis() - startedAt, argsPreview)
+                        interruptedFileTools[call.id] = ToolOutcome(call, interrupted, System.currentTimeMillis() - startedAt, argsPreview, args)
                     }) {
                         SHARED_TOOL_EXECUTION.run(call.name) { runner(args) }
                     }
@@ -281,5 +277,5 @@ internal suspend fun AgentRun.executeOneTool(
             }
         }
     }
-    return ToolOutcome(call = call, result = result, toolMs = toolMs, argsPreview = argsPreview)
+    return ToolOutcome(call = call, result = result, toolMs = toolMs, argsPreview = argsPreview, args = args)
 }

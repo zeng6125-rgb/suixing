@@ -59,6 +59,7 @@ internal suspend fun AgentRun.runLoop(
     onEvent: (AgentEvent) -> Unit,
     onCheckpoint: (ContextCheckpoint) -> Unit,
     initialTool: ToolCallRequest? = null,
+    resumeCheckpoint: ContextCheckpoint? = null,
 ): List<StoredMessage> {
     // Published here rather than left to the ticker, so a caller sees Running the
     // moment the run starts even if no ticker was ever started.
@@ -122,7 +123,10 @@ internal suspend fun AgentRun.runLoop(
     // prefix would never match the previous request — which is exactly what the endpoint's
     // prompt cache keys on.
     val window = settings.contextWindowFor(settings.model)
-    val checkpoint = withContext(Dispatchers.Default) { reusableCheckpoint(history, checkpoints) }
+    // A disk tail carries its verified summary; a complete transcript verifies both endpoints here.
+    val checkpoint = withContext(Dispatchers.Default) {
+        resumeCheckpoint ?: reusableCheckpoint(history, checkpoints)
+    }
     val resumeAt = checkpoint?.let { saved -> history.indexOfFirst { it.id == saved.toMessageId } }
     val hasCheckpoint = checkpoint != null && resumeAt != null && resumeAt >= 0
     // **这段纯计算挪出主线程**（issue #36）：`trim` 要对历史做 O(条数) 的 token 估算与列表切片，
@@ -249,8 +253,7 @@ internal suspend fun AgentRun.runLoop(
         // Only committed outcomes count; hashing large arguments/results must stay off Main.
         val step = ++toolStep
         withContext(Dispatchers.Default) {
-            val args = runCatching { parseToolArguments(call.arguments) }
-                .getOrNull() ?: JsonObject(mapOf("_invalid_arguments" to JsonPrimitive(call.arguments)))
+            val args = outcome.args ?: JsonObject(mapOf("_invalid_arguments" to JsonPrimitive(call.arguments)))
             ledger.record(step, call.name, args, result)
         }
     }
@@ -259,7 +262,8 @@ internal suspend fun AgentRun.runLoop(
         val pool = subagents ?: return false
         val completed = pool.unreportedResults()
         if (completed.isEmpty()) return false
-        val arguments = JsonObject(mapOf("ids" to JsonArray(completed.map { JsonPrimitive(it.id) }))).toString()
+        val args = JsonObject(mapOf("ids" to JsonArray(completed.map { JsonPrimitive(it.id) })))
+        val arguments = args.toString()
         val call = ToolCallRequest(UUID.randomUUID().toString(), "wait_agents", arguments)
         // Use the same persisted tool-call/result pair as an explicit wait. This keeps
         // provider replay valid and gives the parent the evidence before its next request.
@@ -275,8 +279,8 @@ internal suspend fun AgentRun.runLoop(
         openCalls = assistant.toolCalls
         onEvent(AgentEvent.ToolStarted(call.name, arguments))
         val started = System.currentTimeMillis()
-        val result = withContext(Dispatchers.Default) { pool.execute(call.name, parseToolArguments(arguments)) }
-        commitTool(ToolOutcome(call, result, System.currentTimeMillis() - started, arguments))
+        val result = withContext(Dispatchers.Default) { pool.execute(call.name, args) }
+        commitTool(ToolOutcome(call, result, System.currentTimeMillis() - started, arguments, args))
         return true
     }
 

@@ -284,6 +284,7 @@ class AgentEngine(
         onCheckpoint: (ContextCheckpoint) -> Unit = {},
         initialTool: ToolCallRequest? = null,
         runId: String = UUID.randomUUID().toString(),
+        resumeCheckpoint: ContextCheckpoint? = null,
     ): List<StoredMessage> {
         // Check and register in one critical section: two coroutines starting the same
         // conversation (a double tap, or an isRunning check preempted before start) would
@@ -321,6 +322,7 @@ class AgentEngine(
                 onEvent = onEvent,
                 onCheckpoint = onCheckpoint,
                 initialTool = initialTool,
+                resumeCheckpoint = resumeCheckpoint,
             )
             return produced
         } finally {
@@ -454,9 +456,10 @@ class AgentEngine(
             onEvent: (AgentEvent) -> Unit,
             onCheckpoint: (ContextCheckpoint) -> Unit,
             initialTool: ToolCallRequest? = null,
+            resumeCheckpoint: ContextCheckpoint? = null,
         ): List<StoredMessage> = runtime.execute(
             history, checkpoints, settings, registry, capabilities, skills, memory, profile,
-            gate, onEvent, onCheckpoint, initialTool,
+            gate, onEvent, onCheckpoint, initialTool, resumeCheckpoint,
         )
     }
 

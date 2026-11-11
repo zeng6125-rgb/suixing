@@ -506,6 +506,7 @@ internal fun MessageRow(
                 message = row.message,
                 card = assistantCard,
                 flatPad = flatPad,
+                name = assistantName,
                 face = assistantFace,
                 avatarPath = assistantAvatarPath,
                 bubbleMaxWidth = bubbleMaxWidth,

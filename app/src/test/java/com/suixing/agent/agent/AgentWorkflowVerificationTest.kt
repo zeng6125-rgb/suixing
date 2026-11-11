@@ -9,8 +9,12 @@ import com.suixing.agent.capability.ShellTier
 import com.suixing.agent.data.AppSettings
 import com.suixing.agent.data.ApprovalMode
 import com.suixing.agent.data.ChildRunConfig
+import com.suixing.agent.data.ChatRepository
+import com.suixing.agent.data.Conversation
+import com.suixing.agent.data.ContextCheckpoint
 import com.suixing.agent.data.MemoryEntry
 import com.suixing.agent.data.MemoryStore
+import com.suixing.agent.data.Roles
 import com.suixing.agent.data.StoredMessage
 import com.suixing.agent.data.UserProfileStore
 import com.suixing.agent.llm.AssistantTurn
@@ -32,8 +36,13 @@ import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.just
 import io.mockk.mockk
+import io.mockk.mockkConstructor
 import io.mockk.mockkObject
+import io.mockk.mockkStatic
+import io.mockk.unmockkConstructor
 import io.mockk.unmockkObject
+import io.mockk.unmockkStatic
+import io.mockk.verify
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CompletableDeferred
@@ -46,11 +55,15 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.JsonArray
 import org.junit.Assert.*
 import org.junit.Test
+import org.junit.Rule
+import org.junit.rules.TemporaryFolder
 
 /** Exercise the real loop and approval boundary, rather than duplicating ledger/config helpers. */
 class AgentWorkflowVerificationTest {
+    @get:Rule val folder = TemporaryFolder()
     private val capabilities = mockk<CapabilityHub> { every { state } returns MutableStateFlow(CapabilityState()) }
     private val skills = mockk<SkillStore> {
         coEvery { listHeaders() } returns emptyList<Skill>()
@@ -74,6 +87,221 @@ class AgentWorkflowVerificationTest {
 
     private fun nativeBashRegistry(): ToolRegistry = registry().also {
         it.add(BashTools(ShellTools(mockk<Context>(relaxed = true), capabilities)))
+    }
+
+    private fun assertEncodedToolPairs(settings: AppSettings, request: List<ChatMessage>): JsonObject {
+        val method = LlmClient::class.java.getDeclaredMethod("requestBody",
+            AppSettings::class.java, List::class.java, List::class.java, String::class.java).apply { isAccessible = true }
+        val body = method.invoke(LlmClient(), settings, request, emptyList<ToolSpec>(), settings.protocol) as JsonObject
+        val pending = ArrayDeque<String>()
+        val announced = mutableListOf<String>()
+        for (item in body["messages"] as JsonArray) {
+            val message = item as JsonObject
+            val role = (message["role"] as JsonPrimitive).content
+            if (role == Roles.TOOL) {
+                assertFalse("工具结果必须有当前调用声明", pending.isEmpty())
+                assertEquals(pending.removeFirst(), (message["tool_call_id"] as JsonPrimitive).content)
+            } else {
+                assertTrue("工具结果齐全前不能插入 $role 消息；仍待 ${pending.toList()}", pending.isEmpty())
+                if (role == Roles.ASSISTANT) {
+                    val calls = message["tool_calls"] as? JsonArray
+                    calls?.forEach {
+                        val id = ((it as JsonObject)["id"] as JsonPrimitive).content
+                        pending.addLast(id)
+                        announced += id
+                    }
+                }
+            }
+        }
+        assertTrue("全部调用都必须有结果", pending.isEmpty())
+        assertEquals("完整工具组不能丢失", request.flatMap { it.toolCalls }.map { it.id }, announced)
+        return body
+    }
+
+    @Test fun `tool screenshots follow the complete result group in live and stored replay requests`(): Unit = runBlocking {
+        val requests = mutableListOf<List<ChatMessage>>()
+        val calls = listOf(ToolCallRequest("image-call", "echo", "{\"image\":true}"),
+            ToolCallRequest("text-call", "echo", "{}"))
+        val client = mockk<LlmClient> {
+            coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
+                requests += secondArg<List<ChatMessage>>().toList()
+                if (requests.size == 1) AssistantTurn("", calls, "tool_calls")
+                else AssistantTurn("完成", emptyList(), "stop")
+            }
+        }
+        val engine = AgentEngine(llm = client)
+        val tools = registry(execute = { args ->
+            if (args["image"] == JsonPrimitive(true)) ToolResult.image("截图", "aW1hZ2U=")
+            else ToolResult.success("文本结果")
+        })
+        val settings = AppSettings(imageInput = true, approvalMode = ApprovalMode.AUTO, subagentsEnabled = false)
+        val question = StoredMessage("question", Roles.USER, "读取页面截图和状态")
+        val produced = engine.startRun("pairs", "Pairs", listOf(question), settings, tools,
+            capabilities, skills, memory, profile, ApprovalGate(), {})
+        val context = mockk<Context> { every { filesDir } returns folder.root }
+        val repository = ChatRepository(context)
+        assertEquals(ChatRepository.SaveResult.Written, repository.save(Conversation(
+            id = "pairs", title = "Pairs", messages = listOf(question) + produced,
+        )))
+        val saved = repository.readWire("pairs")
+        engine.startRun("pairs", "Pairs", saved.messages + StoredMessage("next", Roles.USER, "继续"),
+            settings, tools, capabilities, skills, memory, profile, ApprovalGate(), {}, resumeCheckpoint = saved.checkpoint)
+
+        assertEquals(3, requests.size)
+        for (request in requests.drop(1)) {
+            val body = assertEncodedToolPairs(settings, request)
+            assertTrue("编码后的截图内容不能丢失", body.toString().contains("aW1hZ2U="))
+        }
+    }
+
+    @Test fun `cancellation summaries follow unanswered tool results in the next saved request`(): Unit = runBlocking {
+        val requests = mutableListOf<List<ChatMessage>>()
+        val calls = (1..3).map { ToolCallRequest("call-$it", "echo", "{}") }
+        val client = mockk<LlmClient> {
+            coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
+                requests += secondArg<List<ChatMessage>>().toList()
+                if (requests.size == 1) AssistantTurn("", calls, "tool_calls")
+                else AssistantTurn("完成", emptyList(), "stop")
+            }
+        }
+        val engine = AgentEngine(llm = client)
+        val tools = registry()
+        val settings = AppSettings(toolParallel = 1, approvalMode = ApprovalMode.AUTO, subagentsEnabled = false)
+        val transcript = mutableListOf(StoredMessage("question", Roles.USER, "依次读取三项状态"))
+        var completed = 0
+        engine.startRun("cancel-pairs", "Pairs", transcript.toList(), settings, tools,
+            capabilities, skills, memory, profile, ApprovalGate(), { event ->
+                when (event) {
+                    is AgentEvent.AssistantMessage -> transcript += event.message
+                    is AgentEvent.ToolMessage -> transcript += event.message
+                    is AgentEvent.ToolFinished -> if (++completed == 2) engine.cancel("cancel-pairs")
+                    else -> Unit
+                }
+            })
+        assertEquals(2, completed)
+        assertEquals(3, transcript.count { it.role == Roles.TOOL })
+        assertTrue("停止后的执行总结已落入真实事件转录", transcript.any {
+            it.role == Roles.ASSISTANT && it.toolCalls.isEmpty() && it.text.isNotBlank()
+        })
+        val context = mockk<Context> { every { filesDir } returns folder.root }
+        val repository = ChatRepository(context)
+        assertEquals(ChatRepository.SaveResult.Written, repository.save(Conversation(
+            id = "cancel-pairs", title = "Pairs", messages = transcript,
+        )))
+        val saved = repository.readWire("cancel-pairs")
+        engine.startRun("cancel-pairs", "Pairs", saved.messages + StoredMessage("next", Roles.USER, "继续"),
+            settings, tools, capabilities, skills, memory, profile, ApprovalGate(), {}, resumeCheckpoint = saved.checkpoint)
+
+        assertEquals(2, requests.size)
+        assertEncodedToolPairs(settings, requests.last())
+    }
+
+    @Test fun `compression cannot split a result group at a tool screenshot`(): Unit = runBlocking {
+        val requests = mutableListOf<List<ChatMessage>>()
+        val calls = (1..7).map { ToolCallRequest("call-$it", "echo", if (it == 1) "{\"image\":true}" else "{}") }
+        val client = mockk<LlmClient> {
+            coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
+                requests += secondArg<List<ChatMessage>>().toList()
+                if (requests.size == 1) AssistantTurn("", calls, "tool_calls")
+                else AssistantTurn("有效摘要", emptyList(), "stop")
+            }
+        }
+        val engine = AgentEngine(llm = client)
+        val tools = registry(execute = { args ->
+            if (args["image"] == JsonPrimitive(true)) ToolResult.image("截图", "aW1hZ2U=")
+            else ToolResult.success("文本结果")
+        })
+        val settings = AppSettings(imageInput = true, toolParallel = 1,
+            approvalMode = ApprovalMode.AUTO, subagentsEnabled = false)
+        var completed = 0
+        val checkpoints = mutableListOf<ContextCheckpoint>()
+        engine.startRun("compression-pairs", "Pairs", listOf(StoredMessage("question", Roles.USER, "读取七项状态")),
+            settings, tools, capabilities, skills, memory, profile, ApprovalGate(), { event ->
+                if (event is AgentEvent.ToolFinished && ++completed == calls.size)
+                    assertTrue(engine.requestCompress("compression-pairs"))
+            }, onCheckpoint = { checkpoints += it })
+
+        assertEquals(3, requests.size)
+        assertEquals(1, checkpoints.size)
+        assertEquals("近期结果组的调用声明必须一起保留", calls.map { it.id }, requests.last().flatMap { it.toolCalls }.map { it.id })
+        val body = assertEncodedToolPairs(settings, requests.last())
+        assertTrue("编码后的截图内容不能丢失", body.toString().contains("aW1hZ2U="))
+    }
+
+    @Test fun `tool execution and ledger commit reuse one parsed arguments object`() = runBlocking {
+        val raw = """ {"command":"echo exact","nested":{"path":"a"}} """
+        var executedArgs: JsonObject? = null
+        var recordedArgs: JsonObject? = null
+        val rounds = AtomicInteger()
+        val client = mockk<LlmClient> {
+            coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
+                if (rounds.incrementAndGet() == 1) AssistantTurn("", listOf(ToolCallRequest("call", "echo", raw)), "tool_calls")
+                else {
+                    assertEquals("executed", secondArg<List<ChatMessage>>().last { it.role == "tool" }.text)
+                    AssistantTurn("done", emptyList(), "stop")
+                }
+            }
+        }
+        mockkStatic(::parseToolArguments)
+        mockkConstructor(RunLedger::class)
+        try {
+            every { parseToolArguments(raw) } answers { callOriginal() }
+            every { anyConstructed<RunLedger>().record(any(), any(), any(), any()) } answers {
+                recordedArgs = thirdArg()
+                callOriginal()
+            }
+            val result = run(AgentEngine(llm = client), registry(execute = {
+                executedArgs = it
+                ToolResult.success("executed")
+            }), AppSettings(approvalMode = ApprovalMode.AUTO, subagentsEnabled = false))
+            assertEquals("echo exact", (executedArgs?.get("command") as JsonPrimitive).content)
+            assertSame(executedArgs, recordedArgs)
+            assertEquals(raw, result.single { it.toolName == "echo" }.toolArgs)
+            verify(exactly = 1) { parseToolArguments(raw) }
+            verify(exactly = 1) { anyConstructed<RunLedger>().record(1, "echo", any(), any()) }
+        } finally {
+            unmockkConstructor(RunLedger::class)
+            unmockkStatic(::parseToolArguments)
+        }
+    }
+
+    @Test fun `malformed tool arguments fail before execution and commit without parsing again`() = runBlocking {
+        val raw = "{broken"
+        var recordedArgs: JsonObject? = null
+        val executed = AtomicInteger()
+        val rounds = AtomicInteger()
+        val events = mutableListOf<AgentEvent>()
+        val client = mockk<LlmClient> {
+            coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
+                if (rounds.incrementAndGet() == 1) AssistantTurn("", listOf(ToolCallRequest("call", "echo", raw)), "tool_calls")
+                else {
+                    assertTrue(secondArg<List<ChatMessage>>().last { it.role == "tool" }.text.contains("合法 JSON 对象"))
+                    AssistantTurn("done", emptyList(), "stop")
+                }
+            }
+        }
+        mockkStatic(::parseToolArguments)
+        mockkConstructor(RunLedger::class)
+        try {
+            every { parseToolArguments(raw) } answers { callOriginal() }
+            every { anyConstructed<RunLedger>().record(any(), any(), any(), any()) } answers {
+                recordedArgs = thirdArg()
+                callOriginal()
+            }
+            val result = run(AgentEngine(llm = client), registry(execute = {
+                executed.incrementAndGet()
+                ToolResult.success("should not execute")
+            }), AppSettings(approvalMode = ApprovalMode.AUTO, subagentsEnabled = false), events::add)
+            assertEquals(0, executed.get())
+            assertFalse(result.single { it.toolName == "echo" }.toolOk!!)
+            assertTrue(events.none { it is AgentEvent.ToolStarted })
+            assertEquals(JsonObject(mapOf("_invalid_arguments" to JsonPrimitive(raw))), recordedArgs)
+            verify(exactly = 1) { parseToolArguments(raw) }
+            verify(exactly = 1) { anyConstructed<RunLedger>().record(1, "echo", any(), any()) }
+        } finally {
+            unmockkConstructor(RunLedger::class)
+            unmockkStatic(::parseToolArguments)
+        }
     }
 
     @Test fun `failed tool outcome preserves independently verified file mutations`() = runBlocking {
@@ -112,7 +340,7 @@ class AgentWorkflowVerificationTest {
                 created.writeText("made by script\n")
                 ShellResult(true, "", "", 0)
             }
-            coEvery { Shell.local("edit then fail", "bash", null) } answers {
+            coEvery { Shell.shizuku("edit then fail", "bash") } answers {
                 edited.writeText("after\nextra\n")
                 ShellResult(false, "", "later command failed", 1)
             }

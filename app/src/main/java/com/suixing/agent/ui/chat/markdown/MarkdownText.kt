@@ -307,7 +307,7 @@ private fun parseMarkdownBlocks(
                     checkpoint?.invoke()
                     val row = lines[index].trim()
                     if (row.isEmpty() || !row.contains('|')) break
-                    rows += splitTableRow(row)
+                    rows += splitTableRow(row, header.size)
                     index++
                 }
                 blocks += MdBlock.Table(header, rows)
@@ -377,23 +377,32 @@ private fun isTableStart(lines: List<String>, index: Int): Boolean {
 }
 
 /** Trim optional outer pipes and cells without copying the whole row or an intermediate split list. */
-internal fun splitTableRow(line: String): List<String> {
+internal fun splitTableRow(line: String, columnCount: Int? = null): List<String> {
     var start = 0
     var end = line.length
     while (start < end && line[start].isWhitespace()) start++
     while (end > start && line[end - 1].isWhitespace()) end--
     if (start < end && line[start] == '|') start++
-    if (start < end && line[end - 1] == '|') end--
+    if (start < end && line[end - 1] == '|' && (end - start < 2 || line[end - 2] != '\\')) end--
     val cells = ArrayList<String>()
     while (true) {
-        val pipe = line.indexOf('|', start)
+        var pipe = line.indexOf('|', start)
+        var escapedPipe = false
+        while (pipe > start && pipe < end && line[pipe - 1] == '\\') {
+            escapedPipe = true
+            pipe = line.indexOf('|', pipe + 1)
+        }
         val cellEnd = if (pipe >= 0 && pipe < end) pipe else end
         var cellStart = start
         var trimmedEnd = cellEnd
         while (cellStart < trimmedEnd && line[cellStart].isWhitespace()) cellStart++
         while (trimmedEnd > cellStart && line[trimmedEnd - 1].isWhitespace()) trimmedEnd--
-        cells.add(line.substring(cellStart, trimmedEnd))
-        if (cellEnd == end) return cells
+        val cell = line.substring(cellStart, trimmedEnd)
+        cells.add(if (escapedPipe) cell.replace("\\|", "|") else cell)
+        if (cellEnd == end) {
+            if (columnCount == null || cells.size == columnCount) return cells
+            return List(columnCount) { cells.getOrElse(it) { "" } }
+        }
         start = cellEnd + 1
     }
 }

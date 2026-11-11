@@ -1,0 +1,5 @@
+GNU libiconv 1.19.1. The distributed library uses LGPL-2.1-or-later.
+Source: https://mirrors.kernel.org/gnu/libiconv/libiconv-1.19.1.tar.gz
+Android build recipe and patches: https://github.com/termux/termux-packages/tree/26d76d4f562998a7abfeba1513347c2256afc5c8/packages/libiconv
+COPYING.LIB, COPYING and README are retained from the original source archive.
+The application modifies only the fixed-length ELF RUNPATH string.

@@ -331,6 +331,8 @@ internal fun summarySlot(runId: String): String = "$runId:summary"
 internal fun processTailStart(parts: List<Part>): Int =
     parts.indexOfLast { it is Part.Text }.takeIf { it >= 0 } ?: parts.size
 
+internal fun processSteerTopPadding(previous: Part?): Dp = if (previous is Part.Steer) 6.dp else 0.dp
+
 /** One pass preserves raw-run think ordinals and the preceding tool-call count. */
 internal fun processFoldSlots(parts: List<Part>, runId: String): List<String?> {
     val thinks = HashMap<String, Int>()
@@ -1273,7 +1275,10 @@ internal fun TurnSummary(
                             viewport = reasoningExpansion.viewport("$runId:text:$index"))
 
                         // Earlier steering remains at its actual position in the process.
-                        is Part.Steer -> Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                        is Part.Steer -> Row(
+                            Modifier.fillMaxWidth().padding(top = processSteerTopPadding(parts.getOrNull(index - 1))),
+                            horizontalArrangement = Arrangement.End,
+                        ) {
                             UserBubble(message = part.message, onEdit = onEdit)
                         }
 

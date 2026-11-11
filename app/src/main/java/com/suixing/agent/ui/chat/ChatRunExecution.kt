@@ -2,6 +2,7 @@ package com.suixing.agent.ui.chat
 
 import android.util.Log
 import com.suixing.agent.agent.RunState
+import com.suixing.agent.data.ContextCheckpoint
 import com.suixing.agent.data.PerfRecord
 import com.suixing.agent.data.Roles
 import com.suixing.agent.data.StoredMessage
@@ -94,6 +95,7 @@ internal fun ChatRuntime.start(
     history: List<StoredMessage>,
     snapshot: ChatUiState,
     initialTool: ToolCallRequest? = null,
+    resumeCheckpoint: ContextCheckpoint? = null,
 ) {
     // The snapshot can lag behind the display (the user switched while the wire was
     // being read); only its conversation identity is wrong, and the run must use the
@@ -222,6 +224,7 @@ internal fun ChatRuntime.start(
                 // charge for — the same span again.
                 checkpoints = shown.checkpoints,
                 onCheckpoint = { checkpoint -> recordCheckpoint(chatId, checkpoint) },
+                resumeCheckpoint = resumeCheckpoint,
             )
             // Only the run's own last reply is read out, not the whole history.
             if (effective.speakReplies) {

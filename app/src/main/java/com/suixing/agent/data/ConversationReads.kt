@@ -45,6 +45,8 @@ internal data class ConversationReadState(
 internal class ConversationReads(
     private val preferences: DataStore<Preferences>,
     scope: CoroutineScope,
+    private val onUnreadCompletion: (String) -> Unit = {},
+    private val onViewed: (String) -> Unit = {},
 ) {
     private val events = Channel<ConversationReadEvent>(Channel.UNLIMITED)
     private val _unread = MutableStateFlow<Set<String>>(emptySet())
@@ -62,6 +64,13 @@ internal class ConversationReads(
             _unread.value = state.unread
             for (event in events) {
                 val next = state.accept(event)
+                when (event) {
+                    is ConversationReadEvent.Completed -> if (event.chatId.isNotBlank() && event.chatId != state.viewing) {
+                        onUnreadCompletion(event.chatId)
+                    }
+                    is ConversationReadEvent.Viewing -> next.viewing?.let(onViewed)
+                    is ConversationReadEvent.Deleted -> onViewed(event.chatId)
+                }
                 val changed = next.unread != state.unread
                 state = next
                 if (!changed) continue
@@ -83,12 +92,19 @@ internal class ConversationReads(
     companion object {
         private val UNREAD = stringSetPreferencesKey("completed_unread")
 
-        fun create(context: Context, scope: CoroutineScope): ConversationReads = ConversationReads(
+        fun create(
+            context: Context,
+            scope: CoroutineScope,
+            onUnreadCompletion: (String) -> Unit = {},
+            onViewed: (String) -> Unit = {},
+        ): ConversationReads = ConversationReads(
             PreferenceDataStoreFactory.create(
                 scope = CoroutineScope(scope.coroutineContext + Dispatchers.IO),
                 produceFile = { context.preferencesDataStoreFile("Suixing_conversation_reads") },
             ),
             scope,
+            onUnreadCompletion,
+            onViewed,
         )
     }
 }

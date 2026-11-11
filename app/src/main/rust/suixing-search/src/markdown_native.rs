@@ -260,13 +260,42 @@ fn table_cells(line: &str) -> Vec<String> {
     if value.starts_with('|') {
         start += 1;
     }
-    if end > start && value.ends_with('|') {
+    if end > start && value.ends_with('|') && !value.ends_with("\\|") {
         end -= 1;
     }
-    value[start..end]
-        .split('|')
-        .map(|cell| trim(cell).to_owned())
-        .collect()
+    let bytes = value.as_bytes();
+    let mut cells = Vec::new();
+    let mut unescaped = String::new();
+    let mut cell_start = start;
+    let mut segment_start = start;
+    let mut at = start;
+    loop {
+        if at + 1 < end && bytes[at] == b'\\' && bytes[at + 1] == b'|' {
+            unescaped.push_str(&value[segment_start..at]);
+            unescaped.push('|');
+            at += 2;
+            segment_start = at;
+            continue;
+        }
+        if at == end || bytes[at] == b'|' {
+            let cell = if unescaped.is_empty() {
+                trim(&value[cell_start..at]).to_owned()
+            } else {
+                unescaped.push_str(&value[segment_start..at]);
+                let cell = trim(&unescaped).to_owned();
+                unescaped.clear();
+                cell
+            };
+            cells.push(cell);
+            if at == end {
+                break;
+            }
+            cell_start = at + 1;
+            segment_start = cell_start;
+        }
+        at += 1;
+    }
+    cells
 }
 fn table_start(lines: &[&str], index: usize) -> bool {
     if !lines[index].contains('|') {
@@ -409,7 +438,9 @@ fn parse_blocks(text: &str, cancelled: &AtomicBool) -> Result<Vec<Block>, i32> {
                     if value.is_empty() || !value.contains('|') {
                         break;
                     }
-                    rows.push(table_cells(value));
+                    let mut cells = table_cells(value);
+                    cells.resize(header.len(), String::new());
+                    rows.push(cells);
                     index += 1;
                 }
                 result.push(Block::Table(header, rows));
@@ -920,5 +951,93 @@ impl<'a> InlineParser<'a> {
             at += 1;
         }
         self.add(&literal, style, link)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn strings<'a>(input: &mut crate::Input<'a>) -> Vec<&'a str> {
+        (0..input.u32().unwrap())
+            .map(|_| input.string().unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn escaped_pipes_keep_the_command_in_one_table_cell() {
+        let source =
+            "| command | detail |\n| --- | --- |\n| `ls /sdcard/Download \\| head` | files |";
+        let blocks = parse_blocks(source, &AtomicBool::new(false)).unwrap();
+        let [Block::Table(header, rows)] = blocks.as_slice() else {
+            panic!("expected one table");
+        };
+        assert_eq!(header, &["command", "detail"]);
+        assert_eq!(rows, &[vec!["`ls /sdcard/Download | head`", "files"]]);
+    }
+
+    #[test]
+    fn body_rows_keep_the_header_width() {
+        let source = "| a | b |\n| --- | --- |\n| full | row |\n| short |\n| extra | row | ignored |\n| `raw | pipe` | ignored |";
+        let blocks = parse_blocks(source, &AtomicBool::new(false)).unwrap();
+        let [Block::Table(header, rows)] = blocks.as_slice() else {
+            panic!("expected one table");
+        };
+        assert_eq!(header, &["a", "b"]);
+        assert_eq!(
+            rows,
+            &[
+                vec!["full", "row"],
+                vec!["short", ""],
+                vec!["extra", "row"],
+                vec!["`raw", "pipe`"],
+            ]
+        );
+    }
+
+    #[test]
+    fn escaped_final_pipes_and_code_backslashes_stay_in_the_cell() {
+        let source = r"| command | detail |
+| --- | --- |
+| `a\\|b` | trailing\|";
+        let blocks = parse_blocks(source, &AtomicBool::new(false)).unwrap();
+        let [Block::Table(header, rows)] = blocks.as_slice() else {
+            panic!("expected one table");
+        };
+        assert_eq!(header, &["command", "detail"]);
+        assert_eq!(rows, &[vec![r"`a\|b`", "trailing|"]]);
+    }
+
+    #[test]
+    fn gfm_escaped_pipes_reach_document_cells_and_formatted_inline_runs() {
+        let source = "| f\\|oo |\n| --- |\n| b `\\|` az |\n| b **\\|** im |";
+        let document = parse_document(source, &AtomicBool::new(false)).unwrap();
+        let mut input = crate::Input {
+            bytes: &document,
+            at: 0,
+        };
+        assert_eq!(input.u32(), Some(1));
+        assert_eq!(input.u32(), Some(7));
+        assert_eq!(strings(&mut input), vec!["f|oo"]);
+        assert_eq!(input.u32(), Some(2));
+        assert_eq!(strings(&mut input), vec!["b `|` az"]);
+        assert_eq!(strings(&mut input), vec!["b **|** im"]);
+        assert_eq!(input.u32(), Some(2));
+        for (source, runs) in [
+            (
+                "b `|` az",
+                [("b ", 0), ("\u{2009}|\u{2009}", 8), (" az", 0)],
+            ),
+            ("b **|** im", [("b ", 0), ("|", 1), (" im", 0)]),
+        ] {
+            assert_eq!(input.string(), Some(source));
+            assert_eq!(input.u32(), Some(3));
+            for (text, style) in runs {
+                assert_eq!(input.string(), Some(text));
+                assert_eq!(input.u32(), Some(style));
+                assert_eq!(input.string(), Some(""));
+            }
+        }
+        assert_eq!(input.at, document.len());
     }
 }

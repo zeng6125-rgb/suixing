@@ -1,0 +1,5 @@
+GNU Readline 8.3.6, GPL-3.0-or-later.
+Source: https://mirrors.kernel.org/gnu/readline/readline-8.3.tar.gz and official readline83 patches 001-006.
+Android build recipe and patches: https://github.com/termux/termux-packages/tree/26d76d4f562998a7abfeba1513347c2256afc5c8/packages/readline
+COPYING and README are retained from the original source archive.
+The application modifies only fixed-length ELF dependency names and RUNPATH strings.

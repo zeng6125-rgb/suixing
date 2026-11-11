@@ -2,8 +2,6 @@
 # the provider and its binder talk to, so none of it may be renamed or stripped.
 -keep class rikka.shizuku.** { *; }
 
--keep class kotlinx.serialization.** { *; }
-
 # kotlinx.serialization 按 **companion 上的 serializer() 访问器** 取序列化器，所以 R8 必须：
 # 保留 `serializer()` 的**名字**、保留 companion 字段、不把 `$$serializer` 类整个删掉。
 # 下面这组是库官方文档给的规则。

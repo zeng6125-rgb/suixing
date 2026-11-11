@@ -15,6 +15,8 @@ import com.suixing.agent.data.Tps
 import com.suixing.agent.data.WireSanitize
 import com.suixing.agent.llm.ChatMessage
 import com.suixing.agent.llm.ToolCallRequest
+import com.suixing.agent.service.UiOperationOwner
+import com.suixing.agent.service.UiOperationStatus
 import com.suixing.agent.skills.SkillStore
 import com.suixing.agent.tools.ToolRegistry
 import kotlinx.coroutines.Job
@@ -48,7 +50,7 @@ internal class AgentRun(
     internal val subagentReadyChats = host.subagentReadyChats
     private val onCompleted = host.onCompleted
 
-    internal val terminalCaller = com.suixing.agent.terminal.TerminalCaller(chatId, UUID.randomUUID().toString())
+    internal val terminalCaller = com.suixing.agent.terminal.TerminalCaller(chatId, UUID.randomUUID().toString(), ::cancel)
     private val _state = MutableStateFlow<RunState>(RunState.Idle)
     private val completionReported = AtomicBoolean(false)
     private val cancellationReported = AtomicBoolean(false)
@@ -404,6 +406,7 @@ internal class AgentRun(
         onEvent: (AgentEvent) -> Unit,
         onCheckpoint: (ContextCheckpoint) -> Unit,
         initialTool: ToolCallRequest? = null,
+        resumeCheckpoint: ContextCheckpoint? = null,
     ): List<StoredMessage> {
         // The run gets a job of its own, a child of the caller's rather than the caller's own.
         // Stopping the run has to reach whatever it is blocked on — a shell command only notices
@@ -432,6 +435,7 @@ internal class AgentRun(
                     onEvent = onEvent,
                     onCheckpoint = onCheckpoint,
                     initialTool = initialTool,
+                    resumeCheckpoint = resumeCheckpoint,
                 )
             }
         } catch (cancellation: CancellationException) {
@@ -444,6 +448,7 @@ internal class AgentRun(
             }
             throw cancellation
         } finally {
+            UiOperationStatus.shared.finish(UiOperationOwner(chatId, terminalCaller.runId))
             // A child that never completes keeps its parent in "completing" forever, which would
             // hang an await() on the caller. Completing it is what lets the caller finish.
             runJob.complete()
@@ -480,15 +485,15 @@ internal class AgentRun(
         prepareCancelled = { exit ->
             // A stop can cross both runLoop and execute; commit its transcript only once.
             if (cancellationReported.compareAndSet(false, true)) {
-                emitPartial(onEvent, exit.partial, exit.reasoning, note = ledger.summary().takeIf { it.isNotBlank() })
                 unansweredToolMessages(onEvent, exit.unanswered)
+                emitPartial(onEvent, exit.partial, exit.reasoning, note = ledger.summary().takeIf { it.isNotBlank() })
                 true
             } else false
         },
         prepareCallerCancellation = { exit ->
             // Scope cancellation must still preserve streamed content and answer open tool calls.
-            emitPartial(onEvent, exit.partial, exit.reasoning)
             unansweredToolMessages(onEvent, exit.unanswered)
+            emitPartial(onEvent, exit.partial, exit.reasoning)
         },
     )
 

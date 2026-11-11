@@ -92,6 +92,18 @@ internal suspend fun AgentRun.compressContext(
     // tool message is a hard 400 on every OpenAI-compatible endpoint.
     var cut = wire.size - KEEP_RECENT
     while (cut > 1 && wire[cut].role == ROLE_TOOL) cut--
+    val pending = HashSet<String>()
+    var groupStart = -1
+    for (index in 1 until cut) {
+        val message = wire[index]
+        if (message.toolCalls.isNotEmpty()) {
+            if (pending.isEmpty()) groupStart = index
+            for (call in message.toolCalls) pending.add(call.id)
+        }
+        if (message.role == ROLE_TOOL) message.toolCallId?.let { pending.remove(it) }
+    }
+    // Screenshots and notes can sit between responses; retain their entire pending group.
+    if (pending.isNotEmpty()) cut = groupStart
     if (cut <= 1) return
 
     val prefix = wire.subList(1, cut)

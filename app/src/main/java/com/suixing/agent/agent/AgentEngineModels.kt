@@ -2,6 +2,7 @@ package com.suixing.agent.agent
 
 import com.suixing.agent.llm.ToolCallRequest
 import com.suixing.agent.tools.ToolResult
+import kotlinx.serialization.json.JsonObject
 
 /**
  * One line the user slipped in, waiting for the model's next turn.
@@ -42,4 +43,6 @@ internal data class ToolOutcome(
     val toolMs: Long,
     /** 给审批与事件用的参数预览（截断过的）。 */
     val argsPreview: String,
+    /** 执行时已解析的参数；非法 JSON 时为 null。 */
+    val args: JsonObject?,
 )

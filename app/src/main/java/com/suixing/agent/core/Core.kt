@@ -23,6 +23,7 @@ import com.suixing.agent.plugins.PluginStore
 import com.suixing.agent.data.UserProfileStore
 import com.suixing.agent.mcp.McpManager
 import com.suixing.agent.service.SchedulerService
+import com.suixing.agent.service.ChatCompletionNotifications
 import com.suixing.agent.skills.SkillStore
 import com.suixing.agent.tools.ToolRegistry
 import com.suixing.agent.voice.Speaker
@@ -151,6 +152,11 @@ object Core {
     lateinit var engine: AgentEngine
         private set
 
+    internal suspend fun beforeConversationDeleted(id: String) {
+        check(!engine.isRunning(id)) { "这个会话正在执行任务，先停止或等当前任务结束再删除" }
+        usage.preserveBeforeDeletion(id)
+    }
+
     fun init(context: Context) {
         if (initialized) return
         synchronized(this) {
@@ -159,14 +165,22 @@ object Core {
             // 自带 bash/busybox 的目录（见 Shell.initBinaries 的注释）：只读一次，工具里同步取用。
             Shell.initBinaries(appContext.applicationInfo.nativeLibraryDir)
             settings = SettingsRepository(appContext)
-            conversationReads = ConversationReads.create(appContext, appScope)
+            conversationReads = ConversationReads.create(
+                appContext,
+                appScope,
+                onUnreadCompletion = { id ->
+                    val title = chats.conversations.value.firstOrNull { it.id == id }?.title.orEmpty()
+                    ChatCompletionNotifications.show(appContext, id, title)
+                },
+                onViewed = { id -> ChatCompletionNotifications.cancel(appContext, id) },
+            )
             conversationViewports = ConversationViewports.create(appContext, appScope)
             usage = UsageStore(appContext)
             chats = ChatRepository(appContext, onDeleted = { id ->
                 conversationReads.forget(id)
                 conversationViewports.forget(id)
                 SubagentRecords.delete(id)
-            }, beforeDeleted = { id -> usage.preserveBeforeDeletion(id) })
+            }, beforeDeleted = ::beforeConversationDeleted)
             memory = MemoryStore(appContext)
             profile = UserProfileStore(appContext)
             capabilities = CapabilityHub(appContext, settings, beforeInitialProbe = startup::awaitMaintenance)
