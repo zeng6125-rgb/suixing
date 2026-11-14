@@ -177,8 +177,6 @@ fun SuixingApp() {
     // Owned here rather than inside the chat screen: the drawer lists and switches the
     // very conversations the screen is showing.
     val chat: ChatViewModel = viewModel()
-    val liveActiveState = remember(chat) { chat.liveActive }
-        .collectAsStateWithLifecycle(initialValue = false)
     LaunchedEffect(Unit) {
         Core.settings.writeFailures.collect { message ->
             android.widget.Toast.makeText(Core.appContext, message, android.widget.Toast.LENGTH_LONG).show()
@@ -326,15 +324,11 @@ fun SuixingApp() {
     // 点会话 / 新对话：与点页面行不同——那是"换我在读的那一份内容"，覆盖层收掉、抽屉也收起来，
     // 用户直接落在会话里。
     val chatFromDrawer: () -> Unit = {
-        val token = switchIntents.begin()
+        switchIntents.invalidate()
         // **与 `closeDrawer()`（助手 / 返回键）逐字相同**：只启动同一条
         // `animateTo(Closed, DRAWER_CLOSE_SPEC)` —— 同一帧开始、同一时长、同一曲线。
         scope.launch(start = CoroutineStart.UNDISPATCHED) {
-            try {
-                drawerState.animateTo(DrawerValue.Closed, DRAWER_CLOSE_SPEC)
-            } finally {
-                switchIntents.finish(token)
-            }
+            drawerState.animateTo(DrawerValue.Closed, DRAWER_CLOSE_SPEC)
         }
         showChat()
     }
@@ -654,9 +648,6 @@ fun SuixingApp() {
                 // Home retains the accepted 300dp travel, 0.95 scale and constant screen corners.
                 val panelWidthPx = with(LocalDensity.current) { DRAWER_SHEET_WIDTH.dp.toPx() }
                 val homeShape = remember { RoundedCornerShape(SCREEN_CORNER_DP.dp) }
-                val cacheHomeDuringMotion = remember(context) {
-                    context.getSystemService(android.app.ActivityManager::class.java)?.isLowRamDevice != true
-                }
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
@@ -683,16 +674,6 @@ fun SuixingApp() {
                             ambientShadowColor = Color.Black.copy(alpha = 0.24f * progress)
                             shape = homeShape
                             clip = progress > 0f
-                            val homeContentChanging = liveActiveState.value || drawerBusyState.value
-                            // Cache the clipped home in a GPU layer during the transform. Dirty
-                            // content still redraws; stable text is composited from the texture.
-                            compositingStrategy = if (cacheHomeDuringMotion && progress > 0f &&
-                                drawerState.isMoving && !homeContentChanging
-                            ) {
-                                androidx.compose.ui.graphics.CompositingStrategy.Offscreen
-                            } else {
-                                androidx.compose.ui.graphics.CompositingStrategy.Auto
-                            }
                         },
                 ) {
                 // chat 常驻：NavHost 在离开一个目的地之后会把它**销毁**，pop 回来时是从零
