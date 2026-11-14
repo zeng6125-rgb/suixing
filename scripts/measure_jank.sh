@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# issue #47 的验收口径测量脚本（只读，不安装、不改设备）
+# issue #47 的验收口径测量脚本（不安装；只有 compile 会触发设备上的 dexopt）
 #
 # 用法：
 #   scripts/measure_jank.sh compile   # 安装后先编译 speed-profile，再测量
