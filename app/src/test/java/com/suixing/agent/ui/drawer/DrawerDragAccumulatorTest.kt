@@ -54,7 +54,7 @@ class DrawerDragAccumulatorTest {
         val second = drag.begin(progress = 0.5f, widthPx = 200f)
 
         assertFalse(drag.canSettle(queuedRelease))
-        assertTrue(drag.canApply(drag.frame()!!))
+        assertEquals(0.5f, drag.dragBy(second, 0f)!!, 0f)
         assertTrue(second != first)
     }
 
@@ -62,34 +62,26 @@ class DrawerDragAccumulatorTest {
     fun `pointer cancellation invalidates only the drag that owns it`() {
         val drag = DrawerDragAccumulator()
         val canceledDrag = drag.begin(progress = 0.3f, widthPx = 200f)
-        val canceledFrame = drag.frame()!!
-
         assertTrue(drag.cancel(canceledDrag))
-        assertFalse(drag.canApply(canceledFrame))
-        assertNull(drag.frame())
+        assertNull(drag.dragBy(canceledDrag, 20f))
 
         val currentDrag = drag.begin(progress = 0.6f, widthPx = 200f)
         assertFalse(drag.cancel(canceledDrag))
-        assertTrue(drag.canApply(drag.frame()!!))
+        assertEquals(0.6f, drag.dragBy(currentDrag, 0f)!!, 0f)
         assertTrue(currentDrag != canceledDrag)
     }
 
     @Test
-    fun `release invalidates an already queued frame and returns the final pointer position`() {
+    fun `release rejects late pointer movement and returns the final position`() {
         val drag = DrawerDragAccumulator()
         val generation = drag.begin(progress = 0.2f, widthPx = 200f)
         drag.dragBy(generation, 40f)
-        val frameWaitingForTheMutationLock = drag.frame()!!
-        assertTrue(drag.canApply(frameWaitingForTheMutationLock))
-
-        // A final move arrives after the frame snapshot but before pointer-up.
         drag.dragBy(generation, 30f)
         val release = drag.finish(generation)!!
 
         assertEquals(0.55f, release.progress, 0.0001f)
-        assertFalse("a stale frame must not snap after settle begins", drag.canApply(frameWaitingForTheMutationLock))
+        assertNull(drag.dragBy(generation, 20f))
         assertTrue(drag.canSettle(release))
-        assertNull(drag.frame())
     }
 
     @Test
@@ -106,6 +98,5 @@ class DrawerDragAccumulatorTest {
         val release = drag.finish(second)!!
         assertEquals(0.6f, release.progress, 0.0001f)
         assertTrue(drag.canSettle(release))
-        assertNull(drag.frame())
     }
 }

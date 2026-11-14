@@ -20,7 +20,7 @@ data class SubagentProfile(
     val allowedActions: Map<String, List<String>> = emptyMap(),
     /** null inherits; zero is unlimited only when the parent is also unlimited. */
     val maxToolRounds: Int? = null,
-    val timeoutSeconds: Int = 180,
+    val timeoutSeconds: Int = 0,
     val extraInstructions: String = "",
 )
 
@@ -51,7 +51,7 @@ data class ChildRunConfig(
     val allowedTools: List<String> = emptyList(),
     val allowedActions: Map<String, List<String>> = emptyMap(),
     val maxToolRounds: Int = 0,
-    val timeoutSeconds: Int = 180,
+    val timeoutSeconds: Int = 0,
     val extraInstructions: String = "",
 ) {
     /** Called before every execution path, including plugin tools and engine-owned tools. */
@@ -107,7 +107,7 @@ fun AppSettings.resolveSubagentConfig(
         .filterKeys { it in allowed }
     val requestedRounds = options.maxToolRounds ?: profile?.maxToolRounds
     val rounds = listOfNotNull(maxToolRounds.takeIf { it > 0 }, requestedRounds?.takeIf { it > 0 }).minOrNull() ?: 0
-    val timeout = (options.timeoutSeconds ?: profile?.timeoutSeconds ?: 180).coerceIn(1, 600)
+    val timeout = (options.timeoutSeconds ?: profile?.timeoutSeconds ?: 0).coerceIn(0, 600)
     val instructions = profile?.extraInstructions.orEmpty()
     childSettings = childSettings.copy(
         approvalMode = mode,

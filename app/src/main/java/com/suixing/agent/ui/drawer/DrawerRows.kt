@@ -21,6 +21,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -48,7 +49,7 @@ import kotlinx.coroutines.launch
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 /**
- * 抽屉的返回键处理：**单独成一个组合单元**，只为把 `drawerState.isOpen` 的读取关在小作用域里。
+ * 抽屉的返回键处理：**单独成一个组合单元**，把 `drawerState.homeShieldActive` 的读取关在小作用域里。
  *
  * 若把 `drawerState.isOpen` 直接写进 `SuixingApp` 的函数体（原来是 `BackHandler(enabled =
  * drawerState.isOpen && …)`），那么抽屉动画**结束那一帧**状态翻转会连带重组整个外壳 ——
@@ -65,7 +66,7 @@ internal fun DrawerBackHandler(
     route: String,
     onClose: () -> Unit,
 ) {
-    BackHandler(enabled = drawerState.isOpen && route == "empty") { onClose() }
+    BackHandler(enabled = drawerState.homeShieldActive && route == "empty") { onClose() }
 }
 
 /** A child button or drag owns its gesture; it must not also open the conversation. */
@@ -180,8 +181,8 @@ internal fun ConversationRow(
     val menuHeightPx = with(density) { DrawerMenuHeight.toPx() }
     // 导航栏与安全区不落在 screenHeightDp 里，判断「下面还放得下吗」时留一截余量。
     val bottomInsetPx = with(density) { 72.dp.toPx() }
-    var rowBottomPx by remember { mutableStateOf(0f) }
-    var rowHeightPx by remember { mutableStateOf(0f) }
+    var rowBottomPx by remember { mutableFloatStateOf(0f) }
+    var rowHeightPx by remember { mutableFloatStateOf(0f) }
     // Position changes keep the same menu composition until its opening direction changes.
     val openUp by remember(menuHeightPx, gapPx, screenHeightPx, bottomInsetPx) {
         derivedStateOf(structuralEqualityPolicy()) {

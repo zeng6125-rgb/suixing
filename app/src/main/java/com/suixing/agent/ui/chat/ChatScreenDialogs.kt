@@ -77,27 +77,27 @@ internal fun ChatInlineOverlays(
 
     fun currentInput(): String = input.controller.currentInput()
     fun setDraft(text: String) = input.controller.setDraft(text = text)
-        if (voiceOpen) {
-            VoiceOverlay(
-                // 转写要用这份设置里的服务商与模型。
-                settings = settings,
-                // Just above the composer, never over it: the capsule's whole point is that the
-                // user can still read what they are dictating into.
-                bottomInset = composerH + 8.dp,
-                onOpenSettings = onOpenSettings,
-                onResult = { text ->
-                    val input = currentInput()
-                    setDraft(text = if (input.isBlank()) text else "$input $text")
-                },
-                onDismiss = { voiceOpen = false },
-            )
-        }
-        // 任务清单的完整版：点输入框上方那一行打开。清单在跑完/清空时自己为空，所以这里不需要
-        // 额外的开关——内容没了，表也就没什么可显示。
-        if (todoSheetOpen && state.todos.isNotEmpty()) {
-            // `state.todos`，不是 `todos`：那个名字是 Composer 的参数，在这一层不存在。
-            TodoSheet(todos = state.todos, onDismiss = { todoSheetOpen = false })
-        }
+    if (voiceOpen) {
+        VoiceOverlay(
+            // 转写要用这份设置里的服务商与模型。
+            settings = settings,
+            // Just above the composer, never over it: the capsule's whole point is that the
+            // user can still read what they are dictating into.
+            bottomInset = composerH + 8.dp,
+            onOpenSettings = onOpenSettings,
+            onResult = { text ->
+                val input = currentInput()
+                setDraft(text = if (input.isBlank()) text else "$input $text")
+            },
+            onDismiss = { voiceOpen = false },
+        )
+    }
+    // 任务清单的完整版：点输入框上方那一行打开。清单在跑完/清空时自己为空，所以这里不需要
+    // 额外的开关——内容没了，表也就没什么可显示。
+    if (todoSheetOpen && state.todos.isNotEmpty()) {
+        // `state.todos`，不是 `todos`：那个名字是 Composer 的参数，在这一层不存在。
+        TodoSheet(todos = state.todos, onDismiss = { todoSheetOpen = false })
+    }
 
 }
 

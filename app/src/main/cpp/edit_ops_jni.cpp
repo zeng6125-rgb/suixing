@@ -23,7 +23,7 @@ void sx_search_free(std::uint8_t* data, std::size_t len);
 namespace {
 
 constexpr jint kMaxUnits = 4 * 1024 * 1024;
-constexpr std::size_t kHeaderBytes = 24;
+constexpr std::size_t kHeaderBytes = 32;
 constexpr std::size_t kMaxResponseBytes = kHeaderBytes + 8 * 4 + kMaxUnits * 2;
 
 void throwJava(JNIEnv* env, const char* type, const char* message) {

@@ -1,7 +1,10 @@
 package com.suixing.agent.service
 
+import android.content.res.ColorStateList
 import android.content.res.Configuration
+import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.RippleDrawable
 import android.text.InputType
 import android.text.TextUtils
 import android.util.TypedValue
@@ -10,6 +13,7 @@ import android.view.View
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.ImageView
+import android.widget.ImageButton
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -56,82 +60,92 @@ internal fun FloatConsoleService.buildPanel(): LinearLayout = LinearLayout(this)
     orientation = LinearLayout.VERTICAL
     visibility = View.GONE
     background = GradientDrawable().apply {
-        cornerRadius = dp(20).toFloat()
+        cornerRadius = dp(8).toFloat()
         setColor(palette.surface)
         setStroke(dp(1), palette.stroke)
     }
-    setPadding(dp(16), dp(14), dp(16), dp(14))
+    setPadding(dp(12), dp(10), dp(12), dp(6))
     layoutParams = LinearLayout.LayoutParams(panelWidth(), LinearLayout.LayoutParams.WRAP_CONTENT).apply {
         topMargin = dp(8)
     }
 
+    conversationText = TextView(context).apply {
+        setTextColor(palette.ink)
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+        setTypeface(typeface, Typeface.BOLD)
+        maxLines = 1
+        ellipsize = TextUtils.TruncateAt.END
+    }
+    stateText = TextView(context).apply {
+        setTextColor(palette.accent)
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+        setPadding(0, dp(3), 0, 0)
+        maxLines = 1
+        ellipsize = TextUtils.TruncateAt.END
+        text = "空闲"
+    }
     addView(
         LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
             addView(
-                TextView(context).apply {
-                    text = "JAgent控制台"
-                    setTextColor(palette.accent)
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                LinearLayout(context).apply {
+                    orientation = LinearLayout.VERTICAL
                     layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                    addView(conversationText)
+                    addView(stateText)
                 },
             )
+            addView(actionIcon(R.drawable.ic_arrow_left, "回到对话") { openChat() })
+            stopButton = actionIcon(R.drawable.ic_stop_filled, "停止", accent = true) {
+                Core.engine.newestRun()?.let { stopRun(it) }
+            }
+            stopButton.visibility = View.GONE
+            addView(stopButton)
             addView(collapseButton())
         },
     )
-
-    stateText = TextView(context).apply {
-        setTextColor(palette.ink)
-        setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
-        text = "空闲"
-    }
-    addView(stateText)
-
-    // One line, always: it changes many times a second, and a box that grows and
-    // shrinks with every delta is unreadable.
-    liveText = TextView(context).apply {
-        setTextColor(palette.muted)
-        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-        maxLines = 1
-        ellipsize = TextUtils.TruncateAt.END
-        setPadding(0, dp(2), 0, 0)
-    }
-    addView(liveText)
-
-    statsText = TextView(context).apply {
-        setTextColor(palette.muted)
-        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-        setPadding(0, dp(4), 0, dp(10))
-    }
-    addView(statsText)
-
-    // 能看：which conversation this panel is talking about, and its last line or two. Without
-    // the name the box below would write into a chat the user cannot see; without the lines
-    // the panel could only ever say what the run is doing, never what was asked.
-    conversationText = TextView(context).apply {
-        setTextColor(palette.accent)
-        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-        setPadding(0, dp(2), 0, 0)
-        maxLines = 1
-        ellipsize = TextUtils.TruncateAt.END
-    }
-    addView(conversationText)
+    addView(
+        View(context).apply {
+            setBackgroundColor(palette.stroke)
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(1)).apply {
+                topMargin = dp(8)
+            }
+        },
+    )
 
     recentText = TextView(context).apply {
-        setTextColor(palette.muted)
-        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-        // 顶部留 6dp：截图里内容首行紧贴会话名、像被裁掉半行，就是这里没有呼吸空间。
-        setPadding(0, dp(6), 0, dp(8))
-        // 不再 maxLines=2：内容现在包在可滚容器里，用户拖高面板就能多看 —— 这正是「悬浮窗
-        // 最主要的是显示内容给用户」要的效果。行数交给高度，而不是写死两行截断。
+        setTextColor(palette.ink)
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+        setLineSpacing(dp(2).toFloat(), 1f)
     }
-    // 会话内容包进 ScrollView：默认随内容自适应（WRAP_CONTENT），用户拖手柄纵向把它固定成
-    // 某个高度，内容超出就滚 —— 拖矮也不会把下面的输入框/停止按钮顶出去（它们在这个滚动容器
-    // 之外）。这就是「高度可调」的落点，也是原注释里「固定高度会裁掉 stop 行」那个顾虑的正解。
+    liveAnswerText = TextView(context).apply {
+        setTextColor(palette.ink)
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+        setLineSpacing(dp(2).toFloat(), 1f)
+        setPadding(0, dp(10), 0, 0)
+        maxLines = 4
+        ellipsize = TextUtils.TruncateAt.END
+        visibility = View.GONE
+    }
+    stopArea = LinearLayout(context).apply {
+        orientation = LinearLayout.VERTICAL
+        setPadding(0, 0, 0, dp(8))
+        visibility = View.GONE
+    }
+    // The resizable body scrolls as a whole; the conversation and composer stay reachable.
     contentScroll = ScrollView(context).apply {
         isFillViewport = true
+        isHorizontalScrollBarEnabled = false
+        clipToPadding = false
         addView(
-            recentText,
+            LinearLayout(context).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(0, dp(10), 0, dp(10))
+                addView(stopArea)
+                addView(recentText)
+                addView(liveAnswerText)
+            },
             FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.WRAP_CONTENT,
@@ -140,9 +154,16 @@ internal fun FloatConsoleService.buildPanel(): LinearLayout = LinearLayout(this)
         layoutParams = LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT,
             contentHeightPx(),
+            1f,
         )
     }
     addView(contentScroll)
+    addView(
+        View(context).apply {
+            setBackgroundColor(palette.stroke)
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(1))
+        },
+    )
 
     steerInput = EditText(context).apply {
         // Neutral on purpose: this one box both steers a run and opens the next turn.
@@ -152,8 +173,9 @@ internal fun FloatConsoleService.buildPanel(): LinearLayout = LinearLayout(this)
         setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
         inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
         maxLines = 3
+        minHeight = dp(40)
         background = GradientDrawable().apply {
-            cornerRadius = dp(12).toFloat()
+            cornerRadius = dp(8).toFloat()
             setColor(palette.field)
         }
         setPadding(dp(10), dp(8), dp(10), dp(8))
@@ -164,6 +186,10 @@ internal fun FloatConsoleService.buildPanel(): LinearLayout = LinearLayout(this)
         LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(10) }
             addView(steerInput)
             // One button for both cases, labelled by the run state: 「插话」 into the run in
             // flight, 「发送」 when nothing is running. See [sendFromPanel].
@@ -171,54 +197,34 @@ internal fun FloatConsoleService.buildPanel(): LinearLayout = LinearLayout(this)
             addView(sendButton)
         },
     )
-
-    // 底部动作行：「回到对话」居左、「停止」居右，**同一行对齐**（截图反馈：原来「回到对话」
-    // 独占一行、停止孤悬在下一行右下角，中间一大块死空间）。单 run 时停止按钮就落在这行右侧；
-    // 多 run 时这行只留「回到对话」，带标题的停止行进上面的 [stopArea]。
-    stopArea = LinearLayout(context).apply {
-        orientation = LinearLayout.VERTICAL
-        visibility = View.GONE
-    }
-    addView(stopArea)
-    addView(
-        LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            addView(actionButton("回到对话") { openChat() })
-            addView(
-                View(context).apply {
-                    layoutParams = LinearLayout.LayoutParams(0, 1, 1f)
-                },
-            )
-            stopButton = actionButton("停止", accent = true) {
-                // 单 run 时这枚就是那个停止键：停最新的那个 run（与面板跟随的是同一个）。
-                Core.engine.newestRun()?.let { stopRun(it) }
-            }
-            stopButton.visibility = View.GONE
-            addView(stopButton)
-        },
-    )
-    // The panel's other lines are rewritten from the run's state on every change, so the
-    // confirmation of a stop needs a line of its own to still be there when the run it
-    // named has already left the list.
-    feedbackText = TextView(context).apply {
-        setTextColor(palette.muted)
-        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-        setPadding(0, dp(6), 0, 0)
-        visibility = View.GONE
-    }
-    addView(feedbackText)
-    // Last, so it reads as the panel's own corner: the handle that says 「this card can be
-    // dragged wider」 without a label.
     addView(resizeHandle())
 }
 
-internal fun FloatConsoleService.collapseButton(): TextView = TextView(this).apply {
-    text = "收起"
-    setTextColor(palette.muted)
-    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-    setPadding(dp(8), 0, 0, 0)
-    setOnClickListener { setExpanded(false) }
+internal fun FloatConsoleService.collapseButton(): View =
+    actionIcon(R.drawable.ic_chevron_up, "收起") { setExpanded(false) }
+
+private fun FloatConsoleService.actionIcon(
+    drawable: Int,
+    description: String,
+    accent: Boolean = false,
+    onClick: () -> Unit,
+): ImageButton = ImageButton(this).apply {
+    setImageResource(drawable)
+    imageTintList = ColorStateList.valueOf(if (accent) palette.accent else palette.muted)
+    scaleType = ImageView.ScaleType.FIT_CENTER
+    setPadding(dp(11), dp(11), dp(11), dp(11))
+    contentDescription = description
+    tooltipText = description
+    background = RippleDrawable(
+        ColorStateList.valueOf(palette.stroke),
+        null,
+        GradientDrawable().apply {
+            cornerRadius = dp(8).toFloat()
+            setColor(palette.ink)
+        },
+    )
+    layoutParams = LinearLayout.LayoutParams(dp(40), dp(40))
+    setOnClickListener { onClick() }
 }
 
 internal fun FloatConsoleService.actionButton(label: String, accent: Boolean = false, onClick: () -> Unit): TextView =
@@ -227,11 +233,12 @@ internal fun FloatConsoleService.actionButton(label: String, accent: Boolean = f
         setTextColor(if (accent) palette.onAccent else palette.ink)
         setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
         gravity = Gravity.CENTER
+        minHeight = dp(40)
         background = GradientDrawable().apply {
-            cornerRadius = dp(12).toFloat()
+            cornerRadius = dp(8).toFloat()
             setColor(if (accent) palette.accent else palette.field)
         }
-        setPadding(dp(14), dp(9), dp(14), dp(9))
+        setPadding(dp(12), dp(8), dp(12), dp(8))
         layoutParams = LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.WRAP_CONTENT,
             LinearLayout.LayoutParams.WRAP_CONTENT,

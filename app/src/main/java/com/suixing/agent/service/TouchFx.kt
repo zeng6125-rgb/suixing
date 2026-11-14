@@ -286,6 +286,7 @@ object TouchFx {
                 Core.settings.flow.collect { s ->
                     // 边缘光跟当前配色的 primary，不再留一套固定墨绿。
                     fxBrandColor = brandColorFor(s.themeMode, s.paletteMode)
+                    appContext?.let { UiOperationOverlay.setAppearance(it, s.themeMode, s.paletteMode) }
                     val changed = !feedbackSettingsReady || edgeLightOn != s.edgeLight ||
                         edgeLightInForeground != s.edgeLightInForeground ||
                         promptOn != s.uiAutomationPrompt || promptInForeground != s.uiAutomationPromptInForeground

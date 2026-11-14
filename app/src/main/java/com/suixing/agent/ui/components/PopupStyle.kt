@@ -20,6 +20,14 @@ import androidx.compose.ui.unit.dp
  * 收敛到一处之后，圆角、投影、底色只有这一个版本；想改样式只改这里。
  */
 internal val PopupCardShape = RoundedCornerShape(20.dp)
+internal const val PopupShadowElevationDp = 10
+internal const val PopupShadowMarginDp = 24
+internal val PopupAmbientShadowColor = Color.Transparent
+internal val PopupSpotShadowColor = Color.Black.copy(alpha = 0.18f)
+
+/** The chat title and automation capsule share the same native shadow. */
+internal const val ChatTitleShadowElevationDp = 8
+internal val ChatTitleShadowColor = Color.Black.copy(alpha = 0.12f)
 
 /**
  * 投影：**轻**、**单层**（用户：「阴影我不需要很重的，全部改轻」「阴影不要有偏移」，
@@ -46,11 +54,11 @@ internal fun Modifier.popupCardSurface(
     borderColor: Color = Color.Transparent,
 ): Modifier = this
     .shadow(
-        elevation = 10.dp,
+        elevation = PopupShadowElevationDp.dp,
         shape = PopupCardShape,
         clip = false,
-        ambientColor = Color.Transparent,
-        spotColor = Color.Black.copy(alpha = 0.18f),
+        ambientColor = PopupAmbientShadowColor,
+        spotColor = PopupSpotShadowColor,
     )
     .clip(PopupCardShape)
     .background(color)
@@ -65,7 +73,7 @@ internal const val MENU_EXIT_MS = 140L
 /** Menus leave faster than they enter; the outer touch shield outlives this exit. */
 internal const val POPUP_ANIM_MS = 110
 
-internal val PopupShadowMargin = 24.dp
+internal val PopupShadowMargin = PopupShadowMarginDp.dp
 
 /** Read animation frames in the layer, keeping content measurement and popup anchors stable. */
 internal fun Modifier.popupMotion(state: PopupMotionState, origin: () -> TransformOrigin = { TransformOrigin.Center }): Modifier =

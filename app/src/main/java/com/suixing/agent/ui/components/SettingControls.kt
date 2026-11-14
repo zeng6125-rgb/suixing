@@ -57,6 +57,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.util.lerp as fLerp
@@ -101,6 +102,7 @@ fun SettingRow(
     shape: Shape = MaterialTheme.shapes.small,
     /** 内容内边距，落在**点击区之内** ⇒ 涟漪照样铺满整行（横向），内容仍缩进。 */
     contentPadding: PaddingValues = PaddingValues(0.dp),
+    verticalPadding: Dp = SettingsStyle.RowPadding,
 ) {
     Row(
         modifier = modifier
@@ -117,7 +119,7 @@ fun SettingRow(
                 },
             )
             .padding(contentPadding)
-            .padding(vertical = SettingsStyle.RowPadding),
+            .padding(vertical = verticalPadding),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         if (leading != null) {

@@ -156,6 +156,37 @@ class InlineSearchProgressTest {
         compare("rewritten **bold** and [url](https://x.dev)")
     }
 
+    @Test
+    fun `growing table cells retain inline output while formatting and links close`() {
+        val live = LiveBlocks()
+        val sourceTracker = InlineLiteralSource()
+        val searchState = InlineSearchState("")
+        val tableStart = "| name | value |\n| --- | --- |\n| row | "
+        val markup = "**bold** [doc](https://example.test/a)"
+        var last = AnnotatedString("")
+
+        for (end in 0..markup.length) {
+            val table = live.blocksFor(tableStart + markup.take(end), end, 5).single() as MdBlock.Table
+            val cell = table.rows.last().last()
+            val literal = sourceTracker.accepts(cell)
+            last = if (literal) {
+                searchState.update(cell, sourceTracker.lastWasAppend)
+                codeBlockAnnotatedText(cell, appendCaret = true)
+            } else {
+                scanInlineMarkdown(
+                    text = cell,
+                    appendCaret = true,
+                    searchState = searchState,
+                    appendOnly = sourceTracker.lastWasAppend,
+                )
+            }
+            assertEquivalent(inlineMarkdownWithCaret(cell), last)
+        }
+
+        assertEquals("bold doc\u200B", last.text)
+        assertEquals(listOf("5:8:https://example.test/a"), linkShape(last))
+    }
+
     private fun assertEquivalent(expected: AnnotatedString, actual: AnnotatedString) {
         assertEquals(expected.text, actual.text)
         assertEquals(expected.spanStyles, actual.spanStyles)

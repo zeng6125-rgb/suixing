@@ -4,6 +4,24 @@ import com.suixing.agent.data.AppSettings
 import com.suixing.agent.data.ProviderConfig
 import com.suixing.agent.data.withoutEmptyProviders
 
+/** Reuse decoded credentials when their stored values have not changed. */
+internal fun AppSettings.reuseDecodedSecrets(previousStored: AppSettings, previousDecoded: AppSettings): AppSettings? {
+    if (apiKey != previousStored.apiKey ||
+        providers.size != previousStored.providers.size ||
+        providers.size != previousDecoded.providers.size ||
+        providers.indices.any { providers[it].apiKey != previousStored.providers[it].apiKey } ||
+        searchApiKey != previousStored.searchApiKey ||
+        asrApiKey != previousStored.asrApiKey ||
+        requestHeaders != previousStored.requestHeaders) return null
+    return copy(
+        apiKey = previousDecoded.apiKey,
+        providers = providers.mapIndexed { index, provider -> provider.copy(apiKey = previousDecoded.providers[index].apiKey) },
+        searchApiKey = previousDecoded.searchApiKey,
+        asrApiKey = previousDecoded.asrApiKey,
+        requestHeaders = previousDecoded.requestHeaders,
+    )
+}
+
 /**
  * The pure half of 模型与生成: which provider a draft edit addresses, and whether the draft
  * holds an edit at all. It sits apart from the screen so the rules can be tested without a

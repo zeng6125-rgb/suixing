@@ -44,7 +44,7 @@ case "$cmd" in
     echo "=== RSS (KB) ==="
     "$ADB" "${DEV[@]}" shell dumpsys meminfo "$PKG" 2>/dev/null | grep -iE "TOTAL PSS|TOTAL RSS" | head -3
 
-    echo "=== 线程 CPU（主线程 vs RenderThread，5s 采样）==="
+    echo "=== 线程 CPU（主线程 vs RenderThread，单次采样）==="
     "$ADB" "${DEV[@]}" shell "top -H -b -n 1 -d 1 -p $("$ADB" "${DEV[@]}" shell pidof "$PKG" 2>/dev/null | tr -d '\r')" 2>/dev/null \
       | grep -iE "RenderThread|main|TID" | head -6
     ;;

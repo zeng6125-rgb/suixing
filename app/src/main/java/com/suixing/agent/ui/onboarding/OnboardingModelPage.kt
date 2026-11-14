@@ -15,6 +15,8 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.CircularProgressIndicator
@@ -214,46 +216,50 @@ private fun ModelPickerDialog(
         onDismissRequest = onDismiss,
         title = { Text("选模型") },
         text = {
-            Column(
-                Modifier
-                    .heightIn(max = 380.dp)
-                    .verticalScroll(rememberScrollState()),
-            ) {
-val grouped = remember(models) { groupModels(models.map { it.id }) }
+            val grouped = remember(models) { groupModels(models.map { it.id }) }
+            LazyColumn(Modifier.fillMaxWidth().heightIn(max = 380.dp)) {
                 grouped.forEach { (group, ids) ->
-                    Text(
-                        text = group,
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    Spacer(Modifier.height(4.dp))
-                    ids.forEach { id ->
-                        Text(
-                            text = id,
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = if (id == current) {
-                                MaterialTheme.colorScheme.primary
-                            } else {
-                                MaterialTheme.colorScheme.onSurface
-                            },
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .suixingClickable(MaterialTheme.shapes.small) {
-                                    onPick(models.first { it.id == id })
-                                }
-                                .padding(vertical = 8.dp),
-                        )
-                        Spacer(Modifier.height(1.dp))
-                        Box(
-                            Modifier
-                                .fillMaxWidth()
-                                .height(1.dp)
-                                .background(MaterialTheme.colorScheme.outlineVariant),
-                        )
+                    item(key = "group:$group", contentType = "model-group") {
+                        Column {
+                            Text(
+                                text = group,
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            Spacer(Modifier.height(4.dp))
+                        }
                     }
-                    Spacer(Modifier.height(10.dp))
+                    items(ids, key = { "model:$it" }, contentType = { "model" }) { id ->
+                        Column {
+                            Text(
+                                text = id,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = if (id == current) {
+                                    MaterialTheme.colorScheme.primary
+                                } else {
+                                    MaterialTheme.colorScheme.onSurface
+                                },
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .suixingClickable(MaterialTheme.shapes.small) {
+                                        onPick(models.first { it.id == id })
+                                    }
+                                    .padding(vertical = 8.dp),
+                            )
+                            Spacer(Modifier.height(1.dp))
+                            Box(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .height(1.dp)
+                                    .background(MaterialTheme.colorScheme.outlineVariant),
+                            )
+                        }
+                    }
+                    item(key = "group-gap:$group", contentType = "model-group-gap") {
+                        Spacer(Modifier.height(10.dp))
+                    }
                 }
             }
         },

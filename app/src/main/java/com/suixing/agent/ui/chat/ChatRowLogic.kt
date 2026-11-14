@@ -115,7 +115,7 @@ internal fun groupRows(
     messages: List<StoredMessage>,
     activeRuns: Map<String, String>,
     running: Boolean,
-    /** 正在生成、尚未落盘的 run：让「重新回答」按下的一瞬间就清空旧答案。见 [Transcript.chosenFrom]. */
+    /** 当前流式 run：参与分支选择，内容由 live 行展示。见 [Transcript.chosenFrom]. */
     pendingRun: String? = null,
 ): List<ChatRow> {
     val turnOf = Transcript.turnOf(messages)
@@ -132,6 +132,7 @@ internal fun groupRows(
     // turn of the model cannot swallow it.
     val tail = HashMap<String, String>()
     shown.forEach { message ->
+        if (pendingRun != null && message.runId == pendingRun) return@forEach
         val turn = turnOf[message.id].orEmpty()
         if (message.role == Roles.ASSISTANT && message.isVisible() && turn.isNotEmpty()) {
             tail[turn] = message.id
@@ -139,6 +140,7 @@ internal fun groupRows(
     }
 
     fun branchFor(message: StoredMessage): Branch? {
+        if (pendingRun != null && message.runId == pendingRun) return null
         val turn = turnOf[message.id].orEmpty()
         if (turn.isEmpty() || tail[turn] != message.id) return null
         val siblings = runs[turn].orEmpty()
@@ -154,28 +156,57 @@ internal fun groupRows(
         )
     }
 
-    val rows = mutableListOf<ChatRow>()
+    // Build each bubble in place, then publish its lists once. Repeated `+` copied every
+    // earlier part, round and consecutive tool call for each new message in a long run.
+    class RowBuilder(
+        var message: StoredMessage,
+        val showTimeLabel: Boolean,
+        var branch: Branch? = null,
+    ) {
+        val render = pendingRun == null || message.runId != pendingRun
+        val parts = ArrayList<Part>()
+        val rounds = arrayListOf(message)
+        private var tools: ArrayList<ToolLine>? = null
+
+        fun addTool(message: StoredMessage) {
+            if (!render) return
+            val calls = tools ?: ArrayList<ToolLine>().also { tools = it }
+            calls += ToolLine.of(message)
+        }
+
+        fun finishTools() {
+            val calls = tools ?: return
+            parts += Part.Tools(calls.toList())
+            tools = null
+        }
+
+        fun build(): ChatRow {
+            finishTools()
+            return ChatRow(
+                message = message,
+                showTimeLabel = showTimeLabel,
+                parts = parts.toList(),
+                branch = branch,
+                rounds = rounds.toList(),
+            )
+        }
+    }
+
+    val rows = mutableListOf<RowBuilder>()
     var previous: StoredMessage? = null
     // The bubble that is still collecting, and the run it belongs to. Another round
     // of that same run folds into it rather than starting a second bubble.
-    var openIndex = -1
+    var open: RowBuilder? = null
     var openRun: String? = null
 
     shown.forEach { message ->
         when {
             message.role == Roles.TOOL -> {
-                val index = openIndex
-                if (index >= 0) {
-                    val open = rows[index]
+                val row = open
+                if (row != null) {
                     // Consecutive calls share one block; a call that arrives after
                     // thinking or prose starts a new one, so the sequence stays honest.
-                    val parts = if (open.parts.lastOrNull() is Part.Tools) {
-                        open.parts.dropLast(1) +
-                            Part.Tools((open.parts.last() as Part.Tools).calls + ToolLine.of(message))
-                    } else {
-                        open.parts + Part.Tools(listOf(ToolLine.of(message)))
-                    }
-                    rows[index] = open.copy(parts = parts)
+                    row.addTool(message)
                 } else {
                     // A tool result with no bubble above it still gets drawn — and it opens
                     // the bubble, claiming the run that produced it. The round that asked for
@@ -185,13 +216,14 @@ internal fun groupRows(
                     // split one answer: every following result of the same run started yet
                     // another card, and the round that finally wrote prose could not fold
                     // back in because its run no longer matched an open one.
-                    rows += ChatRow(
+                    val opened = RowBuilder(
                         message = message,
                         showTimeLabel = needsTimeLabel(previous, message),
-                        parts = listOf(Part.Tools(listOf(ToolLine.of(message)))),
                     )
+                    opened.addTool(message)
+                    rows += opened
                     previous = message
-                    openIndex = rows.lastIndex
+                    open = opened
                     openRun = message.runId.orEmpty()
                 }
             }
@@ -200,7 +232,7 @@ internal fun groupRows(
                 val run = message.runId.orEmpty()
                 // Thinking first, then the words: that is the order they arrived in, and
                 // a round that only thought contributes only a thinking part.
-                val arrived = buildList {
+                val arrived = if (pendingRun != null && message.runId == pendingRun) emptyList() else buildList {
                     // 重试留痕在最前：它发生在这一轮产出任何字之前，排在思考/正文前面才是它真正的位置。
                     message.traceNote?.takeIf { it.isNotBlank() }?.let { add(Part.Trace(it)) }
                     // Preserve the same lines as the live block at hand-over. Trimming
@@ -210,7 +242,7 @@ internal fun groupRows(
                     }
                     if (message.text.isNotBlank()) add(Part.Text(message.text))
                 }
-                val index = openIndex
+                val row = open
                 // A round folds into the bubble already open when its run is that row's run. The
                 // comparison used to demand a *non-empty* run as well, and that is the one thing it
                 // must not do: `Transcript.BASE_RUN` is the empty string — the run id every message
@@ -221,31 +253,30 @@ internal fun groupRows(
                 // it proved the branch unreachable: `groupRows` is fed `Transcript.active(...)`,
                 // which keeps one run per turn, so every assistant and tool message of a turn
                 // already carries the same run id and the plain comparison folds them all.
-                if (index >= 0 && run == openRun) {
-                    val open = rows[index]
+                if (row != null && run == openRun) {
+                    row.finishTools()
                     // 相邻同文思考去重（用户截图：「两个一模一样的」）：重试/中断重落盘会把同一段
                     // 思维链再写一次，同一张卡里就出现两个一字不差的思考块。相邻且文本相同只留
                     // 第一个 —— 卡片表头的「思考 N 段」也跟着不再虚高。
-                    val fresh = arrived.filterNot { part ->
-                        part is Part.Thinking &&
-                            (open.parts.lastOrNull() as? Part.Thinking)?.text == part.text
+                    val previousThinking = row.parts.lastOrNull() as? Part.Thinking
+                    for (part in arrived) {
+                        if (part is Part.Thinking && previousThinking?.text == part.text) continue
+                        row.parts += part
                     }
-                    rows[index] = open.copy(
-                        message = message,
-                        parts = open.parts + fresh,
-                        rounds = open.rounds + message,
-                        // The switcher only hangs off the reply's last round, which
-                        // is this one.
-                        branch = branchFor(message) ?: open.branch,
-                    )
+                    row.message = message
+                    if (row.render) row.rounds += message
+                    // The switcher only hangs off the reply's last round, which
+                    // is this one.
+                    row.branch = branchFor(message) ?: row.branch
                 } else {
-                    rows += ChatRow(
+                    val opened = RowBuilder(
                         message = message,
                         showTimeLabel = needsTimeLabel(previous, message),
-                        parts = arrived,
                         branch = branchFor(message),
                     )
-                    openIndex = rows.lastIndex
+                    opened.parts.addAll(arrived)
+                    rows += opened
+                    open = opened
                     openRun = run
                 }
                 previous = message
@@ -258,23 +289,24 @@ internal fun groupRows(
             // 插话: drawn where it was typed, inside the turn it interrupted, and the
             // bubble stays open so the model's next round appends after it.
             message.role == Roles.USER && message.steer -> {
-                val index = openIndex
-                if (index >= 0) {
-                    val open = rows[index]
-                    rows[index] = open.copy(parts = open.parts + Part.Steer(message))
+                val row = open
+                if (row != null) {
+                    row.finishTools()
+                    if (row.render) row.parts += Part.Steer(message)
                 } else {
                     // Typed before the model had written anything back yet.
-                    rows += ChatRow(
+                    val standalone = RowBuilder(
                         message = message,
                         showTimeLabel = needsTimeLabel(previous, message),
-                        parts = listOf(Part.Steer(message)),
                     )
+                    if (standalone.render) standalone.parts += Part.Steer(message)
+                    rows += standalone
                 }
                 previous = message
             }
 
             message.isVisible() -> {
-                rows += ChatRow(
+                rows += RowBuilder(
                     message = message,
                     showTimeLabel = needsTimeLabel(previous, message),
                 )
@@ -282,7 +314,7 @@ internal fun groupRows(
                 // 失败回执自己成一行、不接管 open 气泡：它后面不该再往里折工具行或正文
                 // （run 已经结束）。普通可见消息维持原行为（关掉 open 气泡）。
                 if (message.role != Roles.SYSTEM) {
-                    openIndex = -1
+                    open = null
                     openRun = null
                 }
             }
@@ -290,7 +322,8 @@ internal fun groupRows(
             else -> Unit
         }
     }
-    return rows
+    // Keep hidden rows as grouping owners, without building a second copy of the live payload.
+    return rows.mapNotNull { if (it.render) it.build() else null }
 }
 
 /**

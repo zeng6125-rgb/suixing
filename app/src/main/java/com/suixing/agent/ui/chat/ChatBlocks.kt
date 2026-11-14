@@ -319,6 +319,7 @@ internal class ReasoningViewport {
     private var liveMarkdown: com.suixing.agent.ui.chat.markdown.LiveBlocks? = null
     fun growingMarkdown(): com.suixing.agent.ui.chat.markdown.LiveBlocks =
         liveMarkdown ?: com.suixing.agent.ui.chat.markdown.LiveBlocks().also { liveMarkdown = it }
+    fun retainedMarkdown(): com.suixing.agent.ui.chat.markdown.LiveBlocks? = liveMarkdown
     fun releaseMarkdown() { liveMarkdown = null }
     val listState by lazy { LazyListState() }
     val scrollState by lazy { ScrollState(0) }
@@ -757,6 +758,7 @@ internal fun ToolBundle(
     // 与 `imagesBase64`（截图 base64），裸 List 当键会逐字符深比较这些内容。
     // 本仓库已有 6 处这么用，这里漏了。重算本体只是 count + 取首行，O(calls)。
     val failures = remember(IdentityKey(tools)) { tools.count { it.done && !it.ok } }
+    val preparing = remember(IdentityKey(tools)) { tools.any { it.preparing } }
     val (title, preview) = remember(IdentityKey(tools)) {
         // One call is its own name; several are a count, because the names are what the
         // expanded list is for.
@@ -780,11 +782,13 @@ internal fun ToolBundle(
             when {
                 // The name of the tool being waited on is the only useful thing the header
                 // can say while it is waiting.
-                runningTool != null -> {
+                runningTool != null && tools.any { it.name == runningTool && !it.done && !it.preparing } -> {
                     ProcessStatus(runningTool, MaterialTheme.colorScheme.primary)
                     Spacer(Modifier.width(6.dp))
                     ProcessSpinner(MaterialTheme.colorScheme.primary)
                 }
+
+                preparing -> ProcessStatus("准备调用", MaterialTheme.colorScheme.primary)
 
                 failures > 0 -> ProcessStatus(
                     text = "$failures 个失败",
@@ -1025,7 +1029,7 @@ internal fun ToolRow(
                         tint = tone,
                         modifier = Modifier.size(16.dp),
                     )
-                } else if (running) {
+                } else if (running && !line.preparing) {
                     // A call in flight is a spinner, not a dot: the row has to say "still
                     // working" while the model waits on it.
                     CircularProgressIndicator(
@@ -1064,6 +1068,7 @@ internal fun ToolRow(
             Spacer(Modifier.width(8.dp))
             Text(
                 text = when {
+                    line.preparing -> "准备调用"
                     !line.done -> "运行中…"
                     line.elapsedMs > 0 -> (if (line.ok) "✓ " else "✗ ") + formatDuration(line.elapsedMs)
                     line.ok -> "✓"

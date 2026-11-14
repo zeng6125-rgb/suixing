@@ -17,6 +17,7 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.semantics.contentDescription
@@ -191,6 +192,7 @@ private fun UsageLegend(label: String, color: Color) {
 @Composable
 internal fun UsageModelBar(model: ModelUsage, total: Long, onClick: () -> Unit) {
     val scheme = MaterialTheme.colorScheme
+    val locale = LocalConfiguration.current.locales[0]
     val fraction = if (total > 0) (model.tokens.total.toDouble() / total).toFloat().coerceIn(0f, 1f) else 0f
     SuixingCard(onClick = onClick, contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -204,7 +206,7 @@ internal fun UsageModelBar(model: ModelUsage, total: Long, onClick: () -> Unit) 
         Row(Modifier.padding(top = 6.dp)) {
             Text("${usageExact(model.tokens.total)} tokens", modifier = Modifier.weight(1f), style = SettingsStyle.badge,
                 color = scheme.onSurfaceVariant)
-            Text(if (total > 0) String.format(java.util.Locale.getDefault(), "%.1f%%", fraction * 100) else "—",
+            Text(if (total > 0) String.format(locale, "%.1f%%", fraction * 100) else "—",
                 style = SettingsStyle.badge, color = scheme.onSurfaceVariant)
         }
     }

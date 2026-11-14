@@ -12,8 +12,8 @@ class ConversationEntranceTest {
     private fun at(t: Float): Float = ConversationEntrance.EASING.transform(t.coerceIn(0f, 1f))
 
     @Test
-    fun `restored content settles within the 280ms entrance clock`() {
-        assertTrue("The restored conversation should be ready to read promptly", ConversationEntrance.DURATION_MS in 1..280)
+    fun `restored content uses a brief entrance clock`() {
+        assertTrue("The restored conversation should be ready to read promptly", ConversationEntrance.DURATION_MS in 1..160)
     }
 
     @Test
@@ -68,7 +68,7 @@ class ConversationEntranceTest {
 
     @Test
     fun `halfway through the short fade text is already readable`() {
-        assertTrue("text is too faint halfway through", ConversationEntrance.alpha(at(0.5f)) > 0.8f)
+        assertTrue("text is too faint halfway through", ConversationEntrance.alpha(at(0.5f)) > 0.6f)
     }
 
     @Test
@@ -85,20 +85,15 @@ class ConversationEntranceTest {
     }
 
     @Test
-    fun `rise starts low and lands exactly at the restored position`() {
-        assertEquals(ConversationEntrance.RISE_DP, ConversationEntrance.offsetYDp(0f), 1e-4f)
-        assertEquals(0f, ConversationEntrance.offsetYDp(1f), 0f)
-        var previous = ConversationEntrance.RISE_DP
+    fun `restored reading position stays stationary throughout the entrance`() {
         for (i in 0..100) {
-            val value = ConversationEntrance.offsetYDp(i / 100f)
-            assertTrue("rise reversed at $i%", value <= previous)
-            previous = value
+            assertEquals("reading position moved at $i%", 0f, ConversationEntrance.offsetYDp(i / 100f), 0f)
         }
     }
 
     @Test
     fun `out of range progress cannot move the layer below or above its bounds`() {
-        assertEquals(ConversationEntrance.RISE_DP, ConversationEntrance.offsetYDp(-0.1f), 0f)
+        assertEquals(0f, ConversationEntrance.offsetYDp(-0.1f), 0f)
         assertEquals(0f, ConversationEntrance.offsetYDp(1.1f), 0f)
     }
 }

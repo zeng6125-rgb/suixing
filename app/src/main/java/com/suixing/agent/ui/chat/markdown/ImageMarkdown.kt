@@ -1,5 +1,18 @@
 package com.suixing.agent.ui.chat.markdown
 
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.referentialEqualityPolicy
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.staticCompositionLocalOf
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.conflate
+import kotlinx.coroutines.withContext
+
 /**
  * 助手回复里的一张图：Markdown 图片语法 `![alt](url)`，url 是 http(s) 地址或 `data:image/...;base64,`。
  *
@@ -9,6 +22,49 @@ package com.suixing.agent.ui.chat.markdown
 internal sealed interface MessageSegment {
     data class Text(val text: String) : MessageSegment
     data class Image(val alt: String, val url: String) : MessageSegment
+}
+
+internal val LocalPreparedImageSegments = staticCompositionLocalOf<Map<String, List<MessageSegment>>> { emptyMap() }
+
+private data class ImageSegmentsSource(val text: String, val streaming: Boolean, val version: Int, val id: Int)
+private class CompletedImageSegments(val source: ImageSegmentsSource, val segments: List<MessageSegment>)
+
+@Composable
+internal fun rememberImageSegments(
+    text: String,
+    streaming: Boolean = false,
+    sourceVersion: Int = -1,
+    sourceId: Int = 0,
+): List<MessageSegment> {
+    val source = ImageSegmentsSource(text, streaming, sourceVersion, sourceId)
+    val complete = remember(sourceId) {
+        mutableStateOf(CompletedImageSegments(ImageSegmentsSource("", false, -1, 0), emptyList()), referentialEqualityPolicy())
+    }
+    if (!text.contains("![")) {
+        val plain = remember(text) { if (text.isEmpty()) emptyList() else listOf(MessageSegment.Text(text)) }
+        SideEffect { complete.value = CompletedImageSegments(source, plain) }
+        return plain
+    }
+    if (!streaming) LocalPreparedImageSegments.current[text]?.let { prepared ->
+        SideEffect { complete.value = CompletedImageSegments(source, prepared) }
+        return prepared
+    }
+    val cached = complete.value
+    if (!streaming && cached.source.text == text && !cached.source.streaming) return cached.segments
+    val current = rememberUpdatedState(source)
+    LaunchedEffect(complete) {
+        snapshotFlow { current.value }.conflate().collect { requested ->
+            val segments = withContext(Dispatchers.Default) { splitImageSegments(requested.text, requested.streaming) }
+            val latest = current.value
+            if (latest == requested || requested.id != 0 && latest.id == requested.id &&
+                latest.streaming == requested.streaming && latest.version >= requested.version &&
+                latest.text.length >= requested.text.length
+            ) complete.value = CompletedImageSegments(requested, segments)
+        }
+    }
+    return if (cached.source.text == text || sourceId != 0 && cached.source.id == sourceId &&
+        sourceVersion >= cached.source.version && text.length >= cached.source.text.length
+    ) cached.segments else emptyList()
 }
 
 /** `![alt](url)`；alt 可以为空，url 不允许带空白。 */

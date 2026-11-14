@@ -34,6 +34,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.referentialEqualityPolicy
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
@@ -71,6 +72,9 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.conflate
+import kotlinx.coroutines.withContext
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.mutableFloatStateOf
@@ -918,6 +922,13 @@ internal fun rememberGrowingMarkdown(
     appendFrom: Int = -1,
     sourceId: Int = 0,
 ): List<MdBlock> {
+    val retained = LocalRetainedLiveMarkdown.current
+    val owned = remember { retained ?: LiveBlocks() }
+    val live = retained ?: owned
+    if (settled) live.cachedBlocksFor(text)?.let { blocks ->
+        SideEffect { SettledBlocks.putIfSettled(true, text, blocks) }
+        return blocks
+    }
     if (settled) LocalPreparedMarkdown.current[text]?.let { prepared ->
         // Preparing offscreen is not a settled-cache insertion. Once mounted, this
         // exact parse should survive leaving the local window and coming back.
@@ -928,22 +939,28 @@ internal fun rememberGrowingMarkdown(
     // open code body or current table row can continue without parsing old lines;
     // ambiguous block transitions fall back to the normal parser. Text measurement
     // and inline syntax in a formatted tail still have a growing-input cost.
-    if (!settled) {
-        val live = LocalRetainedLiveMarkdown.current ?: remember { LiveBlocks() }
-        return remember(text) { live.blocksFor(text, appendFrom, sourceId) }
+    if (settled) SettledBlocks.get(text)?.let { return it }
+    val source = androidx.compose.runtime.rememberUpdatedState(GrowingMarkdownSource(text, appendFrom, sourceId))
+    val blocks = remember(live, settled, if (settled) text else null, sourceId) {
+        mutableStateOf(live.cachedBlocksFor(text).orEmpty(), referentialEqualityPolicy())
     }
-    // The live holder belongs only to the branch above. Settling forgets its source and
-    // prefix bookkeeping; a final row needs only its last document and parsed result.
-    val cache = remember { MarkdownCache() }
-    // 定稿文本：先查进程级缓存 —— 滚出去再滚回来就不必重新解析（快速滑动的卡顿来源）。
-    SettledBlocks.get(text)?.let { return it }
-    val blocks = cache.blocksFor(text)
-    // **写入放到 `SideEffect`**（评审 S1）：`put` 改的是全局 LRU，而组合可能被丢弃/重试
-    // （LazyColumn 组合了又立刻回收的项）—— 在组合期写会让"没人看过的文本"占格、
-    // 把正在看的挤掉。`get` 也顺手加了长度门槛（评审 S3）。
-    SideEffect { SettledBlocks.putIfSettled(settled, text, blocks) }
-    return blocks
+    LaunchedEffect(live, blocks) {
+        // One parser owns its mutable prefix. Cold settled rows use the same background path.
+        snapshotFlow { source.value }.conflate().collect { requested ->
+            val parsed = withContext(Dispatchers.Default) {
+                live.blocksFor(requested.text, requested.version, requested.id)
+            }
+            val current = source.value
+            if (current == requested || requested.id != 0 && current.id == requested.id &&
+                current.version >= requested.version && current.text.length >= requested.text.length
+            ) blocks.value = parsed
+        }
+    }
+    return blocks.value
 }
+
+private data class GrowingMarkdownSource(val text: String, val version: Int, val id: Int)
+private class CompletedMarkdownParse(val source: String, val blocks: List<MdBlock>)
 
 /**
  * 流式文本的**块级复用**解析器（issue #44）。
@@ -980,6 +997,7 @@ internal class LiveBlocks {
     private var stableEnd = 0
     private var prefixBlocks: List<MdBlock> = emptyList()
     private var result: List<MdBlock> = emptyList()
+    @Volatile private var completed = CompletedMarkdownParse("", result)
     private var appendableTail: AppendableMarkdownTail? = null
     private var appendPrefix: List<MdBlock> = emptyList()
 
@@ -993,6 +1011,9 @@ internal class LiveBlocks {
      */
     private var sawCarriageReturn = false
 
+    fun cachedBlocksFor(source: String): List<MdBlock>? = completed.let { if (source == it.source) it.blocks else null }
+
+    @Synchronized
     fun blocksFor(
         next: String,
         appendFrom: Int = -1,
@@ -1004,6 +1025,7 @@ internal class LiveBlocks {
         val trustedAppend = sameSource && appendFrom >= 0 && next.length >= text.length &&
             (appendFrom > lastVersion || (appendFrom == lastVersion && next.length >= text.length))
         val keepsPrefix = next.length >= text.length && (trustedAppend || next.startsWith(text))
+        if (!keepsPrefix || sourceId != lastSourceId) sawCarriageReturn = false
         if (!sawCarriageReturn) {
             // A rewrite of the same/larger length may introduce CR in the old range.
             // Only an actual append is allowed to skip scanning that range.
@@ -1017,6 +1039,7 @@ internal class LiveBlocks {
         val normalized =
             if (sawCarriageReturn) next.replace("\r\n", "\n").replace('\r', '\n') else next
         if (normalized == text) {
+            completed = CompletedMarkdownParse(next, result)
             lastVersion = appendFrom
             lastSourceId = sourceId
             return result
@@ -1036,6 +1059,7 @@ internal class LiveBlocks {
         result = if (extended != null) JoinedMarkdownBlocks(appendPrefix, listOf(extended)) else
             parseWithPrefix(normalized, keepsNormalizedPrefix, checkpoint)
         text = normalized
+        completed = CompletedMarkdownParse(next, result)
         lastVersion = appendFrom
         lastSourceId = sourceId
         return result
@@ -1223,62 +1247,17 @@ internal object SettledBlocks {
     }
 }
 
-/**
- * The last parse, kept so the next one can start where this one stopped.
- *
- * [prefixEnd] marks the settled range in [text] (everything before its last blank line) and
- * [prefixBlocks] is that part's parse: the two together are what makes appending a freshly
- * parsed tail correct — reusing the *whole* previous block list would append the tail to a list
- * that already contained the old one.
- */
+/** The last complete parse for a mounted, settled document. */
 internal class MarkdownCache {
     private var text = ""
-    private var prefixEnd = 0
-    private var prefixBlocks: List<MdBlock> = emptyList()
     private var blocks: List<MdBlock> = emptyList()
 
     fun blocksFor(next: String): List<MdBlock> {
         if (next == text) return blocks
-        val nextPrefixEnd = settledMarkdownPrefixEnd(next)
-        if (nextPrefixEnd == 0) {
-            prefixEnd = 0
-            prefixBlocks = emptyList()
-            blocks = parseMarkdown(next)
-        } else {
-            if (nextPrefixEnd != prefixEnd || !next.regionMatches(0, text, 0, prefixEnd)) {
-                prefixEnd = nextPrefixEnd
-                prefixBlocks = parseMarkdown(next.substring(0, prefixEnd))
-            }
-            blocks = prefixBlocks + parseMarkdown(next.substring(prefixEnd))
-        }
+        blocks = parseMarkdown(next)
         text = next
         return blocks
     }
-
-    /**
-     * The part of [text] that can never change again, ending just past a blank line.
-     *
-     * A blank line normally ends a block, which is what makes the split safe — except inside a
-     * fenced code block, where it does not: cutting a fence in half would render one code block
-     * as two, one of them unterminated. So the last blank line with an even number of fences
-     * before it is the one taken, and a text whose only blank lines are inside fences simply has
-     * no settled part (it is re-parsed whole, which is what it did before any of this).
-     */
-}
-
-/** Same backtick-parity boundary as MarkdownCache, found without rescanning each candidate. */
-internal fun settledMarkdownPrefix(text: String): String = text.substring(0, settledMarkdownPrefixEnd(text))
-
-private fun settledMarkdownPrefixEnd(text: String): Int {
-    var odd = false
-    for (c in text) if (c == '`') odd = !odd
-    for (index in text.lastIndex downTo 1) {
-        if (text[index] == '`') odd = !odd
-        if (!odd && text[index] == '\n' && text[index - 1] == '\n') {
-            return index + 1
-        }
-    }
-    return 0
 }
 
 /**
@@ -1337,18 +1316,18 @@ fun MarkdownBlocks(
     }
     // 键用**引用**而不是内容：`List<MdBlock>` 的 equals 会一路深到表格单元格与列表项，
     // 每次重组都比一遍。`blocks` 本来就跟着 `remember` 的上游一起换实例，换成引用键后
-    // 「实例变了就重算」，重算只是一遍建键。
-    val keys = remember(IdentityKey(blocks)) { markdownBlockKeys(blocks) }
+    // 实例变化时只给新定稿块和尾块建键，复用已有前缀的键与出现次数。
+    val keyCache = remember { MarkdownBlockKeyCache() }
+    val keys = remember(IdentityKey(blocks)) { keyCache.keysFor(blocks) }
     val readingKey = LocalReadingTextKey.current
     Column(modifier) {
         blocks.forEachIndexed { index, block ->
             key(keys[index]) {
                 if (index > 0) Spacer(Modifier.height(gapBetween(blocks[index - 1], block)))
                 // Lists and tables refine the block key by item/child or row/cell below.
-                val blockReadingKey = readingKey?.takeIf {
-                    block is MdBlock.Paragraph || block is MdBlock.Heading ||
-                        block is MdBlock.Quote || block is MdBlock.Code || block is MdBlock.Bullet || block is MdBlock.Table
-                }?.let { "$it:block:$index" }
+                val blockReadingKey = remember(readingKey, index, block is MdBlock.Rule) {
+                    readingKey?.takeUnless { block is MdBlock.Rule }?.let { "$it:block:$index" }
+                }
                 CompositionLocalProvider(LocalReadingTextKey provides blockReadingKey) {
                     MarkdownBlock(
                         block = block,
@@ -1459,30 +1438,76 @@ private fun InlineText(
 ) {
     // 路径回调从 CompositionLocal 就地读（叶子层），调用点与中间层零改动。URL 仍走 onUrlClick。
     val pathClick = LocalPathClick.current
-    val literalSource = remember { InlineLiteralSource() }
-    val searchState = remember { InlineSearchState(text) }
-    val annotated = remember(text, palette, onUrlClick, pathClick, cursor) {
-        val literal = literalSource.accepts(text)
-        if (literal) {
-            searchState.update(text, literalSource.lastWasAppend)
-            codeBlockAnnotatedText(text, cursor)
-        } else {
-            scanInlineMarkdown(
-                text = text,
-                codeBackground = palette.codeBackground,
-                codeColor = palette.codeColor,
-                linkColor = palette.linkColor,
-                // The block style already carries the base weight; spans only add to it.
-                onUrlClick = onUrlClick,
-                onPathClick = pathClick,
-                codeFontSize = palette.codeFontSize,
-                appendCaret = cursor,
-                searchState = searchState,
-                appendOnly = literalSource.lastWasAppend,
-            )
+    val annotated = rememberInlineMarkdown(InlineMarkdownSource(
+        text = text,
+        codeBackground = palette.codeBackground,
+        codeColor = palette.codeColor,
+        linkColor = palette.linkColor,
+        onUrlClick = onUrlClick,
+        onPathClick = pathClick,
+        codeFontSize = palette.codeFontSize,
+        cursor = cursor,
+    ))
+    CaretText(annotated, style, color, palette.linkColor, modifier, cursor)
+}
+
+internal data class InlineMarkdownSource(
+    val text: String,
+    val codeBackground: Color = Color.Unspecified,
+    val codeColor: Color = Color.Unspecified,
+    val linkColor: Color = Color.Unspecified,
+    val onUrlClick: ((String) -> Unit)? = null,
+    val onPathClick: ((String) -> Unit)? = null,
+    val codeFontSize: TextUnit = TextUnit.Unspecified,
+    val cursor: Boolean = false,
+) {
+    fun samePresentation(other: InlineMarkdownSource): Boolean =
+        codeBackground == other.codeBackground && codeColor == other.codeColor && linkColor == other.linkColor &&
+            onUrlClick === other.onUrlClick && onPathClick === other.onPathClick &&
+            codeFontSize == other.codeFontSize && cursor == other.cursor
+}
+
+@Composable
+internal fun rememberInlineMarkdown(requestedSource: InlineMarkdownSource): AnnotatedString {
+    val source = androidx.compose.runtime.rememberUpdatedState(requestedSource)
+    val annotated = remember { mutableStateOf<AnnotatedString?>(null, referentialEqualityPolicy()) }
+    com.suixing.agent.ui.chat.InitialViewportContentReady(annotated.value != null)
+    LaunchedEffect(annotated) {
+        val literalSource = InlineLiteralSource()
+        val searchState = InlineSearchState("")
+        snapshotFlow { source.value }.conflate().collect { requested ->
+            val literal = withContext(Dispatchers.Default) { literalSource.accepts(requested.text) }
+            val appendOnly = literalSource.lastWasAppend
+            if (!appendOnly && source.value === requested) annotated.value = null
+            val completed = withContext(Dispatchers.Default) {
+                val prepared = if (literal) {
+                    searchState.update(requested.text, appendOnly)
+                    codeBlockAnnotatedText(requested.text, requested.cursor)
+                } else {
+                    scanInlineMarkdown(
+                        text = requested.text,
+                        codeBackground = requested.codeBackground,
+                        codeColor = requested.codeColor,
+                        linkColor = requested.linkColor,
+                        // The block style already carries the base weight; spans only add to it.
+                        onUrlClick = requested.onUrlClick,
+                        onPathClick = requested.onPathClick,
+                        codeFontSize = requested.codeFontSize,
+                        appendCaret = requested.cursor,
+                        searchState = searchState,
+                        appendOnly = appendOnly,
+                    )
+                }
+                val current = source.value
+                if (current === requested || current.samePresentation(requested) &&
+                    current.text.length >= requested.text.length && current.text.startsWith(requested.text)
+                ) current to prepared else null
+            }
+            // Prefix checks and annotation construction stay on the worker; Main only checks ownership.
+            if (completed != null && source.value === completed.first) annotated.value = completed.second
         }
     }
-    CaretText(annotated, style, color, palette.linkColor, modifier, cursor)
+    return annotated.value ?: AnnotatedString("")
 }
 
 @Composable
@@ -1949,23 +1974,35 @@ private fun TableCells(
     cells.forEachIndexed { index, cell ->
         val caret = cursor && index == cells.lastIndex
         val cacheable = cacheLastCell || index != cells.lastIndex
-        val annotated = remember(cell, caret, inlineCache, cacheable) {
-            inlineCache.getOrParse(cell, caret, cacheable) {
-                if (literalInlineSource(cell)) codeBlockAnnotatedText(cell, caret) else InlineScanner(
-                    text = cell,
-                    codeBackground = palette.codeBackground,
-                    codeColor = palette.codeColor,
-                    linkColor = palette.linkColor,
-                    baseWeight = null,
-                    onUrlClick = onUrlClick,
-                    onPathClick = onPathClick,
-                    codeFontSize = palette.codeFontSize,
-                ).scan(appendCaret = caret)
-            }
-        }
         CompositionLocalProvider(LocalReadingTextKey provides readingKey?.let { "$it:cell:$index" }) {
-            CaretText(annotated, style, color, palette.linkColor,
-                Modifier.padding(horizontal = 10.dp, vertical = 6.dp), caret)
+            if (caret || !cacheable) {
+                InlineText(
+                    text = cell,
+                    style = style,
+                    color = color,
+                    palette = palette,
+                    onUrlClick = onUrlClick,
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                    cursor = caret,
+                )
+            } else {
+                val annotated = remember(cell, caret, inlineCache, cacheable) {
+                    inlineCache.getOrParse(cell, caret, cacheable) {
+                        if (literalInlineSource(cell)) codeBlockAnnotatedText(cell, caret) else InlineScanner(
+                            text = cell,
+                            codeBackground = palette.codeBackground,
+                            codeColor = palette.codeColor,
+                            linkColor = palette.linkColor,
+                            baseWeight = null,
+                            onUrlClick = onUrlClick,
+                            onPathClick = onPathClick,
+                            codeFontSize = palette.codeFontSize,
+                        ).scan(appendCaret = caret)
+                    }
+                }
+                CaretText(annotated, style, color, palette.linkColor,
+                    Modifier.padding(horizontal = 10.dp, vertical = 6.dp), caret)
+            }
         }
     }
 }

@@ -8,7 +8,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
-import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
@@ -20,10 +19,8 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 
 @Stable
-internal class SubagentUiState {
-    var open by mutableStateOf(false)
-    var selectedId by mutableStateOf<String?>(null)
-    fun show(id: String? = null) { selectedId = id; open = true }
+internal class SubagentUiState(private val onOpen: (String?) -> Unit) {
+    fun show(id: String? = null) = onOpen(id)
 }
 
 internal fun subagentQueueFor(tasks: List<ChildRunSummary>, runId: String, running: Boolean): List<ChildRunSummary> =
@@ -55,14 +52,4 @@ internal fun SubagentInlineQueue(chatId: String, runId: String, running: Boolean
         }
         Spacer(Modifier.height(3.dp))
     }
-}
-
-@Composable
-internal fun SubagentDialogHost(chatId: String, state: SubagentUiState) {
-    val readingState = rememberSaveableStateHolder()
-    LaunchedEffect(chatId) { SubagentRecords.load(chatId) }
-    if (!state.open) return
-    val tasks by remember(chatId) { SubagentRecords.summaries(chatId) }
-        .collectAsStateWithLifecycle(initialValue = emptyList())
-    SubagentRunViewer(chatId, tasks, state.selectedId, { state.selectedId = it }, readingState) { state.open = false }
 }

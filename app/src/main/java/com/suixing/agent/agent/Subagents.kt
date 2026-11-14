@@ -46,7 +46,7 @@ internal val SUBAGENT_SPECS = listOf(
             "approval_mode" to Schema.string("May only restrict the parent's policy", enumValues = listOf("auto", "ask", "deny")),
             "tools" to Schema.arrayOf("Restrict the parent's allowed tool names; empty makes a text-only task", Schema.string("Tool name")),
             "max_rounds" to Schema.integer("Tool round limit; cannot exceed the parent", minimum = 0),
-            "timeout_seconds" to Schema.integer("Task deadline; omit to use the template deadline", minimum = 10, maximum = 600)), listOf("task"))),
+            "timeout_seconds" to Schema.integer("Task deadline; 0 is unlimited, otherwise 10–600 seconds. Omit to use the template deadline, unlimited by default", minimum = 0, maximum = 600)), listOf("task"))),
     ToolSpec("wait_agents", "Wait for subagent results, in the requested order. A wait timeout does not cancel tasks. Prefer waiting over repeated list calls. Inspect/verify results before reporting completion.",
         Schema.objectOf(listOf("ids" to Schema.arrayOf("Subagent IDs; omit to wait for all", Schema.string("ID")),
             "timeout_seconds" to Schema.integer("Maximum time to wait", default = 30, minimum = 1, maximum = 120)))),
@@ -74,7 +74,7 @@ internal class SubagentPool(
     private val maximumTasks: Int = 6,
     private val onChanged: (List<SubagentSnapshot>) -> Unit = {},
     private val resolveConfig: (SubagentLaunchOptions) -> ResolvedChildConfig = { options ->
-        ResolvedChildConfig(ChildRunConfig(timeoutSeconds = options.timeoutSeconds ?: 180), AppSettings())
+        ResolvedChildConfig(ChildRunConfig(timeoutSeconds = options.timeoutSeconds ?: 0), AppSettings())
     },
     private val onCreated: (SubagentTask) -> Unit = {},
     private val onStatusChanged: (SubagentTask, SubagentSnapshot) -> Unit = { _, _ -> },
@@ -103,8 +103,8 @@ internal class SubagentPool(
         require(task.isNotBlank()) { "子任务不能为空" }
         require(task.length <= 8_000 && context.length <= 64_000) { "子任务说明过长，请只传递相关上下文" }
         val resolved = resolveConfig(if (timeoutMs != null) options.copy(
-            timeoutSeconds = ((timeoutMs.coerceIn(1L, 600_000L) + 999L) / 1000L).toInt()) else options)
-        val deadline = timeoutMs?.coerceIn(1L, 600_000L) ?: resolved.config.timeoutSeconds.coerceIn(1, 600) * 1000L
+            timeoutSeconds = ((timeoutMs.coerceIn(0L, 600_000L) + 999L) / 1000L).toInt()) else options)
+        val deadline = timeoutMs?.coerceIn(0L, 600_000L) ?: resolved.config.timeoutSeconds.coerceIn(0, 600) * 1000L
         val entry = synchronized(lock) {
             check(!closed && !sealed && supervisor.isActive) { "父任务已结束或正在收齐子任务结果" }
             check(entries.size < maximumTasks) { "本轮最多创建 $maximumTasks 个子任务" }
@@ -124,7 +124,8 @@ internal class SubagentPool(
             try {
                 slots.withPermit {
                     update(entry, SubagentStatus.RUNNING)
-                    val result = withTimeout(entry.task.timeoutMs) { runner(entry.task) }
+                    val result = if (entry.task.timeoutMs == 0L) runner(entry.task)
+                        else withTimeout(entry.task.timeoutMs) { runner(entry.task) }
                     val kept = if (result.length <= 64_000) result else result.take(64_000) + "\n[子任务结果超过64,000字符，后续内容未保留]"
                     update(entry, SubagentStatus.COMPLETED, kept)
                 }
@@ -273,7 +274,7 @@ private fun launchOptions(args: JsonObject): SubagentLaunchOptions {
     val rounds = args["max_rounds"]?.let { it.jsonPrimitive.intOrNull ?: error("max_rounds 必须为整数。") }
     require(rounds == null || rounds >= 0) { "max_rounds 不能为负数。" }
     val timeout = args["timeout_seconds"]?.let { it.jsonPrimitive.intOrNull ?: error("timeout_seconds 必须为整数。") }
-    require(timeout == null || timeout in 10..600) { "timeout_seconds 必须为10到600秒。" }
+    require(timeout == null || timeout == 0 || timeout in 10..600) { "timeout_seconds 必须为0（不限时）或10到600秒。" }
     return SubagentLaunchOptions(profileId = args.str("profile_id"), assistantId = args.str("assistant_id"),
         model = if (providerId != null && model != null) SubagentModelSelection(providerId, model) else null,
         approvalMode = mode, allowedTools = tools, maxToolRounds = rounds, timeoutSeconds = timeout)

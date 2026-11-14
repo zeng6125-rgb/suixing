@@ -39,7 +39,6 @@
         <exclude domain="file" path="http-dump-full" />
     </cloud-backup>
     <device-transfer>
-        <exclude domain="file" path="linux" />
         <include domain="file" path="datastore" />
         <include domain="file" path="chats" />
         <include domain="file" path="usage.json" />

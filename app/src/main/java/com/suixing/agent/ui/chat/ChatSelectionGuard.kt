@@ -108,7 +108,7 @@ internal fun rememberChatSelectionGuard(
     // **不能把 `pressGuardOn` 当 LaunchedEffect 的 key**：它是 `by pressGuardState` 的 State，
     // 出现在 key 位就是组合期订阅 ⇒ 每次长按武装/解除各**整屏重组一次**（~58 个子组合）。
     // 同文件上面 `pressed` / `revealBlocked` 已用 snapshotFlow 修掉，这里漏了。
-    LaunchedEffect(Unit) {
+    LaunchedEffect(listState, scroll, setSelectionActive) {
       snapshotFlow { pressGuardOn }.collectLatest { on ->
         if (!on) return@collectLatest
         // 按下就开始拦「把选中内容滚进视口」的请求（#14）：框架的这次滚动是为了露出选区，

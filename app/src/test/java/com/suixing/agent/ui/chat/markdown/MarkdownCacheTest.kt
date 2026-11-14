@@ -1,17 +1,10 @@
 package com.suixing.agent.ui.chat.markdown
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertSame
 import org.junit.Test
 
-/**
- * 增量解析与一次性解析**必须等价**。
- *
- * 为什么：流式回答是逐段变长的，`MarkdownCache` 只重解析"最后一个空行之后"的尾巴，
- * 前面的部分复用上次结果。这个优化一旦出错不会崩、不会报错 ——
- * 只会**渲染错**（比如把一段代码块劈成两个、或列表项粘连），而且只在特定文本形状下出现。
- *
- * 所以这里用"喂前缀"的方式模拟流式：每加一小段就比一次 `parseMarkdown` 的结果。
- */
+/** Every complete or interrupted document must match the full parser. */
 class MarkdownCacheTest {
 
     /** 逐字符喂进去，每一步都要与一次性解析等价。 */
@@ -20,7 +13,7 @@ class MarkdownCacheTest {
         for (end in 1..text.length) {
             val prefix = text.substring(0, end)
             assertEquals(
-                "前缀长度 $end 的增量结果必须等于一次性解析",
+                "前缀长度 $end 的缓存结果必须等于一次性解析",
                 parseMarkdown(prefix),
                 cache.blocksFor(prefix),
             )
@@ -43,8 +36,7 @@ class MarkdownCacheTest {
 
     @Test
     fun `a fenced block whose body has blank lines never splits`() {
-        // 关键形状：**围栏里的空行不是块的边界**。settledPrefix 用"围栏奇偶"判断，
-        // 这里逐字符喂，任何切错都会在某个前缀上暴露。
+        // A run may stop at any prefix, including before its closing fence.
         assertEquivalent(
             """
             前面一段。
@@ -58,6 +50,26 @@ class MarkdownCacheTest {
             后面一段。
             """.trimIndent(),
         )
+    }
+
+    @Test
+    fun `settling a multiline template literal preserves its single code block`() {
+        val text = "```js\nconst message = `first\n\nsecond`;\n```"
+        val live = LiveBlocks().blocksFor(text)
+
+        assertEquals(listOf(MdBlock.Code("js", "const message = `first\n\nsecond`;")), live)
+        assertEquals("settling must preserve the live code block", live, MarkdownCache().blocksFor(text))
+    }
+
+    @Test
+    fun `settling a four backtick fence preserves internal blank lines`() {
+        val text = "````kotlin\nval first = 1\n\nval second = 2\n````"
+        val expected = listOf(MdBlock.Code("kotlin", "val first = 1\n\nval second = 2"))
+
+        assertEquals(expected, parseMarkdown(text))
+        assertEquals(expected, LiveBlocks().blocksFor(text))
+        assertEquals("a fence's length must not turn its body into separate blocks",
+            expected, MarkdownCache().blocksFor(text))
     }
 
     @Test
@@ -78,18 +90,15 @@ class MarkdownCacheTest {
 
     @Test
     fun `text with no blank line at all stays one block`() {
-        // 没有任何空行 ⇒ settledPrefix 为空 ⇒ 每一步都整份重解析（也必须等价）。
         assertEquivalent("一二三四五六七八九十")
     }
 
     @Test
     fun `a leading blank line is handled like any other`() {
-        // 注释里记过的那条：开头就是空行时不能把它当成"没有已定稿部分"，
-        // 否则整段回答每次发布都重解析。
         val text = "\n\n第一段。\n\n第二段。"
         val cache = MarkdownCache()
-        assertEquals(parseMarkdown(text), cache.blocksFor(text))
-        // 再喂一次同样的文本：缓存命中路径也要等价。
-        assertEquals(parseMarkdown(text), cache.blocksFor(text))
+        val parsed = cache.blocksFor(text)
+        assertEquals(parseMarkdown(text), parsed)
+        assertSame(parsed, cache.blocksFor(text))
     }
 }

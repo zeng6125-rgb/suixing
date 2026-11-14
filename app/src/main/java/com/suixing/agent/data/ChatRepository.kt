@@ -59,7 +59,7 @@ class ChatRepository(
     private val lock = Mutex()
     private data class DraftMessages(
         val runId: String,
-        val messages: java.lang.ref.WeakReference<List<StoredMessage>>,
+        var messages: java.lang.ref.WeakReference<List<StoredMessage>>,
         val name: String,
     )
 
@@ -75,7 +75,9 @@ class ChatRepository(
         // （磁盘 IO + 耗电），表现出来就是「同一份草稿每次保存都换文件名」。
         // 也**不能**改成强引用常驻：16 个会话 × 工具输出会把 MB 级列表钉在内存里。
         // 正确的兜底是拿磁盘上那份**精确比对** —— 它才是恢复时真正会被读到的东西。
-        val saved = this.messages.get() ?: readSavedPayload(name) ?: return false
+        val saved = this.messages.get() ?: readSavedPayload(name)?.also {
+            this.messages = java.lang.ref.WeakReference(it)
+        } ?: return false
         return saved == messages
     }
 
@@ -724,8 +726,7 @@ private fun readTailText(file: java.io.File, maxChars: Int = TAIL_MAX_CHARS): St
         // **只改 meta**（不碰日志）：`_conversations` 里的 `messages` 是空列表
         // （`load()` 只读 meta，见 #30），走 `write()` 会把「0 条」当全量回写 ⇒
         // `ConversationLogShrunkException` 崩进程（真机实测：点「取消归档」闪退）。
-        val next = updateMeta(id = id, pinned = pinned) ?: return
-        _conversations.value = _conversations.value.map { if (it.id == id) next else it }
+        updateMeta(id = id, pinned = pinned)
     }
 
     /**
@@ -738,8 +739,7 @@ private fun readTailText(file: java.io.File, maxChars: Int = TAIL_MAX_CHARS): St
         // 同 [setPinned]：只改 meta。走 `write()` 会拿空 messages 回写 ⇒ 崩。
         val clean = title.trim()
         if (clean.isEmpty()) return
-        val next = updateMeta(id = id, title = clean) ?: return
-        _conversations.value = _conversations.value.map { if (it.id == id) next else it }
+        updateMeta(id = id, title = clean)
     }
 
     /**
@@ -749,8 +749,7 @@ private fun readTailText(file: java.io.File, maxChars: Int = TAIL_MAX_CHARS): St
     suspend fun setArchived(id: String, archived: Boolean) {
         // 同 [setPinned]：只改 meta。真机崩溃栈就是这条 ——
         // `setArchived → write → ChatStore.save` 抛「log has 83 messages, caller holds 0」。
-        val next = updateMeta(id = id, archived = archived) ?: return
-        _conversations.value = _conversations.value.map { if (it.id == id) next else it }
+        updateMeta(id = id, archived = archived)
     }
 
     suspend fun delete(id: String) = withContext(Dispatchers.IO) {

@@ -204,9 +204,9 @@ internal class PreparedMarkdownCache(
 private val preparedMarkdownCache = PreparedMarkdownCache()
 
 internal suspend fun prepareMarkdownTexts(texts: List<String>): Map<String, List<MdBlock>> {
-    val required = texts.filter { it.length >= SettledBlocks.MIN_CHARS }.distinct()
-    if (required.isEmpty()) return emptyMap()
     return withContext(Dispatchers.Default) {
+        val required = texts.filter { it.length >= SettledBlocks.MIN_CHARS }.distinct()
+        if (required.isEmpty()) return@withContext emptyMap()
         val context = currentCoroutineContext()
         val ready = LinkedHashMap<String, List<MdBlock>>()
         val cold = ArrayList<String>()

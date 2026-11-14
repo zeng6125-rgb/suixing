@@ -323,7 +323,7 @@ private suspend fun fetch(args: JsonObject): ToolResult {
         val fromMeta = RE_META_CHARSET.find(head)?.groupValues?.get(1)
         val name = declared ?: fromMeta ?: "utf-8"
         val charset = runCatching { Charset.forName(name) }.getOrDefault(Charsets.UTF_8)
-        val text = runCatching { String(bytes, charset) }.getOrDefault(String(bytes, Charsets.UTF_8))
+        val text = runCatching { String(bytes, charset) }.getOrElse { String(bytes, Charsets.UTF_8) }
         return if (truncated) {
             "$text\n… (response too large; only the first ${humanSize(MAX_FETCH_BYTES.toLong())} were read)"
         } else {

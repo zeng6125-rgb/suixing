@@ -25,6 +25,7 @@ internal class LinuxArchive(
         var longLink: String? = null
         var pax = emptyMap<String, String>()
         val header = ByteArray(512)
+        val block = ByteArray(64 * 1024)
         while (true) {
             readFully(input, header)
             if (header.all { it == 0.toByte() }) break
@@ -62,7 +63,6 @@ internal class LinuxArchive(
                         Files.createDirectories(path.parent)
                         Files.newOutputStream(path).use { out ->
                             var remaining = size
-                            val block = ByteArray(64 * 1024)
                             while (remaining > 0) {
                                 val count = input.read(block, 0, minOf(remaining, block.size.toLong()).toInt())
                                 check(count > 0) { "rootfs 归档不完整" }
@@ -75,19 +75,19 @@ internal class LinuxArchive(
                     }
                     '5' -> {
                         Files.createDirectories(path)
-                        skipFully(input, size)
+                        skipFully(input, size, block)
                     }
                     '1', '2' -> {
                         require(path != root && paths.add(path) && !Files.exists(path)) { "rootfs 链接与文件冲突" }
                         links += Link(path, rawLink, type == '1')
-                        skipFully(input, size)
+                        skipFully(input, size, block)
                     }
                     // Devices/FIFOs are supplied explicitly by the runtime, never created on the host.
-                    '3', '4', '6' -> skipFully(input, size)
+                    '3', '4', '6' -> skipFully(input, size, block)
                     else -> error("不支持的 rootfs tar 类型：" + type.code)
                 }
             }
-            skipFully(input, (512 - size % 512) % 512)
+            skipFully(input, (512 - size % 512) % 512, block)
             checkpoint(bytes)
         }
         // All regular writes finish before any symbolic link exists.
@@ -131,9 +131,8 @@ internal class LinuxArchive(
             at += count
         }
     }
-    private fun skipFully(input: InputStream, size: Long) {
+    private fun skipFully(input: InputStream, size: Long, buffer: ByteArray) {
         var left = size
-        val buffer = ByteArray(8192)
         while (left > 0) {
             val count = input.read(buffer, 0, minOf(left, buffer.size.toLong()).toInt())
             check(count > 0) { "rootfs 归档不完整" }

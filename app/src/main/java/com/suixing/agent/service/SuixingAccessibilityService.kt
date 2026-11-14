@@ -146,7 +146,13 @@ class SuixingAccessibilityService : AccessibilityService() {
             val stroke = GestureDescription.StrokeDescription(path, 0L, durationMs.coerceAtLeast(30L))
             val builder = GestureDescription.Builder().addStroke(stroke)
             // 副屏注入：-1 表示主屏，保持原路径不变；≥0 时按 displayId 投递（API 30+）。
-            if (displayId >= 0) builder.setDisplayId(displayId)
+            if (displayId >= 0) {
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+                    continuation.resume(false)
+                    return@suspendCancellableCoroutine
+                }
+                builder.setDisplayId(displayId)
+            }
             val description = builder.build()
             val callback = object : GestureResultCallback() {
                 override fun onCompleted(gestureDescription: GestureDescription?) {

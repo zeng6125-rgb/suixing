@@ -49,13 +49,15 @@ internal fun ChatRuntime.loadEarlier(turns: Int = environment.chats.openTurns(),
             // Install the page in the run first. A stream event may already hold a
             // pre-page snapshot; putSession carries these pages over that snapshot.
             var pagedRun: RunSession? = null
-            sessions.computeIfPresent(chatId) { _, live ->
-                val merged = prependEarlierPage(live.messages, shown.first(), older)
-                if (merged != null) {
-                    live.copy(messages = merged, loadedPrefix = older + live.loadedPrefix)
-                        .also { pagedRun = it }
-                } else {
-                    live
+            deltaBuffer.locked {
+                sessions.computeIfPresent(chatId) { _, live ->
+                    val merged = prependEarlierPage(live.messages, shown.first(), older)
+                    if (merged != null) {
+                        live.copy(messages = merged, loadedPrefix = older + live.loadedPrefix)
+                            .also { pagedRun = it }
+                    } else {
+                        live
+                    }
                 }
             }
             var mergedOut: List<StoredMessage>? = null
@@ -203,25 +205,32 @@ internal fun ChatRuntime.rememberOpened(chatId: String) {
 
 
 internal fun ChatRuntime.openConversation(conversation: Conversation) {
-    if (_state.value.conversationId == conversation.id) return
+    if (_state.value.conversationId == conversation.id) {
+        if (!_state.value.loading) {
+            navIntents.begin()
+            openingJob?.cancel()
+            openingJob = null
+        }
+        return
+    }
     // **一次用户点击就是一个新代次**：在途的 newConversation 会因此变成过期工作，
     // 它建出来的空壳只能自己清掉，不许覆盖这次选择（issue #67 P0-1）。
     val navToken = navIntents.begin()
-    leaveViewport()
     openingJob?.cancel()
     openingJob = null
-    // 与 newConversation 同理：切过去的会话在它自己第一条 stats 到达前，不能顶着上一个
-    // 会话的读数（圆环 / 三块占比都读这份）。
-    _liveStats.value = null
-    // 切走时把"什么都没发过的空会话"回收掉：判据在 shouldDiscardEmptyChat（无消息 /
-    // 无草稿 / 无 run 才删），有草稿的会保留 —— 用户打了字没发那是有内容的。
-    // 快照在切走前捕获（函数 KDoc 说明原因）。
-    val leaving = _state.value
-    viewModelScope.launch { discardIfUntouched(leaving.conversationId, leaving) }
-    // Anything the conversation on screen was still holding is published before the
-    // display moves: a buffered tail would otherwise land in the conversation being
-    // opened, or be lost with the one being left.
-    flushDeltas(_state.value.conversationId)
+    fun publish(opened: ChatUiState) {
+        flushDeltas(_state.value.conversationId)
+        leaveViewport()
+        _liveStats.value = null
+        val leaving = _state.value
+        viewModelScope.launch { discardIfUntouched(leaving.conversationId, leaving) }
+        _state.value = opened.copy(
+            error = lastErrors.remove(conversation.id) ?: opened.error,
+            pendingTurns = pendingTurnsOf(conversation.id),
+            todos = todosOf(conversation.id),
+        )
+        rememberOpened(conversation.id)
+    }
     // 后台会话按上面的规则只缓冲不发布 ⇒ 切回来时要先把它攒的 delta 冲进 `sessions`，
     // 否则刚建的界面缺最后一截（而且下一条事件又会把它叠在旧内容后面）。
     flushDeltas(conversation.id)
@@ -230,7 +239,7 @@ internal fun ChatRuntime.openConversation(conversation: Conversation) {
     val cached = cachedMessages(conversation.id)
     // Read-and-clear: a failure that landed while another conversation was on screen
     // is reported the moment its own chat comes back.
-    val failure = lastErrors.remove(conversation.id)
+    val failure = lastErrors[conversation.id]
     val openedState = if (live != null) {
         // Coming back to the conversation a run owns: pick up what it has streamed
         // since, rather than the older snapshot on disk.
@@ -267,8 +276,7 @@ internal fun ChatRuntime.openConversation(conversation: Conversation) {
         //
         // **正文要自己读**（#30）：传进来的 `conversation` 来自只读 meta 的列表，`messages`
         // 是空的。`openConversation` 不是挂起函数（它是点击回调），所以这里**先按 meta
-        // 建状态、带上 loading**，正文由下面那段协程补读 —— 补读期间显示骨架，
-        // 不会闪一个空白会话，也不会让 `save()` 把空列表当成"变短"。
+        // 建目标状态，正文由下面的协程补读。读完之前保留当前会话。
         conversation.toUiState(_state.value.assistantId, conversationApprovalChoices[conversation.id]).let { base ->
             // **命中 LRU 缓存就直接带正文**（#35）：原来缓存命中也要先 loading=true
             // 再补读，「切走再切回」会闪一次骨架。
@@ -297,10 +305,8 @@ internal fun ChatRuntime.openConversation(conversation: Conversation) {
     }
     // 排队输入属于会话。后台运行结束时只保留队列，重新打开必须把它放回屏幕；
     // 不能因为没有新 Running→terminal 事件就把用户输入永久留在不可见的表里。
-    _state.value = openedState.copy(
-        pendingTurns = pendingTurnsOf(conversation.id),
-        todos = todosOf(conversation.id),
-    )
+    val cold = needsColdRead(hasLiveSession = live != null, cachedIsPresent = cached != null)
+    if (!cold) publish(openedState)
     // **补读正文**（#30 + LRU 缓存）：上面只按 meta 建了状态，这里把最近 N 轮读进来。
     // 先查缓存：「切走再切回」在几个会话之间来回看是极常见的操作，不该每次都读盘。
     //
@@ -308,38 +314,35 @@ internal fun ChatRuntime.openConversation(conversation: Conversation) {
     // 只有**没命中缓存**才读盘（#35：命中时上面已经带正文建好状态了）。
     // 判据抽成纯函数（issue #67 P1-3）：有缓存或 live 会话时**绝不读盘** ——
     // 热 A→B→A 因此不会把同一份正文重新读一遍。
-    if (needsColdRead(hasLiveSession = live != null, cachedIsPresent = cached != null)) openingJob = viewModelScope.launch {
+    if (cold) openingJob = viewModelScope.launch {
         val tail = environment.chats.readTailWindow(conversation.id)
         val opened = tail?.let { (conversationTail, _, _) -> conversationTail }
             ?: environment.chats.readTail(conversation.id)
         // **先确认还是最新意图，再写任何共享状态**（issue #67 P1-3）：`windowStarts` 是
         // 下一次读取的起点，过期的 I/O 不能把它的值改掉。
         if (!navIntents.isCurrent(navToken)) {
+            return@launch
+        }
+        // A run may have started or finished during I/O. Its in-memory transcript wins.
+        if (sessions[conversation.id] != null || cachedMessages(conversation.id) != null) {
             openingJob = null
+            openConversation(conversation)
             return@launch
         }
         tail?.let { (_, startOffset, gen) -> windowStarts[conversation.id] = gen to startOffset }
-        // 三条判据收敛到纯函数（issue #67 P1-3），单测能逐条钉住。
-        val current = _state.value
-        if (opened != null && canApplyColdOpen(
-                targetChatId = conversation.id,
-                currentChatId = current.conversationId,
-                intentCurrent = navIntents.isCurrent(navToken),
-                currentIsEmpty = current.messages.isEmpty(),
-            )
-        ) {
+        if (opened != null) {
             cacheMessages(conversation.id, opened.messages, diskBacked = true)
-            _state.update {
-                it.copy(
+            publish(
+                openedState.copy(
                     messages = opened.messages,
                     checkpoints = opened.checkpoints,
                     messageCount = opened.messageCount,
                     turnCount = opened.turnCount,
                     loading = false,
-                )
-            }
-        } else if (_state.value.conversationId == conversation.id) {
-            _state.update { it.copy(loading = false) }
+                ),
+            )
+        } else {
+            publish(openedState.copy(loading = false))
         }
         // Recovery can write data, so only the read phase is superseded by another tap.
         openingJob = null
@@ -372,8 +375,6 @@ internal fun ChatRuntime.openConversation(conversation: Conversation) {
     } else if (cached != null) {
         resumePendingTurns(conversation.id)
     }
-    // Where the user is, for the next launch.
-    rememberOpened(conversation.id)
 }
 
 

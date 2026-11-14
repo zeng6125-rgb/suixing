@@ -491,7 +491,7 @@ fn catalog(bytes: &[u8]) -> Result<Vec<u8>, i32> {
             .chunks_exact(2)
             .map(|unit| u16::from_le_bytes([unit[0], unit[1]]))
             .collect();
-        if !seen.insert(key.clone()) {
+        if !seen.insert(raw) {
             return Err(STATUS_REQUEST_ERROR);
         }
         keys.push(key);

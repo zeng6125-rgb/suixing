@@ -322,7 +322,7 @@ internal class FxView(
      * rule on the panel — 「像一个框」 was the user's verdict on it, at every width it was tried at.
      * This is Operit's edge instead, the app the user pointed at: the light starts on the screen's
      * own edge at full strength and fades inward over [FX_HALO_WIDTH_FRACTION] of the short side,
-     * in [FX_HALO_BANDS] steps whose alpha follows `(1 - t)^1.55`. What the eye gets is a glow
+     * in [FX_HALO_BANDS] steps whose alpha follows `(1 - t)^FX_HALO_FALLOFF`. What the eye gets is a glow
      * coming off the panel rather than a border on it.
      *
      * Starting at the true edge is also what covers the status bar and the gesture bar: there is no

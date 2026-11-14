@@ -3,8 +3,12 @@ package com.suixing.agent.ui.chat
 import androidx.compose.runtime.Composable
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.remember
-import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.conflate
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.map
 
 internal data class LiveContent(val chatId: String, val runId: String, val parts: List<LivePart>)
 
@@ -25,6 +29,7 @@ internal class LivePartProjection(private val runId: String) {
     private var reasoningVisible = true
     private var rendered: List<Part> = emptyList()
 
+    @Synchronized
     fun project(parts: List<LivePart>, showReasoning: Boolean): List<Part> {
         if (parts === previous && showReasoning == reasoningVisible) return rendered
         val next = parts.mapIndexed { index, part ->
@@ -52,7 +57,28 @@ internal class LivePartProjection(private val runId: String) {
         previous = parts
         mapped = next
         reasoningVisible = showReasoning
-        if (!unchanged) rendered = next.filterNotNull()
+        if (!unchanged) rendered = buildList {
+            var index = 0
+            while (index < next.size) {
+                val start = index
+                val part = next[index++]
+                if (part !is Part.Tools) {
+                    if (part != null) add(part)
+                    continue
+                }
+                var callCount = part.calls.size
+                while (next.getOrNull(index) is Part.Tools) {
+                    callCount += (next[index++] as Part.Tools).calls.size
+                }
+                val old = rendered.getOrNull(size) as? Part.Tools
+                var callIndex = 0
+                add(if (old != null && old.calls.size == callCount &&
+                    (start until index).all { (next[it] as Part.Tools).calls.all { call -> old.calls[callIndex++] === call } }
+                ) old else if (index == start + 1) part else Part.Tools(buildList {
+                    for (position in start until index) addAll((next[position] as Part.Tools).calls)
+                }))
+            }
+        }
         return rendered
     }
 }
@@ -66,11 +92,23 @@ internal fun LiveMessageParts(
     showReasoning: Boolean,
     content: @Composable (List<Part>) -> Unit,
 ) {
-    val flow = remember(actions, chatId, runId) {
-        actions.liveContent.filter { it.chatId == chatId && it.runId == runId }
-    }
-    val live by flow.collectAsStateWithLifecycle(initialValue = actions.currentLiveContent())
     val projection = remember(chatId, runId) { LivePartProjection(runId) }
-    val source = if (live.chatId == chatId && live.runId == runId) live.parts else emptyList()
-    content(projection.project(source, showReasoning))
+    val flow = remember(actions, chatId, runId, showReasoning) {
+        actions.liveContent.map {
+            it to if (it.chatId == chatId && it.runId == runId) projection.project(it.parts, showReasoning)
+            else emptyList()
+        }
+            .flowOn(Dispatchers.Default)
+            .conflate()
+    }
+    key(chatId, runId) {
+        val prepared by flow.collectAsStateWithLifecycle<Pair<LiveContent, List<Part>>?>(initialValue = null)
+        val parts = prepared?.takeIf { it.first.chatId == chatId && it.first.runId == runId }?.second.orEmpty()
+        val visible = remember(IdentityKey(parts), showReasoning) {
+            if (showReasoning || parts.none { it is Part.Thinking }) parts
+            else parts.filterNot { it is Part.Thinking }
+        }
+        content(visible)
+        InitialViewportContentReady(prepared != null)
+    }
 }

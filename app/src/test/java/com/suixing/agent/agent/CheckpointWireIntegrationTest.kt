@@ -92,7 +92,7 @@ class CheckpointWireIntegrationTest {
         var sentModel = ""
         var request = emptyList<ChatMessage>()
         val client = mockk<LlmClient> {
-            coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
+            coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
                 sentModel = firstArg<AppSettings>().model
                 request = secondArg<List<ChatMessage>>().toList()
                 AssistantTurn("完成", emptyList(), "stop")
@@ -113,7 +113,7 @@ class CheckpointWireIntegrationTest {
         assertEquals(ChatRepository.SaveResult.Written, repository.save(stored))
         val requests = mutableListOf<Pair<String, List<ChatMessage>>>()
         val client = mockk<LlmClient> {
-            coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
+            coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
                 requests += firstArg<AppSettings>().model to secondArg<List<ChatMessage>>().toList()
                 AssistantTurn("完成", emptyList(), "stop")
             }

@@ -12,6 +12,8 @@ import com.suixing.agent.data.forAssistant
 import com.suixing.agent.llm.ChatMessage
 import com.suixing.agent.llm.LlmClient
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 /** 一次画像整理的结果。自动触发的那条路不读它；手动「重新总结」用它说话。 */
 sealed interface ProfileSummary {
@@ -55,7 +57,7 @@ class ProfileSummarizer(private val llm: LlmClient) {
         settings: AppSettings,
         messages: List<StoredMessage>,
     ): ProfileSummary {
-        val conversation = render(messages)
+        val conversation = withContext(Dispatchers.Default) { render(messages) }
         if (conversation.isBlank()) return ProfileSummary.Failed("还没有可以总结的对话")
         // 先读一遍盘：进程刚起来就点「重新总结」时 store 还是空的，把已有画像当成没有，
         // 会让模型从头写一份，把用户手写的内容覆盖掉。

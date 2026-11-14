@@ -1,9 +1,11 @@
 package com.suixing.agent.ui.drawer
 
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.pointer.HistoricalChange
 import androidx.compose.ui.input.pointer.PointerId
 import androidx.compose.ui.input.pointer.PointerInputChange
-import androidx.compose.ui.input.pointer.util.VelocityTracker
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -23,8 +25,63 @@ class DrawerPointerVelocityTest {
         assertTrue(sampleSwipe(localStep = 20f, pointerStep = 20f) > 800f)
     }
 
+    @Test fun `a surviving pointer does not inherit the distance between two fingers`() {
+        val tracker = DrawerPointerVelocity()
+        tracker.trackDrawerPointer(pointerChange(1L, 0L, 300f, 300f, previousPressed = false))
+        tracker.trackDrawerPointer(pointerChange(1L, 16L, 280f, 300f))
+        tracker.trackDrawerPointer(pointerChange(1L, 32L, 260f, 280f))
+        tracker.trackDrawerPointer(pointerChange(2L, 48L, 980f, 1_000f))
+        tracker.trackDrawerPointer(pointerChange(2L, 64L, 960f, 980f))
+
+        assertTrue("both fingers move left; changing fingers must not create an opening fling",
+            tracker.calculateVelocity().x < -800f)
+    }
+
+    @OptIn(ExperimentalComposeUiApi::class)
+    @Test fun `batched motion retains the final acceleration`() {
+        val tracker = DrawerPointerVelocity()
+        tracker.trackDrawerPointer(pointerChange(1L, 0L, 100f, 100f, previousPressed = false))
+        tracker.trackDrawerPointer(pointerChange(1L, 32L, 140f, 100f).copy(
+            historical = listOf(HistoricalChange(16L, Offset(100f, 0f))),
+        ))
+
+        assertTrue("the final 40px movement happens in 16ms, not across the whole batch",
+            tracker.calculateVelocity().x > 2_000f)
+    }
+
+    @Test fun `stationary horizontal moves discard the old fling on release`() {
+        val tracker = DrawerPointerVelocity()
+        tracker.trackDrawerPointer(pointerChange(1L, 0L, 100f, 100f, previousPressed = false))
+        tracker.trackDrawerPointer(pointerChange(1L, 16L, 120f, 100f))
+        for (time in listOf(32L, 48L, 64L)) {
+            tracker.trackDrawerPointer(pointerChange(1L, time, 120f, 120f))
+        }
+        tracker.trackDrawerPointer(pointerChange(1L, 80L, 120f, 120f, pressed = false))
+
+        assertEquals("64ms without horizontal movement must not retain an opening fling",
+            0f, tracker.calculateVelocity().x, 0.0001f)
+    }
+
+    private fun pointerChange(
+        id: Long,
+        time: Long,
+        x: Float,
+        previousX: Float,
+        previousPressed: Boolean = true,
+        pressed: Boolean = true,
+    ): PointerInputChange = PointerInputChange(
+        id = PointerId(id),
+        uptimeMillis = time,
+        position = Offset(x, 0f),
+        pressed = pressed,
+        previousUptimeMillis = (time - 16L).coerceAtLeast(0L),
+        previousPosition = Offset(previousX, 0f),
+        previousPressed = previousPressed,
+        isInitiallyConsumed = true,
+    )
+
     private fun sampleSwipe(localStep: Float, pointerStep: Float): Float {
-        val tracker = VelocityTracker()
+        val tracker = DrawerPointerVelocity()
         for (sample in 0..5) {
             val position = Offset(50f + localStep * sample, 0f)
             // Compose expresses both positions in the node's current coordinate system. The
@@ -39,21 +96,8 @@ class DrawerPointerVelocityTest {
                 previousPosition = previous,
                 previousPressed = sample != 0,
                 isInitiallyConsumed = true,
-            ).withDrawerOriginalPosition(Offset(350f + pointerStep * sample, 0f)))
+            ))
         }
         return tracker.calculateVelocity().x
     }
-}
-
-/**
- * Real input fills this internal field before HitPathTracker converts positions to node-local
- * coordinates. The public synthetic constructor leaves it at zero; Compose 1.12's native
- * velocity sampler reads it, so a fixture must provide it as the platform event processor does.
- */
-internal fun PointerInputChange.withDrawerOriginalPosition(position: Offset): PointerInputChange {
-    val field = PointerInputChange::class.java.getDeclaredField("originalEventPosition")
-        .apply { isAccessible = true }
-    val unbox = Offset::class.java.getDeclaredMethod("unbox-impl").apply { isAccessible = true }
-    field.setLong(this, unbox.invoke(position) as Long)
-    return this
 }

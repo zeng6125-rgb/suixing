@@ -4,7 +4,7 @@ import com.suixing.agent.data.ChatRepository
 import com.suixing.agent.data.ChatTotals
 import com.suixing.agent.data.StoredMessage
 import com.suixing.agent.data.Tps
-import com.suixing.agent.data.totalsOfMessage
+import com.suixing.agent.data.foldTotals
 
 /** Whole-conversation statistics from persisted metadata, independently of the loaded window. */
 data class SessionStats(
@@ -40,7 +40,7 @@ data class SessionStats(
          */
         fun of(messages: List<StoredMessage>, contextWindow: Int): SessionStats? =
             of(
-                messages.fold(ChatTotals.EMPTY) { acc, message -> acc + totalsOfMessage(message) },
+                foldTotals(messages),
                 contextWindow,
             )
 
@@ -72,7 +72,7 @@ data class SessionStats(
                     cached = cached.toLong(),
                     output = completion.toLong(),
                 ),
-                elapsedMs = totals.elapsedMs,
+                elapsedMs = totals.wallElapsedMs ?: totals.elapsedMs,
                 conversationId = conversationId,
             )
         }

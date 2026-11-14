@@ -10,7 +10,6 @@ import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.spring
-import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.VisibilityThreshold
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
@@ -115,14 +114,14 @@ internal val DRAWER_SHEET_WIDTH = 300
  *    同一个抽屉就有两套手感。
  *  ⇒ 现在**所有入口**都走这一条 spring，`Animatable.animateTo` 会自然吃进初速度。
  *
- * `dampingRatio = 1f`（临界阻尼、不回弹）、`stiffness = 700`：约 251ms 到 99%。
- * `visibilityThreshold = 0.003f` 时约 302ms 收尾；原 `0.001f` 要约 349ms。裁掉的尾段
+ * 临界阻尼、850 刚度（ω≈29.15/s）约 228ms 到 99%；所有入口继续保留初速度。
+ * `visibilityThreshold = 0.003f` 时约 274ms 收尾；原 `0.001f` 约 317ms。裁掉的尾段
  * 是 300dp 面板不足 1dp 的移动，此时主页遮罩与离屏层仍保持启用。
  */
 internal val DRAWER_SPEC: androidx.compose.animation.core.FiniteAnimationSpec<Float> =
     androidx.compose.animation.core.spring(
         dampingRatio = 1f,
-        stiffness = 700f,
+        stiffness = 850f,
         visibilityThreshold = 0.003f,
     )
 
@@ -139,8 +138,6 @@ private val DrawerRowPlacementSpec = spring<IntOffset>(
     stiffness = 400f,
     visibilityThreshold = IntOffset.VisibilityThreshold,
 )
-// Keep animateItem's modifier node mounted; null would remove/recreate it at motion boundaries.
-private val DrawerRowImmediatePlacementSpec = snap<IntOffset>()
 
 /** Settled-state changes should restart only this close effect, not the entire drawer. */
 @Composable
@@ -186,7 +183,6 @@ internal fun Drawer(
     onNavigate: (String) -> Unit,
     onAssistants: () -> Unit,
     runningAnimationActive: () -> Boolean = { true },
-    panelMoving: () -> Boolean = { false },
 ) {
     val unreadCompleted by Core.conversationReads.unread.collectAsStateWithLifecycle()
     // 左上角的标识跟着**当前助手**走：设置过头像就画头像，没头像仍画「JAgent」标。
@@ -456,7 +452,6 @@ internal fun Drawer(
             val activeIdNow = rememberUpdatedState(activeId)
             val runningIdNow = rememberUpdatedState(runningId)
             val runningAnimationNow = rememberUpdatedState(runningAnimationActive)
-            val panelMovingNow = rememberUpdatedState(panelMoving)
             val drawerRow: @Composable (Conversation, Modifier) -> Unit = remember(
                 context, exporter, exitSortMode,
             ) { { conversation, anim ->
@@ -610,7 +605,7 @@ drawerRow(
                         it,
                         Modifier.animateItem(
                             fadeInSpec = null,
-                            placementSpec = if (panelMovingNow.value()) DrawerRowImmediatePlacementSpec else DrawerRowPlacementSpec,
+                            placementSpec = DrawerRowPlacementSpec,
                             fadeOutSpec = null,
                         ),
                     ) }
@@ -628,7 +623,7 @@ drawerRow(
                         it,
                         Modifier.animateItem(
                             fadeInSpec = null,
-                            placementSpec = if (panelMovingNow.value()) DrawerRowImmediatePlacementSpec else DrawerRowPlacementSpec,
+                            placementSpec = DrawerRowPlacementSpec,
                             fadeOutSpec = null,
                         ),
                     ) }

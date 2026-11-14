@@ -1,9 +1,9 @@
 package com.suixing.agent.ui.chat
 
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.key
 import com.suixing.agent.ui.chat.markdown.prepareMarkdownTexts
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 /** A parser may finish after paging, editing, or switching chats; only a current projection publishes. */
 @Composable
@@ -23,28 +23,28 @@ internal fun rememberChatMarkdownPreparation(
                 current.messagesRevision == state.messagesRevision && current.activeRuns == state.activeRuns &&
                 current.liveRunId == state.liveRunId && current.runningHere == state.runningHere
         }
-        // **整批一次**（性能审计 改动6）：附近准备窗口变化时，把所有行合为一次
-        // `prepareMarkdownTexts` 调用，避免逐行切到 `Dispatchers.Default`；缓存命中行只遍历
-        // parts，不再创建文本列表。
-        val pending = mutableListOf<Pair<String, List<String>>>()
-        for (row in rows) {
-            val texts = markdownTextsToPrepare(row.parts, rowDocuments.peek(row.message.id)) ?: continue
-            pending += row.message.id to texts
+        val sources = rows.map { row -> Triple(row, rowDocuments.peek(row.message.id), rowDocuments.peekImageSegments(row.message.id)) }
+        val (pending, prepared) = withContext(Dispatchers.Default) {
+            val pending = sources.mapNotNull { (row, documents, cachedSegments) ->
+                val segments = imageSegmentsToPrepare(row.parts, cachedSegments)
+                val texts = markdownTextsToPrepare(row.parts,
+                    if (segments.keys == cachedSegments.keys) documents else null, segments)
+                if (texts == null) null
+                else Triple(row.message.id, texts.orEmpty(), segments)
+            }
+            pending to prepareMarkdownTexts(pending.flatMap { it.second })
         }
         if (pending.isNotEmpty()) {
-            // 短文本在 `prepareMarkdownTexts` 内部就被过滤掉（那里有 MIN_CHARS 短路），
-            // 所以这里整批传过去不会让短文本被解析。
-            val prepared = prepareMarkdownTexts(pending.flatMap { it.second })
             // A parser may finish after a branch/page/chat changed during suspension.
             // Its old document must not publish into, or evict, the current row cache.
             if (!sourceIsCurrent()) return
-            for ((id, texts) in pending) {
+            for ((id, texts, segments) in pending) {
                 // 每行只拿自己那几个文本的解析结果（与原来逐行调用时的内容一致）。
                 // Look up this row's texts directly instead of scanning the whole batch for every row.
                 val documents = buildMap {
                     for (text in texts) prepared[text]?.let { put(text, it) }
                 }
-                rowDocuments.publish(id, documents)
+                rowDocuments.publish(id, documents, segments)
             }
         }
         if (!sourceIsCurrent()) return

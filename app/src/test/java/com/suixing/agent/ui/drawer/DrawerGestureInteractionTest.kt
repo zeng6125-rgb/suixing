@@ -3,12 +3,10 @@ package com.suixing.agent.ui.drawer
 import androidx.compose.animation.core.tween
 import androidx.compose.material3.DrawerValue
 import androidx.compose.runtime.BroadcastFrameClock
-import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.snapshots.Snapshot
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.pointer.PointerId
 import androidx.compose.ui.input.pointer.PointerInputChange
-import androidx.compose.ui.input.pointer.util.VelocityTracker
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.SupervisorJob
@@ -33,6 +31,29 @@ private const val FRAME_NANOS = 16_000_000L
  * they never suspend inside Animatable or cancel a live pointer Job.
  */
 class DrawerGestureInteractionTest {
+
+    @Test
+    fun `a move updates visual progress before a cancelled animation releases its mutator`() = withHarness {
+        state.progress.snapTo(0.5f)
+        val session = state.beginGesture()
+        val accumulator = DrawerDragAccumulator()
+        val generation = accumulator.begin(progress = 0.5f, widthPx = 200f)
+        val blocker = scope.launch(start = CoroutineStart.UNDISPATCHED) {
+            state.progress.animateTo(0.9f, tween(durationMillis = 10_000))
+        }
+        val progress = accumulator.dragBy(generation, 40f)!!
+        val move = scope.launch(start = CoroutineStart.UNDISPATCHED) {
+            state.applyGestureFrame(session, progress)
+        }
+        try {
+            assertEquals("the new move must be visible without waiting for the old animation",
+                0.7f, state.visualProgress.value, 0.0001f)
+            assertTrue(state.isGestureActive(session))
+        } finally {
+            blocker.cancelAndJoin()
+            move.cancelAndJoin()
+        }
+    }
 
     @Test
     fun `a slow deliberate swipe settles away from either anchor without springing back`() = withHarness {
@@ -64,7 +85,7 @@ class DrawerGestureInteractionTest {
         val session = state.beginGesture()
         val accumulator = DrawerDragAccumulator()
         val generation = accumulator.begin(progress = 1f, widthPx = 1_000f)
-        val tracker = VelocityTracker()
+        val tracker = DrawerPointerVelocity()
         for (sample in 0..5) {
             val position = Offset(50f, 0f)
             tracker.trackDrawerPointer(PointerInputChange(
@@ -76,7 +97,7 @@ class DrawerGestureInteractionTest {
                 previousPosition = if (sample == 0) position else position + Offset(20f, 0f),
                 previousPressed = sample != 0,
                 isInitiallyConsumed = true,
-            ).withDrawerOriginalPosition(Offset(1_050f - 20f * sample, 0f)))
+            ))
             if (sample > 0) accumulator.dragBy(generation, -20f)
         }
         val release = accumulator.finish(generation)!!
@@ -183,7 +204,7 @@ class DrawerGestureInteractionTest {
             val firstGeneration = accumulator.begin(progress = 0.5f, widthPx = 200f)
             accumulator.dragBy(firstGeneration, 40f)
             state.applyGestureFrame(first, 0.7f)
-            assertEquals(0.7f, state.progress.value, 0.0001f)
+            assertEquals(0.7f, state.visualProgress.value, 0.0001f)
 
             // The host pointerInput key changes (route/width) and its Job is cancelled without
             // onDragCancel. Only the finally block in the production loop runs here.
@@ -198,7 +219,7 @@ class DrawerGestureInteractionTest {
 
             assertFalse(state.isGestureActive(first))
             assertNull(state.gestureSession)
-            assertEquals("pointer cancellation must not settle", 0.7f, state.progress.value, 0.0001f)
+            assertEquals("pointer cancellation must not settle", 0.7f, state.visualProgress.value, 0.0001f)
 
             // A newer drag owns the drawer. A late finalizer from the old pointer Job must not
             // clear it, and the old release must not move the panel.
@@ -217,36 +238,22 @@ class DrawerGestureInteractionTest {
             }
             staleSettle.join()
             pumpFrames(30)
-            assertEquals(0.7f, state.progress.value, 0.0001f)
+            assertEquals(0.7f, state.visualProgress.value, 0.0001f)
             assertFalse(state.isOpen)
         }
 
     @Test
-    fun `external close cancels a frame already queued inside Animatable's mutator`() =
+    fun `external close rejects late movement and release from the previous pointer`() =
         withHarness {
             state.snapTo(DrawerValue.Open)
             assertTrue(state.isOpen)
-            val accumulator = DrawerDragAccumulator()
             val session = state.beginGesture()
-            val generation = accumulator.begin(progress = 1f, widthPx = 300f)
-            accumulator.dragBy(generation, -90f)
             state.applyGestureFrame(session, 0.7f)
 
-            // Hold Animatable's mutator with an animation that only advances on test frames.
-            val blocker = scope.launch(start = CoroutineStart.UNDISPATCHED) {
-                state.progress.animateTo(0.9f, tween(durationMillis = 10_000))
-            }
-            // This frame has already passed the ownership check and is waiting for the mutator.
-            val staleFrame = scope.launch(start = CoroutineStart.UNDISPATCHED) {
-                state.applyGestureFrame(session, 0.2f)
-            }
-            yield()
-
-            // System Back / route close revokes the gesture epoch before its first animation
-            // frame. It must cancel that queued snap, not wait behind it and get reversed.
             val close = scope.launch(start = CoroutineStart.UNDISPATCHED) {
                 state.animateTo(DrawerValue.Closed, DRAWER_SPEC)
             }
+            state.applyGestureFrame(session, 0.2f)
             assertFalse(state.isGestureActive(session))
             assertNull(state.gestureSession)
             assertTrue("system Back keeps the shield through its close", state.homeShieldActive)
@@ -260,8 +267,6 @@ class DrawerGestureInteractionTest {
                 )
             }
             staleSettle.join()
-            blocker.cancelAndJoin()
-            staleFrame.join()
             pumpFrames(150)
 
             assertTrue("the external close must finish", close.isCompleted)
@@ -314,82 +319,47 @@ class DrawerGestureInteractionTest {
 
         assertTrue("the old release must not survive a newer gesture", queuedRelease.isCancelled)
         assertTrue(state.isGestureActive(second))
-        assertEquals("the new drag owns the panel", reverseProgress, state.progress.value, 0.0001f)
+        assertEquals("the new drag owns the panel", reverseProgress, state.visualProgress.value, 0.0001f)
         assertFalse(state.isOpen)
         assertTrue("an owned reverse drag leaves home shielded", state.homeShieldActive)
     }
 
     @Test
-    fun `a queued old frame cannot write after a newer drag begins`() = withHarness {
+    fun `an old pointer cannot write after a newer drag begins`() = withHarness {
         state.progress.snapTo(0.5f)
         val first = state.beginGesture()
-        val accumulator = DrawerDragAccumulator()
-        val generation = accumulator.begin(progress = 0.5f, widthPx = 200f)
-        accumulator.dragBy(generation, 20f)
-
-        // Same narrow window as the release case, but for a frame: it has already passed the
-        // active-session check and is waiting in Animatable's mutator when a new drag starts.
-        val blocker = scope.launch(start = CoroutineStart.UNDISPATCHED) {
-            state.progress.animateTo(0.9f, tween(durationMillis = 10_000))
-        }
-        val staleFrame = scope.launch(start = CoroutineStart.UNDISPATCHED) {
-            state.applyGestureFrame(first, 0.3f)
-        }
-        yield()
-
         val second = state.beginGesture()
-        yield()
-        blocker.cancelAndJoin()
-        staleFrame.join()
+        state.applyGestureFrame(first, 0.3f)
 
-        assertEquals("a stale snap must not write after new ownership", 0.5f, state.progress.value, 0.0001f)
+        assertEquals("a stale pointer must not write after new ownership",
+            0.5f, state.visualProgress.value, 0.0001f)
 
         state.applyGestureFrame(second, 0.8f)
-        assertEquals(0.8f, state.progress.value, 0.0001f)
+        assertEquals(0.8f, state.visualProgress.value, 0.0001f)
         assertTrue(state.isGestureActive(second))
     }
 
     @Test
-    fun `the production frame loop follows the newest session and stops on finish`() =
+    fun `pointer updates follow the newest session and stop on finish`() =
         withHarness {
             state.progress.snapTo(0.1f)
             val accumulator = DrawerDragAccumulator()
             val first = state.beginGesture()
             val firstGeneration = accumulator.begin(progress = 0.1f, widthPx = 200f)
-            accumulator.dragBy(firstGeneration, 20f)
-            var appliedFrames = 0
-            val pump = scope.launch {
-                runDrawerDragFrameLoop(
-                    sessions = snapshotFlow { state.gestureSession },
-                    dragAccumulator = accumulator,
-                    isActive = state::isGestureActive,
-                    applyFrame = { session, progress ->
-                        appliedFrames++
-                        state.applyGestureFrame(session, progress)
-                    },
-                    awaitFrame = {
-                        Snapshot.sendApplyNotifications()
-                        yield()
-                    },
-                )
-            }
-            repeat(12) { yield() }
-            assertEquals(0.2f, state.progress.value, 0.0001f)
-            assertEquals("a stationary pointer must not repeat Animatable mutations", 1, appliedFrames)
+            state.applyGestureFrame(first, accumulator.dragBy(firstGeneration, 20f)!!)
+            assertEquals(0.2f, state.visualProgress.value, 0.0001f)
 
             val second = state.beginGesture()
             val secondGeneration = accumulator.begin(progress = 0.2f, widthPx = 200f)
             val secondProgress = accumulator.dragBy(secondGeneration, 40f)!!
-            Snapshot.sendApplyNotifications()
-            repeat(12) { yield() }
-            assertEquals(secondProgress, state.progress.value, 0.0001f)
-            assertEquals(2, appliedFrames)
+            state.applyGestureFrame(first, 0.9f)
+            state.applyGestureFrame(second, secondProgress)
+            assertEquals(secondProgress, state.visualProgress.value, 0.0001f)
 
             assertTrue(state.finishGesture(second))
-            Snapshot.sendApplyNotifications()
-            repeat(8) { yield() }
+            state.applyGestureFrame(second, 0.9f)
+            assertEquals(secondProgress, state.visualProgress.value, 0.0001f)
             assertFalse(state.isGestureActive(second))
-            pump.cancelAndJoin()
         }
 
     private class Harness(

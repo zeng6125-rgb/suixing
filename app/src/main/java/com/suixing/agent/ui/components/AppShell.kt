@@ -34,9 +34,8 @@ const val NAV_SHIFT_DIVISOR = 12
 val LocalOpenSidebar = staticCompositionLocalOf<(() -> Unit)?> { null }
 
 /**
- * Whether a conversation switch is still closing the drawer. Preparation may run in parallel;
- * the restored viewport uses an in-place fade during the close, and a cold loading placeholder
- * waits until the drawer stops. The shell publishes the holder without reading its value.
+ * A drawer conversation switch stays active until both the close and target presentation finish.
+ * The target joins the page's existing motion. The shell publishes the holder without reading it.
  */
 val LocalDrawerBusy = compositionLocalOf<androidx.compose.runtime.State<Boolean>> {
     androidx.compose.runtime.mutableStateOf(false)

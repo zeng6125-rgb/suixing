@@ -115,6 +115,9 @@ class SchedulerService : Service() {
                     when (event) {
                         is AgentEvent.AssistantMessage -> emitted += event.message
                         is AgentEvent.ToolMessage -> emitted += event.message
+                        is AgentEvent.RunDuration -> if (emitted.isNotEmpty()) {
+                            emitted[emitted.lastIndex] = emitted.last().copy(runElapsedMs = event.elapsedMs)
+                        }
                         else -> Unit
                     }
                 },

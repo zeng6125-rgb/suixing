@@ -23,14 +23,15 @@ internal data class NativeFileEditResult(
     val changed: String?,
     val tooLarge: Boolean,
     val revision: String?,
+    val activityCounts: Pair<Int, Int>? = null,
 )
 
 /** Pure UTF-16 literal matching; file access, revision checks and commits stay in FileTools. */
 internal object NativeFileEdits {
-    private const val MAGIC = 0x31455853
+    private const val MAGIC = 0x32455853
     private const val MAX_UNITS = 4 * 1024 * 1024
     private const val SUMMARY_LIMIT = 8
-    private const val HEADER_BYTES = 24
+    private const val HEADER_BYTES = 32
     private const val SUMMARY_ONLY = 0
     private const val CHANGED = 1
     private const val TOO_LARGE = 2
@@ -95,6 +96,11 @@ internal object NativeFileEdits {
         val summaryCount = integer()
         val changedUnits = integer()
         val hash = integer()
+        val added = integer()
+        val removed = integer()
+        valid((added == -1 && removed == -1) ||
+            (kind == CHANGED && added in 0..4_000 && removed in 0..4_000))
+        val activityCounts = if (added == -1) null else added to removed
         valid(kind in SUMMARY_ONLY..TOO_LARGE && count in 0..(textUnits / oldUnits))
         valid(summaryCount == minOf(SUMMARY_LIMIT, count) && changedUnits in 0..maxUnits)
         valid(input.remaining().toLong() == summaryCount * 4L + changedUnits * 2L)
@@ -119,6 +125,7 @@ internal object NativeFileEdits {
         context.ensureActive()
         return NativeFileEditResult(
             count, lines, changed, false, "${changedUnits.toString(16)}-${hash.toUInt().toString(16)}",
+            activityCounts,
         )
     }
 }

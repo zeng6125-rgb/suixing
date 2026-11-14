@@ -1,11 +1,29 @@
 package com.suixing.agent.ui.chat
 
 import com.suixing.agent.ui.chat.markdown.SettledBlocks
+import com.suixing.agent.ui.chat.markdown.MessageSegment
+import com.suixing.agent.ui.chat.markdown.prepareMarkdownTexts
+import com.suixing.agent.ui.chat.markdown.parseMarkdown
+import com.suixing.agent.ui.chat.markdown.splitImageSegments
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ViewportPreparationTest {
+    @Test fun `image prose preparation uses the exact text segments rendered around the image`() = runBlocking {
+        val before = "viewport image before\n\n".repeat(100)
+        val after = "viewport image after\n\n".repeat(100)
+        val text = before + "![preview](https://example.com/image.png)" + after
+        val rendered = splitImageSegments(text).filterIsInstance<MessageSegment.Text>().map { it.text }
+        val requested = markdownTextsToPrepare(listOf(Part.Text(text)), null)!!
+        val prepared = prepareMarkdownTexts(requested)
+        assertEquals("full-source keys cannot satisfy the two rendered MarkdownText children", rendered.toSet(), prepared.keys)
+        for (segment in rendered) assertEquals(parseMarkdown(segment), prepared[segment])
+        assertEquals(null, markdownTextsToPrepare(listOf(Part.Text(text)), prepared))
+        assertEquals(rendered, markdownTextsToPrepare(listOf(Part.Text(text)), mapOf(text to Unit)))
+    }
+
     @Test fun `top anchored windows only read nearby chronological rows`() {
         val rows = CountingRows(1_000_000)
         assertEquals((499_995..500_005).toList(), nearbyViewportRows(rows, 1, 500_000, 500_002,

@@ -21,6 +21,7 @@ class ChatScroll internal constructor(
     var stickToBottom by mutableStateOf(initialFollowing)
     internal var allowBottomResume by mutableStateOf(true)
     internal var restoring by mutableStateOf(true)
+    internal var nestedScrolling by mutableStateOf<() -> Boolean>({ false })
     /** Event identity for late selection cleanup; not observed by composition. */
     internal var latestRequestGeneration = 0L
     val atBottom by derivedStateOf { !listState.canScrollForward }
@@ -47,14 +48,14 @@ fun rememberChatScroll(
     val scroll = remember(listState) { ChatScroll(listState, conversationId.toString(), initialFollowing) }
     LaunchedEffect(listState) {
         snapshotFlow {
-            scroll.allowBottomResume && !listState.canScrollForward && !listState.isScrollInProgress &&
+            scroll.allowBottomResume && !listState.canScrollForward && !listState.isScrollInProgress && !scroll.nestedScrolling() &&
                 !scroll.restoring && !pressedNow() && !guardNow()
         }.collectLatest { reachedBottom ->
             if (!reachedBottom) return@collectLatest
             val index = listState.firstVisibleItemIndex
             // Keep the existing overscroll/selection settling interval.
             delay(420)
-            if (scroll.allowBottomResume && !listState.canScrollForward && !listState.isScrollInProgress && !scroll.restoring &&
+            if (scroll.allowBottomResume && !listState.canScrollForward && !listState.isScrollInProgress && !scroll.nestedScrolling() && !scroll.restoring &&
                 !pressedNow() && !guardNow() && listState.firstVisibleItemIndex == index) {
                 scroll.stickToBottom = true
                 trace("stick=true reason=reached-bottom")

@@ -78,6 +78,8 @@ data class StoredMessage(
     val timestamp: Long = System.currentTimeMillis(),
     /** Structured file metadata; absent from older transcripts and never inferred from prose. */
     val fileActivities: List<FileActivity> = emptyList(),
+    /** Complete task duration, including tools and child waits, recorded on its final message. */
+    val runElapsedMs: Long? = null,
 ) {
     /** 单值与列表的聚合读侧：旧盘数据 / 工具截图（单值）与多附件（列表）都不丢。 */
     val allImages: List<String> get() = imagesBase64.ifEmpty { listOfNotNull(imageBase64) }

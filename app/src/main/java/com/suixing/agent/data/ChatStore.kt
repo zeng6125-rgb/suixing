@@ -35,7 +35,7 @@ internal data class ChatTotals(
     val promptTokens: Int = 0,
     val completionTokens: Int = 0,
     val cachedTokens: Int = 0,
-    /** Σ整轮墙钟（含 TTFT 等待）。 */
+    /** Σ模型请求用时（含 TTFT），用于 decode 速率。 */
     val elapsedMs: Long = 0,
     /** Σ首字延迟。`elapsed - firstToken` 就是各轮 decode 段之和。 */
     val firstTokenMs: Long = 0,
@@ -47,6 +47,10 @@ internal data class ChatTotals(
     val trailingRunId: String? = null,
     val trailingRunPromptTokens: Long = 0,
     val trailingRunCompletionTokens: Long = 0,
+    /** Complete task time; older metadata falls back to request time. */
+    val wallElapsedMs: Long? = null,
+    val trailingRunRequestMs: Long = 0,
+    val trailingRunWallMs: Long? = null,
 ) {
     operator fun plus(other: ChatTotals): ChatTotals = ChatTotals(
         turns = turns + other.turns,
@@ -72,7 +76,7 @@ internal data class ChatTotals(
  * `plus` 做不到，只能在这种有序折叠里顺路算。
  */
 internal fun foldTotals(messages: List<StoredMessage>, initial: ChatTotals = ChatTotals.EMPTY): ChatTotals {
-    NativeUsageAggregation.foldTotals(messages, initial)?.let { return it }
+    NativeUsageAggregation.foldTotals(messages, initial)?.let { return foldWallElapsed(messages, initial, it) }
     var acc = initial
     var runId = initial.trailingRunId.orEmpty()
     var runPrompt = initial.trailingRunPromptTokens
@@ -97,9 +101,29 @@ internal fun foldTotals(messages: List<StoredMessage>, initial: ChatTotals = Cha
         runCompletion += message.completionTokens.toLong()
     }
     settle()
-    return acc.copy(longestTurnTokens = maxOf(longest, acc.longestTurnTokens),
+    return foldWallElapsed(messages, initial, acc.copy(longestTurnTokens = maxOf(longest, acc.longestTurnTokens),
         trailingRunId = runId, trailingRunPromptTokens = runPrompt,
-        trailingRunCompletionTokens = runCompletion)
+        trailingRunCompletionTokens = runCompletion))
+}
+
+private fun foldWallElapsed(messages: List<StoredMessage>, initial: ChatTotals, totals: ChatTotals): ChatTotals {
+    var elapsed = initial.wallElapsedMs ?: initial.elapsedMs
+    var runId = initial.trailingRunId.orEmpty()
+    var requests = initial.trailingRunRequestMs
+    var complete = initial.trailingRunWallMs
+    for (message in messages) {
+        val id = message.runId.orEmpty()
+        if (id != runId || isTurnStart(message)) {
+            runId = id
+            requests = 0L
+            complete = null
+        }
+        val previous = complete ?: requests
+        requests += message.elapsedMs
+        message.runElapsedMs?.let { complete = it }
+        elapsed += (complete ?: requests) - previous
+    }
+    return totals.copy(wallElapsedMs = elapsed, trailingRunRequestMs = requests, trailingRunWallMs = complete)
 }
 
 /** 一条消息贡献的统计量。 */

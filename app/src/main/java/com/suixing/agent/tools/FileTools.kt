@@ -339,7 +339,7 @@ class FileTools(private val context: Context) : ToolGroup() {
                     appendLine("（共替换 ${oldLines.size} 行 → ${newLines.size} 行）")
                 }
             }.trim()
-            val counts = activityLineCounts(text, changed)
+            val counts = if (native != null) native.activityCounts else activityLineCounts(text, changed)
             val firstLine = native?.lines?.first() ?: lineOf(text, hits.first())
             val revision = native?.revision ?: revisionOf(changed)
             ToolResult(true,

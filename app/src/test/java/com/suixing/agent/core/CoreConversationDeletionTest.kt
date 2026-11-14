@@ -79,7 +79,7 @@ class CoreConversationDeletionTest {
             onViewed = { notifications.trySend("cancel:$it") },
         )
         val client = mockk<LlmClient> {
-            coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
+            coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
                 started.complete(Unit)
                 release.await()
                 AssistantTurn("done", emptyList(), "stop")

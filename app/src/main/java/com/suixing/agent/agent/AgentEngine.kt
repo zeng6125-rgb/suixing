@@ -419,6 +419,7 @@ class AgentEngine(
         val state: StateFlow<RunState> get() = runtime.state
         val startedAt: Long get() = runtime.startedAt
         val liveLine: String get() = runtime.liveLine
+        internal fun liveAnswerSnapshot(): LiveAnswerSnapshot? = runtime.liveAnswerSnapshot()
         internal val terminalCaller get() = runtime.terminalCaller
         internal val steerMode: Int get() = runtime.steerMode
         internal var job: Job?

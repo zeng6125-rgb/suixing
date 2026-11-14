@@ -27,15 +27,20 @@ import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.JsonObject
+import okhttp3.Call
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertSame
 import org.junit.Test
 import java.io.IOException
 import java.util.concurrent.ConcurrentHashMap
@@ -146,6 +151,217 @@ class ParallelRunTest {
         AppSettings().copy(approvalMode = ApprovalMode.AUTO, model = model)
 
     @Test
+    fun `console answer snapshot keeps full paragraphs through tools and the next thinking round`() = runBlocking {
+        withTimeout(10_000) {
+            val firstText = CompletableDeferred<Unit>()
+            val finishFirst = CompletableDeferred<Unit>()
+            val toolStarted = CompletableDeferred<Unit>()
+            val finishTool = CompletableDeferred<Unit>()
+            val thinking = CompletableDeferred<Unit>()
+            val finishThinking = CompletableDeferred<Unit>()
+            val thinkingRestarted = CompletableDeferred<Unit>()
+            val finishThinkingRetry = CompletableDeferred<Unit>()
+            val nextText = CompletableDeferred<Unit>()
+            val finish = CompletableDeferred<Unit>()
+            val retryCleared = CompletableDeferred<Unit>()
+            val finishRetry = CompletableDeferred<Unit>()
+            val firstAnswer = "First paragraph\n\n" + "full answer ".repeat(20) + "\nLast line"
+            val nextAnswer = firstAnswer.replace("First paragraph", "Final paragraph")
+            val tool = object : Tool {
+                override val spec = ToolSpec("echo", "echoes", JsonObject(emptyMap()))
+                override val tier = TIER_NONE
+                override suspend fun run(args: JsonObject): ToolResult {
+                    toolStarted.complete(Unit)
+                    finishTool.await()
+                    return ToolResult.success("ok")
+                }
+            }
+            var rounds = 0
+            val client = mockk<LlmClient> {
+                coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
+                    val delta = arg<(String) -> Unit>(3)
+                    if (++rounds == 1) {
+                        delta(firstAnswer)
+                        firstText.complete(Unit)
+                        finishFirst.await()
+                        AssistantTurn(firstAnswer, listOf(ToolCallRequest("echo-call", "echo", "{}")), "tool_calls")
+                    } else {
+                        arg<(String) -> Unit>(4)("reasoning\nstill thinking")
+                        thinking.complete(Unit)
+                        finishThinking.await()
+                        arg<() -> Unit>(7)()
+                        thinkingRestarted.complete(Unit)
+                        finishThinkingRetry.await()
+                        delta(nextAnswer)
+                        nextText.complete(Unit)
+                        finish.await()
+                        arg<() -> Unit>(7)()
+                        retryCleared.complete(Unit)
+                        finishRetry.await()
+                        delta(nextAnswer)
+                        AssistantTurn(nextAnswer, emptyList(), "stop")
+                    }
+                }
+            }
+            val deps = quietDeps()
+            val engine = AgentEngine(llm = client)
+            val committed = mutableListOf<StoredMessage>()
+            val running = async(Dispatchers.Default) {
+                engine.startRun("console", "Console", emptyList(),
+                    autoSettings().copy(subagentsEnabled = false, autoProfile = false), registryWith(tool),
+                    deps.capabilities, deps.skills, deps.memory, deps.profile, ApprovalGate(),
+                    { if (it is AgentEvent.AssistantMessage) committed += it.message })
+            }
+            try {
+                firstText.await()
+                val handle = engine.runsFlow.value.getValue("console")
+                val snapshot = requireNotNull(handle.liveAnswerSnapshot())
+                assertEquals(firstAnswer, snapshot.text)
+                assertSame("unchanged text should reuse its snapshot", snapshot, handle.liveAnswerSnapshot())
+                finishFirst.complete(Unit)
+                toolStarted.await()
+                assertTrue(handle.liveLine.startsWith("🔧 echo"))
+                assertEquals(1, handle.liveLine.lines().size)
+                assertEquals(snapshot.messageId, committed.single().id)
+                assertSame(snapshot, handle.liveAnswerSnapshot())
+                finishTool.complete(Unit)
+                thinking.await()
+                assertEquals("思考中…", handle.liveLine)
+                assertSame(snapshot, handle.liveAnswerSnapshot())
+                finishThinking.complete(Unit)
+                thinkingRestarted.await()
+                assertSame("a thinking-only retry must keep the previous answer", snapshot, handle.liveAnswerSnapshot())
+                finishThinkingRetry.complete(Unit)
+                nextText.await()
+                val nextSnapshot = requireNotNull(handle.liveAnswerSnapshot())
+                assertEquals(nextAnswer, nextSnapshot.text)
+                assertNotEquals(snapshot.messageId, nextSnapshot.messageId)
+                finish.complete(Unit)
+                retryCleared.await()
+                assertNull("a restarted round discards its abandoned answer", handle.liveAnswerSnapshot())
+                assertEquals("", handle.liveLine)
+                finishRetry.complete(Unit)
+                val saved = running.await().last()
+                assertEquals(nextAnswer, saved.text)
+                assertNotEquals(nextSnapshot.messageId, saved.id)
+                assertEquals(listOf(firstAnswer, nextAnswer), committed.map { it.text })
+            } finally {
+                finishFirst.complete(Unit)
+                finishTool.complete(Unit)
+                finishThinking.complete(Unit)
+                finishThinkingRetry.complete(Unit)
+                finish.complete(Unit)
+                finishRetry.complete(Unit)
+                running.cancelAndJoin()
+            }
+        }
+    }
+
+    @Test
+    fun `an output-free immediate steer retains the previous console answer`() = runBlocking {
+        withTimeout(10_000) {
+            val firstText = CompletableDeferred<Unit>()
+            val finishFirst = CompletableDeferred<Unit>()
+            val waitingForReply = CompletableDeferred<Unit>()
+            val cut = CompletableDeferred<Unit>()
+            val nextRound = CompletableDeferred<Unit>()
+            val finish = CompletableDeferred<Unit>()
+            val call = mockk<Call> {
+                every { cancel() } answers { cut.complete(Unit) }
+            }
+            var rounds = 0
+            val client = mockk<LlmClient> {
+                coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
+                    val delta = arg<(String) -> Unit>(3)
+                    if (++rounds == 1) {
+                        delta("Previous completed answer")
+                        firstText.complete(Unit)
+                        finishFirst.await()
+                        return@coAnswers AssistantTurn(
+                            "Previous completed answer",
+                            listOf(ToolCallRequest("echo-call", "echo", "{}")),
+                            "tool_calls",
+                        )
+                    }
+                    if (rounds == 2) {
+                        arg<((Call) -> Unit)?>(5)?.invoke(call)
+                        waitingForReply.complete(Unit)
+                        cut.await()
+                        throw IOException("Canceled")
+                    }
+                    arg<(String) -> Unit>(4)("Reading the new instruction")
+                    nextRound.complete(Unit)
+                    finish.await()
+                    delta("Answer to the new instruction")
+                    AssistantTurn("Answer to the new instruction", emptyList(), "stop")
+                }
+            }
+            val deps = quietDeps()
+            val engine = AgentEngine(llm = client)
+            val committed = mutableListOf<StoredMessage>()
+            val running = async(Dispatchers.Default) {
+                engine.startRun("console", "Console", emptyList(),
+                    autoSettings().copy(subagentsEnabled = false, autoProfile = false), registryWith(echoTool()),
+                    deps.capabilities, deps.skills, deps.memory, deps.profile, ApprovalGate(),
+                    { if (it is AgentEvent.AssistantMessage) committed += it.message })
+            }
+            try {
+                firstText.await()
+                val handle = engine.runsFlow.value.getValue("console")
+                val snapshot = requireNotNull(handle.liveAnswerSnapshot())
+                assertEquals("Previous completed answer", snapshot.text)
+                finishFirst.complete(Unit)
+                waitingForReply.await()
+                assertEquals(snapshot.messageId, committed.single().id)
+                assertTrue(engine.steer("console", "steer", "Change the instruction", immediate = true))
+                nextRound.await()
+                assertSame("a new round without an answer must not clear the previous one", snapshot, handle.liveAnswerSnapshot())
+                finish.complete(Unit)
+                running.await()
+                assertEquals(listOf("Previous completed answer", "Answer to the new instruction"), committed.map { it.text })
+            } finally {
+                finishFirst.complete(Unit)
+                cut.complete(Unit)
+                finish.complete(Unit)
+                running.cancelAndJoin()
+            }
+        }
+    }
+
+    @Test
+    fun `a stopped answer keeps its console message identity when saved`() = runBlocking {
+        withTimeout(10_000) {
+            val textSeen = CompletableDeferred<Unit>()
+            val client = mockk<LlmClient> {
+                coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
+                    arg<(String) -> Unit>(3)("Partial answer\nStill readable")
+                    textSeen.complete(Unit)
+                    CompletableDeferred<AssistantTurn>().await()
+                }
+            }
+            val deps = quietDeps()
+            val engine = AgentEngine(llm = client)
+            val committed = mutableListOf<StoredMessage>()
+            val running = async(Dispatchers.Default) {
+                engine.startRun("console", "Console", emptyList(),
+                    autoSettings().copy(subagentsEnabled = false, autoProfile = false), registryWith(echoTool()),
+                    deps.capabilities, deps.skills, deps.memory, deps.profile, ApprovalGate(),
+                    { if (it is AgentEvent.AssistantMessage) committed += it.message })
+            }
+            try {
+                textSeen.await()
+                val snapshot = requireNotNull(engine.runsFlow.value.getValue("console").liveAnswerSnapshot())
+                assertTrue(engine.cancel("console"))
+                running.await()
+                assertEquals("Partial answer\nStill readable", committed.single().text)
+                assertEquals(snapshot.messageId, committed.single().id)
+            } finally {
+                running.cancelAndJoin()
+            }
+        }
+    }
+
+    @Test
     fun `conversation approval keeps waiting denied and automatic tool runs isolated`() = runBlocking {
         withTimeout(10_000) {
             val global = autoSettings().copy(subagentsEnabled = false, autoProfile = false, autoCompress = false)
@@ -160,7 +376,7 @@ class ParallelRunTest {
                 }
             }
             val client = mockk<LlmClient> {
-                coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any()) } returns
+                coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any(), any()) } returns
                     AssistantTurn("done", emptyList(), "stop")
             }
             val engine = AgentEngine(llm = client)
@@ -206,7 +422,7 @@ class ParallelRunTest {
         val holds = ConcurrentHashMap<String, CompletableDeferred<Unit>>()
         private val cuts = ConcurrentHashMap<String, Boolean>()
         val client: LlmClient = mockk {
-            coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
+            coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
                 val model = firstArg<AppSettings>().model
                 // The hold exists before the run is announced, so a test that sees
                 // `started` can always find the matching hold.

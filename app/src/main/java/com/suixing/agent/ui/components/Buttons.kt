@@ -380,7 +380,7 @@ fun PressPill(
     contentColor: Color = LocalContentColor.current,
     // 6dp → 8dp：与它两侧的两枚 [FlatPainterButton] 一起抬（用户要求顶栏那三个元素的阴影再深
     // 一点点，且彼此一致）。全站只有聊天页标题这一处用它，所以改默认值不会波及别处。
-    elevation: Dp = 8.dp,
+    elevation: Dp = ChatTitleShadowElevationDp.dp,
     content: @Composable RowScope.() -> Unit,
 ) {
     // 常量形状（原来每次重组都 new 一个，全站胶囊共用）。
@@ -388,8 +388,8 @@ fun PressPill(
     val shadowed = modifier.shadow(
         elevation = elevation,
         shape = shape,
-        ambientColor = Color.Black.copy(alpha = 0.12f),
-        spotColor = Color.Black.copy(alpha = 0.12f),
+        ambientColor = ChatTitleShadowColor,
+        spotColor = ChatTitleShadowColor,
     )
     Surface(
         // 胶囊形状要跟着涟漪走：原来 clickable 挂在 Surface 外面、没有 clip，涟漪是一个**方角矩形**

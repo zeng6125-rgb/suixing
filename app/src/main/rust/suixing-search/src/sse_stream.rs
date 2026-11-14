@@ -291,13 +291,20 @@ impl State {
         if terminated && self.line.last() == Some(&b'\r') {
             self.line.pop();
         }
-        let bytes = std::mem::take(&mut self.line);
+        let mut bytes = std::mem::take(&mut self.line);
         // Non-data fields are ignored by the existing reader even when they contain invalid UTF-8.
         if !bytes.is_empty() && !bytes.starts_with(b"data:") {
+            bytes.clear();
+            self.line = bytes;
             return Ok(None);
         }
         match str::from_utf8(&bytes) {
-            Ok(line) => self.accept_line(line, cancelled),
+            Ok(line) => {
+                let event = self.accept_line(line, cancelled);
+                bytes.clear();
+                self.line = bytes;
+                event
+            }
             Err(_) => {
                 self.normalizing = true;
                 Ok(Some(Event {

@@ -10,22 +10,29 @@ sealed interface AgentEvent {
     /** The model's thinking, when the endpoint streams it apart from the answer. */
     data class ReasoningDelta(val text: String) : AgentEvent
 
-    data class AssistantMessage(val message: StoredMessage) : AgentEvent
+    data class AssistantMessage(val message: StoredMessage, val toolStreamIndices: List<Int?> = emptyList()) : AgentEvent
 
-    data class ToolStarted(val name: String, val args: String) : AgentEvent
+    data class ToolPrepared(val streamIndex: Int, val name: String) : AgentEvent
 
-    data class ToolMessage(val message: StoredMessage) : AgentEvent
+    data class ToolStarted(val name: String, val args: String, val callId: String? = null, val streamIndex: Int? = null) : AgentEvent
+
+    data class ToolMessage(val message: StoredMessage, val streamIndex: Int? = null) : AgentEvent
 
     data class ToolFinished(
         val name: String,
         val ok: Boolean,
         val output: String,
         val todoSnapshot: List<TodoItem>? = null,
+        val callId: String? = null,
+        val streamIndex: Int? = null,
     ) : AgentEvent
 
     data class Failed(val message: String) : AgentEvent
 
     data class Finished(val text: String) : AgentEvent
+
+    /** Recorded after the final transcript message and before the terminal state. */
+    data class RunDuration(val elapsedMs: Long) : AgentEvent
 
     /**
      * One line the user slipped in has just been written into the prompt, in this order.

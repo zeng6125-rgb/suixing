@@ -123,7 +123,7 @@ class AgentWorkflowVerificationTest {
         val calls = listOf(ToolCallRequest("image-call", "echo", "{\"image\":true}"),
             ToolCallRequest("text-call", "echo", "{}"))
         val client = mockk<LlmClient> {
-            coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
+            coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
                 requests += secondArg<List<ChatMessage>>().toList()
                 if (requests.size == 1) AssistantTurn("", calls, "tool_calls")
                 else AssistantTurn("完成", emptyList(), "stop")
@@ -158,7 +158,7 @@ class AgentWorkflowVerificationTest {
         val requests = mutableListOf<List<ChatMessage>>()
         val calls = (1..3).map { ToolCallRequest("call-$it", "echo", "{}") }
         val client = mockk<LlmClient> {
-            coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
+            coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
                 requests += secondArg<List<ChatMessage>>().toList()
                 if (requests.size == 1) AssistantTurn("", calls, "tool_calls")
                 else AssistantTurn("完成", emptyList(), "stop")
@@ -200,7 +200,7 @@ class AgentWorkflowVerificationTest {
         val requests = mutableListOf<List<ChatMessage>>()
         val calls = (1..7).map { ToolCallRequest("call-$it", "echo", if (it == 1) "{\"image\":true}" else "{}") }
         val client = mockk<LlmClient> {
-            coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
+            coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
                 requests += secondArg<List<ChatMessage>>().toList()
                 if (requests.size == 1) AssistantTurn("", calls, "tool_calls")
                 else AssistantTurn("有效摘要", emptyList(), "stop")
@@ -234,7 +234,7 @@ class AgentWorkflowVerificationTest {
         var recordedArgs: JsonObject? = null
         val rounds = AtomicInteger()
         val client = mockk<LlmClient> {
-            coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
+            coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
                 if (rounds.incrementAndGet() == 1) AssistantTurn("", listOf(ToolCallRequest("call", "echo", raw)), "tool_calls")
                 else {
                     assertEquals("executed", secondArg<List<ChatMessage>>().last { it.role == "tool" }.text)
@@ -272,7 +272,7 @@ class AgentWorkflowVerificationTest {
         val rounds = AtomicInteger()
         val events = mutableListOf<AgentEvent>()
         val client = mockk<LlmClient> {
-            coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
+            coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
                 if (rounds.incrementAndGet() == 1) AssistantTurn("", listOf(ToolCallRequest("call", "echo", raw)), "tool_calls")
                 else {
                     assertTrue(secondArg<List<ChatMessage>>().last { it.role == "tool" }.text.contains("合法 JSON 对象"))
@@ -309,7 +309,7 @@ class AgentWorkflowVerificationTest {
             com.suixing.agent.data.FileActivityKind.CREATED, addedLines = 1, removedLines = 0)
         val rounds = AtomicInteger()
         val client = mockk<LlmClient> {
-            coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
+            coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
                 if (rounds.incrementAndGet() == 1) AssistantTurn("", listOf(ToolCallRequest("partial", "echo", "{}")), "tool_calls")
                 else AssistantTurn("one step failed after writing", emptyList(), "stop")
             }
@@ -347,7 +347,7 @@ class AgentWorkflowVerificationTest {
             val tools = registry().also { it.add(ShellTools(context, capabilities)); it.add(BashTools(ShellTools(context, capabilities))) }
             val rounds = AtomicInteger()
             val client = mockk<LlmClient> {
-                coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
+                coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
                     when (rounds.incrementAndGet()) {
                         1 -> AssistantTurn("", listOf(ToolCallRequest("shell", "run_shell", """{"command":"run arbitrary script","mode":"local"}""")), "tool_calls")
                         2 -> AssistantTurn("", listOf(ToolCallRequest("bash", "bash", """{"command":"edit then fail"}""")), "tool_calls")
@@ -379,7 +379,7 @@ class AgentWorkflowVerificationTest {
                 awaitCancellation()
             }
             val client = mockk<LlmClient> {
-                coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any()) } returns
+                coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any(), any()) } returns
                     AssistantTurn("", listOf(ToolCallRequest("bash", "bash", """{"command":"write and wait"}""")), "tool_calls")
             }
             val events = CopyOnWriteArrayList<AgentEvent>()
@@ -407,7 +407,7 @@ class AgentWorkflowVerificationTest {
             val parentRounds = AtomicInteger()
             val childRounds = AtomicInteger()
             val client = mockk<LlmClient> {
-                coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
+                coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
                     assertTrue(thirdArg<List<ToolSpec>>().any { it.name == "bash" })
                     if (firstArg<AppSettings>().subagentsEnabled) {
                         when (parentRounds.incrementAndGet()) {
@@ -457,7 +457,7 @@ class AgentWorkflowVerificationTest {
         try {
             val rounds = AtomicInteger()
             val client = mockk<LlmClient> {
-                coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
+                coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
                     if (rounds.incrementAndGet() == 1) {
                         AssistantTurn("", listOf(ToolCallRequest("bash", "bash", """{"command":"printf denied"}""")), "tool_calls")
                     } else {
@@ -483,7 +483,7 @@ class AgentWorkflowVerificationTest {
         val events = CopyOnWriteArrayList<AgentEvent>()
         var prefix = emptyList<ChatMessage>()
         val client = mockk<LlmClient> {
-            coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
+            coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
                 val wire = secondArg<List<ChatMessage>>()
                 if (rounds.incrementAndGet() == 1) {
                     prefix = wire.toList()
@@ -512,7 +512,7 @@ class AgentWorkflowVerificationTest {
         val rounds = AtomicInteger()
         val events = CopyOnWriteArrayList<AgentEvent>()
         val client = mockk<LlmClient> {
-            coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
+            coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
                 rounds.incrementAndGet()
                 AssistantTurn("working", listOf(ToolCallRequest("call", "echo", "{}")), "tool_calls")
             }
@@ -532,7 +532,7 @@ class AgentWorkflowVerificationTest {
         val waiting = CompletableDeferred<Unit>()
         val events = CopyOnWriteArrayList<AgentEvent>()
         val client = mockk<LlmClient> {
-            coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
+            coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
                 if (rounds.incrementAndGet() == 1) AssistantTurn("", listOf(ToolCallRequest("call", "echo", "{}")), "tool_calls")
                 else {
                     arg<(String) -> Unit>(3)("partial answer")
@@ -560,7 +560,7 @@ class AgentWorkflowVerificationTest {
         val actions = mutableListOf<String>()
         val rounds = AtomicInteger()
         val client = mockk<LlmClient> {
-            coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
+            coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
                 assertEquals(listOf("ui_virtual_screen"), thirdArg<List<ToolSpec>>().map { it.name })
                 if (rounds.incrementAndGet() == 1) AssistantTurn("", listOf(
                     ToolCallRequest("allowed", "ui_virtual_screen", """{"action":"status"}"""),
@@ -591,7 +591,7 @@ class AgentWorkflowVerificationTest {
         val release = CompletableDeferred<Unit>()
         val parentRounds = AtomicInteger()
         val client = mockk<LlmClient> {
-            coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
+            coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
                 if (firstArg<AppSettings>().subagentsEnabled) {
                     if (parentRounds.incrementAndGet() == 1) AssistantTurn("",
                         listOf(ToolCallRequest("spawn", "spawn_agent", """{"task":"independent"}""")), "tool_calls")
@@ -642,7 +642,7 @@ class AgentWorkflowVerificationTest {
         val parentRounds = AtomicInteger()
         lateinit var engine: AgentEngine
         val client = mockk<LlmClient> {
-            coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
+            coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
                 if (firstArg<AppSettings>().subagentsEnabled) {
                     when (parentRounds.incrementAndGet()) {
                         1 -> AssistantTurn("", listOf(ToolCallRequest("spawn", "spawn_agent", """{"task":"independent"}""")), "tool_calls")
@@ -687,7 +687,7 @@ class AgentWorkflowVerificationTest {
         val parentRounds = AtomicInteger()
         val release = CompletableDeferred<Unit>()
         val client = mockk<LlmClient> {
-            coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
+            coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
                 if (firstArg<AppSettings>().subagentsEnabled) {
                     when (parentRounds.incrementAndGet()) {
                         1 -> AssistantTurn("", listOf(ToolCallRequest("spawn", "spawn_agent", """{"task":"unavailable resource"}""")), "tool_calls")
@@ -722,7 +722,7 @@ class AgentWorkflowVerificationTest {
         val parentRounds = AtomicInteger()
         lateinit var engine: AgentEngine
         val client = mockk<LlmClient> {
-            coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
+            coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
                 if (firstArg<AppSettings>().subagentsEnabled) {
                     when (parentRounds.incrementAndGet()) {
                         1 -> AssistantTurn("", listOf(ToolCallRequest("spawn", "spawn_agent", """{"task":"cancel this child"}""")), "tool_calls")
@@ -756,7 +756,7 @@ class AgentWorkflowVerificationTest {
         val parentRounds = AtomicInteger()
         val events = CopyOnWriteArrayList<AgentEvent>()
         val client = mockk<LlmClient> {
-            coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
+            coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
                 if (firstArg<AppSettings>().subagentsEnabled) {
                     if (parentRounds.incrementAndGet() == 1) AssistantTurn("",
                         listOf(ToolCallRequest("spawn", "spawn_agent", """{"task":"last round child"}""")), "tool_calls")

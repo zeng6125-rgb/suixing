@@ -1,0 +1,365 @@
+package com.suixing.agent.ui.drawer
+
+import androidx.compose.material3.DrawerValue
+import androidx.compose.foundation.layout.Box
+import androidx.compose.runtime.Applier
+import androidx.compose.runtime.BroadcastFrameClock
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.Composition
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.InternalComposeApi
+import androidx.compose.runtime.Recomposer
+import androidx.compose.runtime.currentComposer
+import androidx.compose.runtime.snapshots.Snapshot
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusDirection
+import androidx.compose.ui.focus.FocusManager
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.input.pointer.AwaitPointerEventScope
+import androidx.compose.ui.input.pointer.PointerEvent
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerId
+import androidx.compose.ui.input.pointer.PointerInputChange
+import androidx.compose.ui.input.pointer.PointerInputEventHandler
+import androidx.compose.ui.input.pointer.PointerInputScope
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.platform.LocalViewConfiguration
+import androidx.compose.ui.platform.ViewConfiguration
+import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.LayoutDirection
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.yield
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertTrue
+import org.junit.Test
+import kotlin.coroutines.Continuation
+import kotlin.coroutines.EmptyCoroutineContext
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
+import kotlin.coroutines.startCoroutine
+import kotlin.coroutines.suspendCoroutine
+
+/** Run the drawer's actual pointerInput handlers with finite events, without Android windows. */
+class DrawerPointerLoopTest {
+    @Test fun `a visible drawer row remains clickable while the drawer is closing`() {
+        var clicks = 0
+        withPointerLoop(DrawerValue.Open, shield = false, includeHost = true,
+            rowClick = { clicks++ }, events = listOf(
+                event(change(0L, 100f, 100f, previousPressed = false)),
+                event(change(16L, 100f, 100f, pressed = false)),
+            ), beforeInput = { startClosing() }) {
+            assertEquals("catching the spring must not consume the drawer row's tap", 1, clicks)
+            frames(90)
+        }
+    }
+
+    @Test fun `a stationary drawer row receives its tap through the host`() {
+        var clicks = 0
+        withPointerLoop(DrawerValue.Open, shield = false, includeHost = true,
+            rowClick = { clicks++ }, events = listOf(
+                event(change(0L, 100f, 100f, previousPressed = false)),
+                event(change(16L, 100f, 100f, pressed = false)),
+            )) {
+            assertEquals(1, clicks)
+        }
+    }
+
+    @Test fun `a shield down catches the spring and a small move follows the finger`() {
+        var caught = 0f
+        withPointerLoop(DrawerValue.Open, shield = true, includeHost = true, events = listOf(
+            event(change(0L, 350f, 350f, previousPressed = false)),
+            event(change(16L, 354f, 350f)),
+        ), beforeInput = {
+            startClosing()
+            caught = state.visualProgress.value
+        }) {
+            assertNotNull(state.gestureSession)
+            frames(12)
+            assertEquals(caught + 4f / 300f, state.visualProgress.value, 0.0001f)
+        }
+    }
+
+    @Test fun `tapping a moving shield still closes the drawer`() =
+        withPointerLoop(DrawerValue.Open, shield = true, includeHost = true, events = listOf(
+            event(change(0L, 350f, 350f, previousPressed = false)),
+            event(change(16L, 350f, 350f, pressed = false)),
+        ), beforeInput = { startClosing() }) {
+            frames(90)
+            assertEquals(0f, state.visualProgress.value, 0.0001f)
+        }
+
+    @Test fun `host moves update the visible drawer before the first display frame`() =
+        withPointerLoop(DrawerValue.Closed, shield = false, events = listOf(
+            event(change(0L, 100f, 100f, previousPressed = false)),
+            event(change(16L, 120f, 100f)),
+            event(change(32L, 140f, 120f)),
+        )) {
+            assertEquals("both moves must be visible without advancing the frame clock",
+                0.1066667f, state.visualProgress.value, 0.0001f)
+        }
+
+    @Test fun `a short host fling includes the down sample`() =
+        withPointerLoop(DrawerValue.Closed, shield = false, events = listOf(
+            event(change(0L, 100f, 100f, previousPressed = false)),
+            event(change(16L, 120f, 100f)),
+            event(change(32L, 120f, 120f, pressed = false)),
+        )) {
+            frames(90)
+            assertEquals(DrawerValue.Open, if (state.isOpen) DrawerValue.Open else DrawerValue.Closed)
+        }
+
+    @Test fun `a host drag held still before up has no fling velocity`() =
+        withPointerLoop(DrawerValue.Closed, shield = false, events = listOf(
+            event(change(0L, 100f, 100f, previousPressed = false)),
+            event(change(16L, 120f, 100f)),
+            event(change(32L, 140f, 120f)),
+            event(change(96L, 140f, 140f, pressed = false)),
+        )) {
+            frames(90)
+            assertEquals("holding before release must keep this short drag closed",
+                0f, state.visualProgress.value, 0.0001f)
+        }
+
+    @Test fun `a shield drag held still before up has no fling velocity`() =
+        withPointerLoop(DrawerValue.Open, shield = true, events = listOf(
+            event(change(0L, 350f, 350f, previousPressed = false)),
+            event(change(16L, 330f, 350f)),
+            event(change(32L, 310f, 330f)),
+            event(change(96L, 310f, 310f, pressed = false)),
+        )) {
+            frames(90)
+            assertEquals("holding before release must keep this short drag open",
+                1f, state.visualProgress.value, 0.0001f)
+        }
+
+    @Test fun `lifting the first shield pointer leaves the surviving pointer dragging`() =
+        withPointerLoop(DrawerValue.Open, shield = true, events = listOf(
+            event(change(0L, 350f, 350f, previousPressed = false)),
+            event(change(16L, 330f, 350f)),
+            event(
+                change(24L, 330f, 330f),
+                change(24L, 600f, 600f, id = 2L, previousPressed = false),
+            ),
+            event(
+                change(32L, 330f, 330f, pressed = false),
+                change(32L, 600f, 600f, id = 2L),
+            ),
+            event(change(48L, 580f, 600f, id = 2L)),
+        )) {
+            assertNotNull("the remaining finger still owns the drag", state.gestureSession)
+            assertEquals("only finger motion, not the distance between fingers, moves the drawer",
+                0.8933333f, state.visualProgress.value, 0.0001f)
+        }
+
+    private class Harness(
+        val state: SuixingDrawerState,
+        val scope: CoroutineScope,
+        private val clock: BroadcastFrameClock,
+    ) {
+        private var nanos = 0L
+
+        suspend fun startClosing() {
+            scope.launch(clock, CoroutineStart.UNDISPATCHED) {
+                state.animateTo(DrawerValue.Closed, DRAWER_CLOSE_SPEC)
+            }
+            frames(4)
+            assertTrue("the fixture must catch an active spring", state.progress.isRunning)
+        }
+
+        suspend fun frames(count: Int) {
+            repeat(count) {
+                Snapshot.sendApplyNotifications()
+                repeat(6) { yield() }
+                nanos += 16_000_000L
+                clock.sendFrame(nanos)
+                Snapshot.sendApplyNotifications()
+                repeat(6) { yield() }
+            }
+        }
+    }
+
+    private fun withPointerLoop(
+        initialValue: DrawerValue,
+        shield: Boolean,
+        events: List<PointerEvent>,
+        beforeInput: suspend Harness.() -> Unit = {},
+        includeHost: Boolean = false,
+        rowClick: (() -> Unit)? = null,
+        block: suspend Harness.() -> Unit,
+    ) = runBlocking {
+        withTimeout(5_000L) {
+            val nodeClass = Class.forName("androidx.compose.ui.node.LayoutNode")
+            val root = nodeClass.getDeclaredConstructor().newInstance()
+            @Suppress("UNCHECKED_CAST")
+            val applier = Class.forName("androidx.compose.ui.node.UiApplier")
+                .getDeclaredConstructor(nodeClass).newInstance(root) as Applier<Any>
+            val clock = BroadcastFrameClock()
+            val state = SuixingDrawerState(initialValue)
+            val harness = Harness(state, this, clock)
+            val recomposer = Recomposer(coroutineContext + clock)
+            val composition = Composition(applier, recomposer)
+            val runner = launch(clock, CoroutineStart.UNDISPATCHED) {
+                recomposer.runRecomposeAndApplyChanges()
+            }
+            val pointerJobs = mutableListOf<kotlinx.coroutines.Job>()
+            try {
+                composition.setContent {
+                    CompositionLocalProvider(
+                        LocalDensity provides Density(1f),
+                        LocalLayoutDirection provides LayoutDirection.Ltr,
+                        LocalViewConfiguration provides DrawerViewConfiguration,
+                        LocalFocusManager provides object : FocusManager {
+                            override fun clearFocus(force: Boolean) = Unit
+                            override fun moveFocus(focusDirection: FocusDirection): Boolean = false
+                        },
+                    ) {
+                        SuixingDrawer(state, gesturesEnabled = true, drawerContent = {
+                            if (rowClick != null) Box(drawerRowTapForTest(rowClick))
+                        }, content = {})
+                    }
+                }
+                harness.beforeInput()
+                val children = nodeClass.getDeclaredMethod("getChildren\$ui")
+                val host = (children.invoke(root) as List<*>).single()!!
+                val target = when {
+                    rowClick != null -> {
+                        val panel = (children.invoke(host) as List<*>).first()!!
+                        (children.invoke(panel) as List<*>).single()!!
+                    }
+                    shield -> (children.invoke(host) as List<*>).last()!!
+                    else -> host
+                }
+                val targets = if ((shield || rowClick != null) && includeHost) listOf(host, target)
+                    else listOf(target)
+                val inputs = targets.map { node ->
+                    // Detached test nodes retain their real modifier until an Android owner attaches.
+                    val modifier = nodeClass.getDeclaredField("pendingModifier")
+                        .apply { isAccessible = true }.get(node) as Modifier
+                    val handler = modifier.foldIn<PointerInputEventHandler?>(null) { current, element ->
+                        if (element.javaClass.simpleName == "SuspendPointerInputElement") {
+                            element.javaClass.getDeclaredMethod("getPointerInputEventHandler")
+                                .invoke(element) as PointerInputEventHandler
+                        } else current
+                    }!!
+                    DrawerPointerEvents().also { input ->
+                        pointerJobs += harness.scope.launch(clock, CoroutineStart.UNDISPATCHED) {
+                            with(handler) { input.invoke() }
+                        }
+                    }
+                }
+                events.forEach { event ->
+                    PointerEventPass.entries.forEach { pass ->
+                        val ordered = if (pass == PointerEventPass.Main) inputs.asReversed() else inputs
+                        ordered.forEach { it.dispatch(event, pass) }
+                    }
+                }
+                harness.block()
+            } finally {
+                pointerJobs.forEach { it.cancelAndJoin() }
+                composition.dispose()
+                recomposer.close()
+                runner.cancelAndJoin()
+            }
+        }
+    }
+
+    @OptIn(InternalComposeApi::class)
+    @Composable
+    private fun drawerRowTapForTest(onClick: () -> Unit): Modifier {
+        val method = Class.forName("com.suixing.agent.ui.drawer.DrawerRowsKt")
+            .declaredMethods.single { it.name == "drawerRowTap" }
+            .apply { isAccessible = true }
+        return method.invoke(null, Modifier, true, onClick, null, currentComposer, 0, 0) as Modifier
+    }
+
+    private class DrawerPointerEvents : PointerInputScope, Density by Density(1f) {
+        override val size = IntSize(385, 800)
+        override val viewConfiguration: ViewConfiguration = DrawerViewConfiguration
+        private val eventScope = DrawerAwaitEvents()
+
+        fun dispatch(event: PointerEvent, pass: PointerEventPass) = eventScope.dispatch(event, pass)
+
+        override suspend fun <R> awaitPointerEventScope(block: suspend AwaitPointerEventScope.() -> R): R =
+            suspendCancellableCoroutine { continuation ->
+                continuation.invokeOnCancellation {
+                    eventScope.cancel(it ?: CancellationException("Pointer input cancelled"))
+                }
+                block.startCoroutine(eventScope, object : Continuation<R> {
+                    override val context = EmptyCoroutineContext
+                    override fun resumeWith(result: Result<R>) = continuation.resumeWith(result)
+                })
+            }
+    }
+
+    private class DrawerAwaitEvents : AwaitPointerEventScope, Density by Density(1f) {
+        override val size = IntSize(385, 800)
+        override val extendedTouchPadding = Size.Zero
+        override val viewConfiguration: ViewConfiguration = DrawerViewConfiguration
+        override var currentEvent = PointerEvent(emptyList())
+            private set
+        private var awaitingPass: PointerEventPass? = null
+        private var awaitingEvent: Continuation<PointerEvent>? = null
+
+        override suspend fun awaitPointerEvent(pass: PointerEventPass): PointerEvent =
+            suspendCoroutine {
+                awaitingPass = pass
+                awaitingEvent = it
+            }
+
+        fun dispatch(event: PointerEvent, pass: PointerEventPass) {
+            currentEvent = event
+            if (awaitingPass != pass) return
+            val continuation = awaitingEvent
+            awaitingPass = null
+            awaitingEvent = null
+            continuation?.resume(event)
+        }
+
+        fun cancel(cause: Throwable) {
+            val continuation = awaitingEvent
+            awaitingEvent = null
+            continuation?.resumeWithException(cause)
+        }
+    }
+
+    private companion object {
+        val DrawerViewConfiguration = object : ViewConfiguration {
+            override val longPressTimeoutMillis = 500L
+            override val doubleTapTimeoutMillis = 300L
+            override val doubleTapMinTimeMillis = 40L
+            override val touchSlop = 8f
+        }
+
+        fun event(vararg changes: PointerInputChange): PointerEvent = PointerEvent(changes.toList())
+
+        fun change(
+            time: Long,
+            x: Float,
+            previousX: Float,
+            id: Long = 1L,
+            pressed: Boolean = true,
+            previousPressed: Boolean = true,
+        ): PointerInputChange = PointerInputChange(
+            id = PointerId(id),
+            uptimeMillis = time,
+            position = Offset(x, 0f),
+            pressed = pressed,
+            previousUptimeMillis = (time - 16L).coerceAtLeast(0L),
+            previousPosition = Offset(previousX, 0f),
+            previousPressed = previousPressed,
+            isInitiallyConsumed = false,
+        )
+    }
+}

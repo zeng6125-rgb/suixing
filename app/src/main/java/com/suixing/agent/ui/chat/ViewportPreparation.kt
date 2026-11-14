@@ -1,6 +1,8 @@
 package com.suixing.agent.ui.chat
 
 import com.suixing.agent.ui.chat.markdown.SettledBlocks
+import com.suixing.agent.ui.chat.markdown.MessageSegment
+import com.suixing.agent.ui.chat.markdown.splitImageSegments
 
 /** Select a bounded old-to-new row window using the requested lazy-list orientation. */
 internal fun <T> nearbyViewportRows(
@@ -38,16 +40,26 @@ internal fun <T> openingViewportRows(rows: List<T>, anchorIndex: Int): List<T> {
 internal fun markdownTextsToPrepare(
     parts: List<Part>,
     current: Map<String, *>?,
+    imageSegments: Map<String, List<MessageSegment>> = emptyMap(),
 ): List<String>? {
-    if (current == null) return parts.mapNotNull { (it as? Part.Text)?.text }
-
-    for (part in parts) {
-        if (part is Part.Text &&
-            part.text.length >= SettledBlocks.MIN_CHARS &&
-            part.text !in current
-        ) {
-            return parts.mapNotNull { (it as? Part.Text)?.text }
+    val texts = buildList {
+        for (part in parts) if (part is Part.Text) {
+            if (!part.text.contains("![")) add(part.text) else {
+                val segments = imageSegments[part.text] ?: splitImageSegments(part.text)
+                if (segments.any { it is MessageSegment.Image }) {
+                    segments.forEach { if (it is MessageSegment.Text && it.text.isNotBlank()) add(it.text) }
+                } else add(part.text)
+            }
         }
     }
-    return null
+    return texts.takeIf { current == null || texts.any { it.length >= SettledBlocks.MIN_CHARS && it !in current } }
+}
+
+internal fun imageSegmentsToPrepare(
+    parts: List<Part>,
+    current: Map<String, List<MessageSegment>> = emptyMap(),
+): Map<String, List<MessageSegment>> = buildMap {
+    for (part in parts) if (part is Part.Text && part.text.contains("![")) {
+        put(part.text, current[part.text] ?: splitImageSegments(part.text))
+    }
 }

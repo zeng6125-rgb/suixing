@@ -12,6 +12,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshots.SnapshotStateMap
 import com.suixing.agent.core.Core
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 
 /** One shared elapsed clock and expansion ledger span live-to-stored handover. */
@@ -41,7 +42,12 @@ internal fun rememberChatRunPresentation(state: ChatUiState): ChatRunPresentatio
     val runKey = "${state.conversationId}:${state.liveRunId}"
     LaunchedEffect(state.runningHere, runKey) {
         if (state.runningHere) {
-            runStartedAt.getOrPut(runKey) { System.currentTimeMillis() }
+            if (runKey !in runStartedAt) {
+                val handle = Core.engine.runsFlow.first { runs ->
+                    runs[state.conversationId]?.runtime?.childParentRunId == state.liveRunId
+                }.getValue(state.conversationId)
+                runStartedAt[runKey] = runStartedAtMillis(handle.startedAt, System.nanoTime(), System.currentTimeMillis())
+            }
         } else {
             // The run is over, so its clock has no reader left — and a table that only ever
             // grows would hand the conversation's next run the start time of this one.

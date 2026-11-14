@@ -231,7 +231,7 @@ internal fun subagentProfileValidation(profile: SubagentProfile, settings: AppSe
     profile.assistantId.isNotBlank() && settings.assistants.none { it.id == profile.assistantId } -> "指定助手已不可用，请重新选择。"
     profile.model != null && profile.model.resolve(settings.providers) == null -> "请从已启用的供应商中选择有效模型。"
     profile.maxToolRounds != null && profile.maxToolRounds < 0 -> "轮数不能小于0。"
-    profile.timeoutSeconds !in 10..600 -> "时长请输入10到600秒。"
+    profile.timeoutSeconds != 0 && profile.timeoutSeconds !in 10..600 -> "时长请输入0（不限时）或10到600秒。"
     profile.allowedActions.any { (name, _) -> profile.allowedTools != null && name !in profile.allowedTools } -> "动作限制必须属于已选择的工具。"
     else -> null
 }
@@ -315,7 +315,8 @@ internal fun SubagentConfigEditor(
             if (toolsExpanded) {
                 CompactOutlinedTextField(query, { query = it }, label = { Text("搜索工具名称") }, singleLine = true, modifier = Modifier.fillMaxWidth())
                 val options = remember(toolNames, profile.allowedTools, query) {
-                    (toolNames + profile.allowedTools).distinct().filter { it.contains(query.trim(), true) }
+                    val needle = query.trim()
+                    (toolNames + profile.allowedTools).distinct().filter { it.contains(needle, true) }
                 }
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(SettingsStyle.FieldGap)) {
                     TextButton(onClick = { onChange(profile.copy(allowedTools = (profile.allowedTools + options).distinct())) }) { Text("全选当前列表") }
@@ -374,7 +375,7 @@ internal fun SubagentConfigEditor(
         }, label = { Text("最多工具轮数") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.fillMaxWidth())
         CompactOutlinedTextField(timeoutText, { next ->
             if (next.all(Char::isDigit)) { timeoutText = next; onChange(profile.copy(timeoutSeconds = next.toIntOrNull() ?: 0)) }
-        }, label = { Text("最长运行时间（10–600秒）") }, singleLine = true,
+        }, label = { Text("最长运行时间（秒，0不限时）") }, singleLine = true,
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.fillMaxWidth())
         CompactOutlinedTextField(profile.extraInstructions, { onChange(profile.copy(extraInstructions = it)) },
             label = { Text("补充要求（可选）") }, minLines = 2, maxLines = 5, modifier = Modifier.fillMaxWidth())

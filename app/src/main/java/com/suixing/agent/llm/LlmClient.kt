@@ -99,7 +99,7 @@ data class ChatMessage(
     }
 }
 
-data class ToolCallRequest(val id: String, val name: String, val arguments: String)
+data class ToolCallRequest(val id: String, val name: String, val arguments: String, val streamIndex: Int? = null)
 
 /**
  * What one round cost, as the endpoint reported it. The final SSE chunk carries
@@ -413,6 +413,7 @@ class LlmClient(http: OkHttpClient? = null) {
          * 没有它，重发就会把同一段开头打印两遍。
          */
         onRestart: () -> Unit = {},
+        onToolPrepared: (Int, String) -> Unit = { _, _ -> },
     ): AssistantTurn = withContext(Dispatchers.IO) {
         val protocol = settings.protocol
         val url = endpoint(settings.baseUrl, protocol)
@@ -498,7 +499,7 @@ class LlmClient(http: OkHttpClient? = null) {
                                 ),
                             )
                         }
-                        val stream = StreamTurn(protocol).also { partial = it }
+                        val stream = StreamTurn(protocol, onToolPrepared).also { partial = it }
                         val source = body.source()
                         var unparsed = 0
                         /**
@@ -719,6 +720,7 @@ class LlmClient(http: OkHttpClient? = null) {
         var id: String = ""
         var name: String = ""
         val arguments: StringBuilder = StringBuilder()
+        var prepared = false
     }
 
     /**
@@ -731,7 +733,10 @@ class LlmClient(http: OkHttpClient? = null) {
      * non-streaming-shaped `message` chunks. Here the shape handling is a function of a chunk,
      * so it can be tested against fixtures instead of against a live provider.
      */
-    internal class StreamTurn(private val protocol: String = PROTOCOL_OPENAI) {
+    internal class StreamTurn(
+        private val protocol: String = PROTOCOL_OPENAI,
+        private val onToolPrepared: (Int, String) -> Unit = { _, _ -> },
+    ) {
         private var accumulatedChars = 0L
         private fun reserve(chars: Int) {
             if (accumulatedChars + chars > MAX_STREAM_TURN_CHARS) {
@@ -790,6 +795,10 @@ class LlmClient(http: OkHttpClient? = null) {
             name?.takeIf { it.isNotBlank() }?.let {
                 call.name = it
                 hasNamedCalls = true
+                if (!call.prepared) {
+                    call.prepared = true
+                    onToolPrepared(index, it)
+                }
             }
             arguments?.let { call.arguments.append(it) }
         }
@@ -996,16 +1005,17 @@ class LlmClient(http: OkHttpClient? = null) {
         fun toTurn(): AssistantTurn {
             // **一趟建表**（优化清单 llm-P2）：原来 `toSortedMap().values.filter{}.mapIndexed{}`
             // 会建三份中间集合；排序一次后直接 buildList，结果与顺序完全相同。
-            val ordered = calls.toSortedMap().values
+            val ordered = calls.toSortedMap()
             val requests = buildList {
                 var index = 0
-                for (call in ordered) {
+                for ((streamIndex, call) in ordered) {
                     if (call.name.isBlank()) continue
                     add(
                         ToolCallRequest(
                             id = call.id.ifBlank { "call_$index" },
                             name = call.name,
                             arguments = call.arguments.toString().ifBlank { "{}" },
+                            streamIndex = streamIndex,
                         ),
                     )
                     index++

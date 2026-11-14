@@ -10,7 +10,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.unit.dp
 
-/** Mount at the restored position, then share the transcript's fade + rise. */
+/** Mount at the restored position and share the transcript's stationary fade. */
 @Composable
 internal fun ScrubberPresentation(
     conversationId: String,

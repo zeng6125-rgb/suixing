@@ -19,12 +19,13 @@ internal fun ChatRuntime.chooseModel(providerId: String, model: String) {
     val chatId = _state.value.conversationId
     if (chatId.isEmpty()) return
     val shown = _state.value
-    _state.update { it.copy(providerId = providerId, model = model) }
     // The run's own copy carries the pick as well, or the next save would write the
     // conversation back without it and the run after that would fall back to the
     // persona.
-    val live = sessions[chatId]
-    live?.let { putSession(it.copy(providerId = providerId, model = model)) }
+    val live = deltaBuffer.locked {
+        _state.update { it.copy(providerId = providerId, model = model) }
+        sessions[chatId]?.also { putSession(it.copy(providerId = providerId, model = model)) }
+    }
     // **最近一次选择 = 新会话的默认**（用户：「最新一次选的为 default 模型，也就是新会话
     // 就用这个……跟 dsh 一样的逻辑」）。只写全局默认这一份；已经在别的会话里选过的模型
     // 不受影响——它们的 `providerId/model` 是自己的那一份，谁都覆盖不了谁。
@@ -56,8 +57,10 @@ internal fun ChatRuntime.chooseModel(providerId: String, model: String) {
             model = model,
         ) ?: return@launch
         if (title != shown.title) {
-            _state.update { it.copy(title = title) }
-            sessions[chatId]?.let { current -> putSession(current.copy(title = title)) }
+            deltaBuffer.locked {
+                _state.update { if (it.conversationId == chatId) it.copy(title = title) else it }
+                sessions[chatId]?.let { current -> putSession(current.copy(title = title)) }
+            }
         }
     }
 }
@@ -73,9 +76,10 @@ internal fun ChatRuntime.chooseReasoning(level: String) {
     val chatId = _state.value.conversationId
     if (chatId.isEmpty()) return
     val shown = _state.value
-    _state.update { it.copy(reasoningEffort = level) }
-    val live = sessions[chatId]
-    live?.let { putSession(it.copy(reasoningEffort = level)) }
+    val live = deltaBuffer.locked {
+        _state.update { it.copy(reasoningEffort = level) }
+        sessions[chatId]?.also { putSession(it.copy(reasoningEffort = level)) }
+    }
     viewModelScope.launch {
         save(
             chatId = chatId,
@@ -97,8 +101,10 @@ internal fun ChatRuntime.chooseApproval(mode: ApprovalMode) {
     val chatId = shown.conversationId
     if (chatId.isEmpty()) return
     conversationApprovalChoices[chatId] = mode
-    _state.update { if (it.conversationId == chatId) it.copy(approvalMode = mode) else it }
-    sessions[chatId]?.let { putSession(it.copy(approvalMode = mode)) }
+    deltaBuffer.locked {
+        _state.update { if (it.conversationId == chatId) it.copy(approvalMode = mode) else it }
+        sessions[chatId]?.let { putSession(it.copy(approvalMode = mode)) }
+    }
     val previousWrite = approvalSaveJob
     approvalSaveJob = viewModelScope.launch {
         previousWrite?.join()
@@ -178,8 +184,10 @@ internal fun ChatRuntime.renameConversation(id: String, title: String) {
     if (id.isEmpty() || clean.isEmpty()) return
     viewModelScope.launch {
         environment.chats.rename(id, clean)
-        if (_state.value.conversationId == id) _state.update { it.copy(title = clean) }
-        sessions[id]?.let { putSession(it.copy(title = clean)) }
+        deltaBuffer.locked {
+            _state.update { if (it.conversationId == id) it.copy(title = clean) else it }
+            sessions[id]?.let { putSession(it.copy(title = clean)) }
+        }
     }
 }
 

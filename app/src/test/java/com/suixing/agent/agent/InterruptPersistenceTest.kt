@@ -122,7 +122,7 @@ class InterruptPersistenceTest {
         wires: MutableList<List<ChatMessage>>,
         turnFor: (call: Int) -> AssistantTurn,
     ): LlmClient = mockk {
-        coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
+        coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
             val call = wires.size + 1
             wires += secondArg<List<ChatMessage>>()
             turnFor(call)
@@ -137,7 +137,7 @@ class InterruptPersistenceTest {
         val hold = CompletableDeferred<Unit>()
         var cut = false
         val client = mockk<LlmClient> {
-            coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
+            coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
                 wires += secondArg<List<ChatMessage>>()
                 // The round streams its thinking, then sits on the wire until the stop cuts it.
                 (invocation.args[4] as (String) -> Unit)("想了一半")
@@ -179,7 +179,7 @@ class InterruptPersistenceTest {
         val reasoningSeen = CompletableDeferred<Unit>()
         val hold = CompletableDeferred<Unit>()
         val client = mockk<LlmClient> {
-            coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
+            coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
                 wires += secondArg<List<ChatMessage>>()
                 (invocation.args[4] as (String) -> Unit)("想了一半")
                 reasoningSeen.complete(Unit)

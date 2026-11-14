@@ -5,6 +5,8 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
 import kotlin.math.max
@@ -172,6 +174,7 @@ object AssistantAvatarStore {
      * 数量，再多的按 LRU 淘汰。
      */
     private val pictures = object : android.util.LruCache<String, Bitmap>(16) {}
+    private val decodeLock = Mutex()
 
     /** Drops the cached decode of [path] (called when the file itself goes away). */
     private fun forget(path: String) {
@@ -182,10 +185,13 @@ object AssistantAvatarStore {
     suspend fun load(context: Context, path: String): Bitmap? = withContext(Dispatchers.IO) {
         if (path.isBlank()) return@withContext null
         pictures.get(path)?.let { return@withContext it }
-        runCatching {
-            val file = File(context.filesDir, path)
-            if (!file.isFile) null else BitmapFactory.decodeFile(file.absolutePath)
-        }.getOrNull()?.also { pictures.put(path, it) }
+        decodeLock.withLock {
+            pictures.get(path)?.let { return@withLock it }
+            runCatching {
+                val file = File(context.filesDir, path)
+                if (!file.isFile) null else BitmapFactory.decodeFile(file.absolutePath)
+            }.getOrNull()?.also { pictures.put(path, it) }
+        }
     }
 
     /** Drops one picture: restoring the emoji, or deleting the assistant that owned it. */

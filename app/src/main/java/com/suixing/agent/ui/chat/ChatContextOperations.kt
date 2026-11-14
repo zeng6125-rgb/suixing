@@ -83,11 +83,11 @@ internal fun ChatRuntime.compressNow() {
             }?.let { reason ->
                 // 压缩没成就把原因说出来（消息太少 / 网络失败 / 模型没给摘要）——
                 // 以前这里把返回值丢了，用户看到的就是"点了没反应"。
-                _state.update { it.copy(error = reason) }
+                _state.update { if (it.conversationId == chatId) it.copy(error = reason) else it }
             }
         } finally {
             compressing -= chatId
-            _state.update { it.copy(compressingSince = 0L) }
+            _state.update { if (it.conversationId == chatId) it.copy(compressingSince = 0L) else it }
         }
     }
 }
@@ -139,6 +139,13 @@ internal fun ChatRuntime.dismissError() {
  * history of every compression a long conversation ever made would only grow the file.
  */
 internal fun ChatRuntime.recordCheckpoint(chatId: String, checkpoint: ContextCheckpoint) {
+    val next = deltaBuffer.locked { recordCheckpointLocked(chatId, checkpoint) }
+    viewModelScope.launch {
+        environment.chats.updateMeta(id = chatId, checkpoints = next)
+    }
+}
+
+private fun ChatRuntime.recordCheckpointLocked(chatId: String, checkpoint: ContextCheckpoint): List<ContextCheckpoint> {
     val live = sessions[chatId]
     val shown = _state.value.takeIf { it.conversationId == chatId }
     val stored = environment.chats.conversations.value.firstOrNull { it.id == chatId }
@@ -166,7 +173,7 @@ internal fun ChatRuntime.recordCheckpoint(chatId: String, checkpoint: ContextChe
     else unique.subList(unique.size - MAX_CHECKPOINTS, unique.size).toList()
     // Mirrored onto every live copy first, so the next save carries it whether the run
     // is still going or has just landed.
-    if (shown != null) _state.update { it.copy(checkpoints = next) }
+    if (shown != null) _state.update { if (it.conversationId == chatId) it.copy(checkpoints = next) else it }
     live?.let {
         // 运行中的压缩要在过程区**原地**留一个块（用户：「在哪个部分进行的就在哪个部分渲染」：
         // 思考 → 工具 → 压缩 → 继续）。跑完之后由转录里那张 CheckpointCard 接管，锚点见上。
@@ -177,11 +184,5 @@ internal fun ChatRuntime.recordCheckpoint(chatId: String, checkpoint: ContextChe
             ),
         )
     }
-    viewModelScope.launch {
-        // **只写 meta，不碰正文**（#30）：原来这里走 save(messages = base.messages) ——
-        // 一次压缩就把整份转录（几十 MB）重写一遍；而且 `load()` 现在不再物化 messages，
-        // `base.messages` 是空的，那个调用会被护栏判成「历史变短」。
-        // `updateMeta` 只改字段，O(1)，且不可能动到消息。
-        environment.chats.updateMeta(id = chatId, checkpoints = next)
-    }
+    return next
 }
