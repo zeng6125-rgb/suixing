@@ -7,6 +7,7 @@ import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
+import android.widget.FrameLayout
 import android.widget.LinearLayout
 import com.suixing.agent.R
 import com.suixing.agent.core.Core
@@ -138,21 +139,24 @@ internal fun FloatConsoleService.clampY() {
 }
 
 /**
- * The panel's resize handle: drag sideways to widen or narrow the card.
- *
- * 二维（0.8.108 起）：横向拖改宽度，纵向拖改内容区高度。高度落在 [contentScroll] 这个可滚
- * 容器上，拖矮也不会裁掉输入框/停止按钮（它们在容器之外）—— 所以「固定高度会裁掉 stop 行」
- * 那个老顾虑不再成立，用户要的「能调高度」就落在这里。默认（没拖过）高度仍随内容自适应。
+ * Drag sideways to resize the panel, vertically to resize its scrollable body.
+ * The header and composer stay outside that body.
  */
-internal fun FloatConsoleService.resizeHandle(): View = View(this).apply {
-    background = GradientDrawable().apply {
-        cornerRadius = dp(2).toFloat()
-        setColor(palette.muted)
-    }
-    layoutParams = LinearLayout.LayoutParams(dp(30), dp(4)).apply {
+internal fun FloatConsoleService.resizeHandle(): View = FrameLayout(this).apply {
+    contentDescription = "调整控制台大小"
+    tooltipText = contentDescription
+    layoutParams = LinearLayout.LayoutParams(dp(40), dp(24)).apply {
         gravity = Gravity.END
-        topMargin = dp(10)
     }
+    addView(
+        View(context).apply {
+            background = GradientDrawable().apply {
+                cornerRadius = dp(2).toFloat()
+                setColor(palette.muted)
+            }
+            layoutParams = FrameLayout.LayoutParams(dp(26), dp(3), Gravity.CENTER)
+        },
+    )
     setOnTouchListener { _, event -> onResizeTouch(event) }
 }
 
@@ -195,38 +199,22 @@ internal fun FloatConsoleService.onResizeTouch(event: MotionEvent): Boolean = wh
     }
 
     MotionEvent.ACTION_UP -> {
-        rememberPanelWidth(panel.width)
-        rememberPanelHeight()
+        val width = panel.layoutParams.width.takeIf { it > 0 } ?: panel.width
+        val height = contentScroll.layoutParams.height.takeIf { it > 0 } ?: contentScroll.height
+        val density = resources.displayMetrics.density
+        val widthDp = (width / density).roundToInt().coerceIn(PANEL_MIN_DP, PANEL_MAX_DP)
+        val heightDp = (height / density).roundToInt().coerceIn(PANEL_MIN_HEIGHT_DP, PANEL_MAX_HEIGHT_DP)
+        Core.appScope.launch {
+            Core.settings.update { it.copy(consoleWidthDp = widthDp, consoleHeightDp = heightDp) }
+        }
         // A wider panel may no longer fit where a narrower one did, so the window is pulled
         // back inside the screen with the width it just got.
-        clampX(panelWidth())
+        clampX(width)
         if (attached) runCatching { windowManager.updateViewLayout(root, params) }
         true
     }
 
     else -> false
-}
-
-/** Remembers the dragged width in dp, so a density change cannot resize the card on its own. */
-internal fun FloatConsoleService.rememberPanelWidth(px: Int) {
-    val widthDp = (px / resources.displayMetrics.density).roundToInt()
-    Core.appScope.launch {
-        Core.settings.update { it.copy(consoleWidthDp = widthDp.coerceIn(PANEL_MIN_DP, PANEL_MAX_DP)) }
-    }
-}
-
-/**
- * Remembers the dragged content height in dp, same reason as the width.
- *
- * 存的是 [contentScroll] 的高度；重启后 [contentHeightPx] 把它读回来，面板保持用户拖的高度。
- */
-internal fun FloatConsoleService.rememberPanelHeight() {
-    val heightDp = (contentScroll.height / resources.displayMetrics.density).roundToInt()
-    Core.appScope.launch {
-        Core.settings.update {
-            it.copy(consoleHeightDp = heightDp.coerceIn(PANEL_MIN_HEIGHT_DP, PANEL_MAX_HEIGHT_DP))
-        }
-    }
 }
 
 /**
@@ -272,5 +260,17 @@ internal fun FloatConsoleService.setExpanded(expanded: Boolean) {
         WindowManager.LayoutParams.SOFT_INPUT_STATE_UNSPECIFIED
     }
     if (attached) runCatching { windowManager.updateViewLayout(root, params) }
+    if (expanded) {
+        renderLiveAnswer()
+        if (!historyPositioned) {
+            historyPositioned = true
+            val previousY = contentScroll.scrollY
+            contentScroll.post {
+                if (panel.visibility == View.VISIBLE && contentScroll.scrollY == previousY) {
+                    contentScroll.fullScroll(View.FOCUS_DOWN)
+                }
+            }
+        }
+    }
     if (!expanded) hideKeyboard()
 }

@@ -1,5 +1,6 @@
 package com.suixing.agent.voice
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.media.AudioFormat
 import android.media.AudioRecord
@@ -68,6 +69,7 @@ class DictationRecorder(private val context: Context) {
     @Volatile private var pcm: java.io.ByteArrayOutputStream? = null
 
     /** 抓音开始。返回 false 表示这台设备/这个权限拿不到麦克风。 */
+    @SuppressLint("MissingPermission") // Permission failures are caught during construction and recording.
     @Synchronized
     fun start(): Boolean {
         if (record != null) return true
@@ -100,6 +102,7 @@ class DictationRecorder(private val context: Context) {
         record = recorder
         thread = Thread({
             val chunk = ShortArray(bufferSize / 2)
+            val encoded = ByteArray(bufferSize)
             var silentFor = 0L
             val startedAt = System.currentTimeMillis()
             var autoStop = false
@@ -123,9 +126,10 @@ class DictationRecorder(private val context: Context) {
                 for (index in 0 until read) {
                     val sample = chunk[index]
                     sum += sample.toDouble() * sample
-                    output.write(sample.toInt() and 0xFF)
-                    output.write((sample.toInt() shr 8) and 0xFF)
+                    encoded[index * 2] = sample.toByte()
+                    encoded[index * 2 + 1] = (sample.toInt() shr 8).toByte()
                 }
+                output.write(encoded, 0, read * 2)
                 val rms = sqrt(sum / read)
                 level = (rms / Short.MAX_VALUE * LEVEL_SCALE).toFloat().coerceIn(0f, 1f)
                 val now = System.currentTimeMillis()

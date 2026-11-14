@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
@@ -77,7 +78,7 @@ fun UiAutomationScreen(onBack: () -> Unit, onOpen: (String) -> Unit) {
         LazyColumn(
             modifier = Modifier.fillMaxSize().padding(padding),
             contentPadding = settingsPagePadding(),
-            verticalArrangement = Arrangement.spacedBy(SettingsStyle.SectionGap),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             item(key = "virtual-screen") { VirtualScreenCard() }
             item(key = "edge-light") { EdgeLightCard() }
@@ -98,7 +99,7 @@ private fun VirtualScreenCard() {
     val state by remember {
         // Only first-frame readiness affects this card, not the continuously changing timestamp.
         VirtualScreenManager.state.map { it.forStatusCard() }.distinctUntilChanged()
-    }.collectAsStateWithLifecycle(initialValue = VirtualScreenManager.state.value.forStatusCard())
+    }.collectAsStateWithLifecycle(initialValue = remember { VirtualScreenManager.state.value.forStatusCard() })
     val previewVisible by VirtualScreenOverlay.visibility.collectAsStateWithLifecycle()
     val displayedId = state.displayId
     val displayedPreview = previewVisible
@@ -156,7 +157,7 @@ private fun VirtualScreenCard() {
             }
         }
     }
-    SuixingCard {
+    SuixingCard(contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)) {
         AutomationCardHeader(
             title = "虚拟屏",
             icon = R.drawable.ic_picture_in_picture_2,
@@ -176,6 +177,7 @@ private fun VirtualScreenCard() {
         if (state.running) {
             SettingRow(
                 title = "悬浮预览",
+                verticalPadding = 4.dp,
                 subtitle = if (displayedPreview) "显示中；收起后，屏内应用继续运行。" else "已收起；屏内应用继续运行。",
                 control = {
                     key(displayedId, previewResetKey) {
@@ -209,7 +211,7 @@ private fun VirtualScreenCard() {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(top = SettingsStyle.FieldGap))
         } else {
-            Button(enabled = !busy, modifier = Modifier.fillMaxWidth(), onClick = { act("正在开启虚拟屏…") {
+            Button(enabled = !busy, onClick = { act("正在开启虚拟屏…") {
                 val opened = VirtualScreenControl.open(context)
                 if (!VirtualScreenOverlay.isShowing) {
                     noticeDisplayId = opened.displayId
@@ -312,15 +314,15 @@ private fun EdgeLightCard() {
             }
         }
     }
-    SuixingCard {
+    SuixingCard(contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)) {
         AutomationCardHeader(title = "边缘光", icon = R.drawable.ic_stat_spark,
             subtitle = if (settings == null) "正在读取设置…" else "Agent 操作手机时的边缘提示。")
         Spacer(Modifier.height(SettingsStyle.FieldGap))
-        SettingRow(title = "显示边缘光", control = {
+        SettingRow(title = "显示边缘光", verticalPadding = 4.dp, control = {
             SettingsSwitch(checked = settings?.first == true, enabled = settings != null,
                 onCheckedChange = { on -> saveEdgePreference(on, foregroundOnly = false) })
         })
-        SettingRow(title = "在 JAgent 前台显示", subtitle = "总开关关闭时不生效。", control = {
+        SettingRow(title = "在 JAgent 前台显示", verticalPadding = 4.dp, control = {
             SettingsSwitch(checked = settings?.second == true, enabled = settings?.first == true,
                 onCheckedChange = { on -> saveEdgePreference(on, foregroundOnly = true) })
         })
@@ -348,15 +350,15 @@ private fun AutomationPromptCard() {
             }
         }
     }
-    SuixingCard {
+    SuixingCard(contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)) {
         AutomationCardHeader(title = "自动化提示", icon = R.drawable.ic_pointer,
-            subtitle = if (settings == null) "正在读取设置…" else "操作状态与任务控制条，独立于圆形悬浮窗。")
+            subtitle = if (settings == null) "正在读取设置…" else "操作状态与任务控制。")
         Spacer(Modifier.height(SettingsStyle.FieldGap))
-        SettingRow(title = "显示自动化提示", control = {
+        SettingRow(title = "显示自动化提示", verticalPadding = 4.dp, control = {
             SettingsSwitch(checked = settings?.first == true, enabled = settings != null,
                 onCheckedChange = { on -> savePromptPreference(on, foregroundOnly = false) })
         })
-        SettingRow(title = "在 JAgent 前台显示", subtitle = "总开关关闭时不生效。", control = {
+        SettingRow(title = "在 JAgent 前台显示", verticalPadding = 4.dp, control = {
             SettingsSwitch(checked = settings?.second == true, enabled = settings?.first == true,
                 onCheckedChange = { on -> savePromptPreference(on, foregroundOnly = true) })
         })
@@ -367,15 +369,17 @@ private fun AutomationPromptCard() {
 private fun AutomationPermissionsCard(onManage: () -> Unit) {
     val readiness by remember {
         Core.capabilities.state.map { it.accessibility to it.rootReady }.distinctUntilChanged()
-    }.collectAsStateWithLifecycle(initialValue = Core.capabilities.state.value.let { it.accessibility to it.rootReady })
-    SuixingCard {
+    }.collectAsStateWithLifecycle(initialValue = remember {
+        Core.capabilities.state.value.let { it.accessibility to it.rootReady }
+    })
+    SuixingCard(contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)) {
         AutomationCardHeader(title = "自动化权限", icon = R.drawable.ic_shield_user)
         Spacer(Modifier.height(SettingsStyle.FieldGap))
-        SettingRow(title = "界面识别与文字定位", subtitle = "需要无障碍服务。", control = {
+        SettingRow(title = "界面识别与文字定位", subtitle = "需要无障碍服务。", verticalPadding = 4.dp, control = {
             Text(if (readiness.first) "已连接" else "未连接", style = SettingsStyle.metadata,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
         })
-        SettingRow(title = "副屏打开第三方应用", subtitle = "需要 root 权限。", control = {
+        SettingRow(title = "副屏打开第三方应用", subtitle = "需要 root 权限。", verticalPadding = 4.dp, control = {
             Text(if (readiness.second) "已就绪" else "未就绪", style = SettingsStyle.metadata,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
         })
@@ -394,9 +398,9 @@ private fun AutomationCardHeader(
 ) {
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Icon(painterResource(icon), contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.size(22.dp))
+            modifier = Modifier.size(20.dp))
         Spacer(Modifier.width(SettingsStyle.ControlGap))
-        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Text(title, style = SettingsStyle.cardTitle)
             subtitle?.let { Text(it, style = SettingsStyle.description, color = MaterialTheme.colorScheme.onSurfaceVariant) }
         }

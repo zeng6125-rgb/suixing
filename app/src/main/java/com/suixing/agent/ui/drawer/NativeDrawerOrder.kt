@@ -24,9 +24,9 @@ internal object NativeDrawerOrder {
             conversations.size.toLong() + order.pinned.size + order.normal.size < MIN_WORK) return null
         if (!NativeCore.available) return null
         return fallbackOnBridgeFailure {
-            val source = conversations.toList()
-            val pinned = order.pinned.toList()
-            val normal = order.normal.toList()
+            val source = conversations
+            val pinned = order.pinned
+            val normal = order.normal
             val length = 24L + source.size * 16L + (pinned.size.toLong() + normal.size) * 4
             val builder = Builder(1, source.size, pinned.size, normal.size, length)
             for (conversation in source) {
@@ -63,8 +63,8 @@ internal object NativeDrawerOrder {
         if (!NativeCore.available) return null
         return fallbackOnBridgeFailure {
             val source = known.toList()
-            val pinned = order.pinned.toList()
-            val normal = order.normal.toList()
+            val pinned = order.pinned
+            val normal = order.normal
             val length = 24L + (source.size.toLong() + pinned.size + normal.size) * 4
             val builder = Builder(2, source.size, pinned.size, normal.size, length)
             for (id in source) if (!builder.reference(id)) return@fallbackOnBridgeFailure null

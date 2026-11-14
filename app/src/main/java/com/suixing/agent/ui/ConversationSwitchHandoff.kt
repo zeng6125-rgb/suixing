@@ -4,8 +4,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.snapshotFlow
-import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.CompletableDeferred
 
 /** Only the newest drawer/navigation intent may publish a conversation switch. */
 internal class ConversationSwitchIntents {
@@ -31,37 +30,37 @@ internal class ConversationSwitchIntents {
     }
 }
 
-/** A cancelled or superseded close cannot hand over to a target conversation. */
-internal class ConversationSwitchHandoff {
-    private var finished by mutableStateOf(false)
-    private var completed by mutableStateOf(false)
+@PublishedApi
+internal class ConversationDrawRequest(val capture: Boolean) {
+    val completed = CompletableDeferred<Unit>()
+    var queued = false
+}
 
-    suspend fun close(block: suspend () -> Unit) {
+/** Target composition, restoration and drawing finish before the page starts moving. */
+internal class ConversationSwitchHandoff {
+    @PublishedApi
+    internal var pendingDraw by mutableStateOf<ConversationDrawRequest?>(null)
+
+    suspend fun awaitDraw(capture: Boolean = false) {
+        val request = ConversationDrawRequest(capture)
+        pendingDraw = request
         try {
-            block()
-            completed = true
+            request.completed.await()
         } finally {
-            finished = true
+            if (pendingDraw === request) pendingDraw = null
         }
     }
 
-    /**
-     * Wait for the first real closing frame, then hand over to the target.
-     *
-     * [beforePublish] is an optional suspend hook between the frame wait and publication:
-     * a cancellation or a newer intent arriving while it is suspended must still be rejected
-     * by the checks below. It used to drive the source's fade-out; the outgoing transcript is
-     * now replaced immediately (no opacity transition), so this hook is only about the
-     * handover timing and cancellation safety.
-     */
-    suspend fun awaitClosingFrame(
-        isCurrent: () -> Boolean = { true },
-        beforePublish: suspend () -> Unit = {},
-        progress: () -> Float,
-    ): Boolean {
-        snapshotFlow { !isCurrent() || finished || progress() < 1f }.first { it }
-        if (!isCurrent() || finished && !completed) return false
-        beforePublish()
-        return isCurrent() && (!finished || completed)
+    internal inline fun draw(content: () -> Unit, record: () -> Unit, post: (() -> Unit) -> Unit) {
+        val request = pendingDraw
+        if (request?.capture == true && !request.queued) record() else content()
+        if (request != null && !request.queued) {
+            request.queued = true
+            post { request.completed.complete(Unit) }
+        }
+    }
+
+    suspend fun close(prepare: suspend () -> Boolean, block: suspend () -> Unit) {
+        if (prepare()) block()
     }
 }

@@ -65,7 +65,7 @@ class DirectToolRunTest {
         val registry = registry(goals)
         val events = mutableListOf<AgentEvent>()
         val client = mockk<LlmClient> {
-            coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
+            coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
                 val wire = secondArg<List<ChatMessage>>()
                 assertEquals("finish the migration", goals.read().text)
                 assertTrue(wire.first().text.contains("## Current goal\nfinish the migration"))
@@ -91,7 +91,7 @@ class DirectToolRunTest {
         assertTrue(events.any { it is AgentEvent.ToolStarted && it.name == "goal" })
         assertTrue(events.any { it is AgentEvent.ToolFinished && it.name == "goal" && it.ok })
         assertFalse(engine.isRunning("chat"))
-        coVerify(exactly = 1) { client.complete(any(), any(), any(), any(), any(), any(), any(), any()) }
+        coVerify(exactly = 1) { client.complete(any(), any(), any(), any(), any(), any(), any(), any(), any()) }
     }
 
     @Test fun `goal completion writes an assistant reply before finishing and cannot execute more tools`() = runBlocking {
@@ -99,7 +99,7 @@ class DirectToolRunTest {
         var requests = 0
         val events = mutableListOf<AgentEvent>()
         val client = mockk<LlmClient> {
-            coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
+            coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
                 val wire = secondArg<List<ChatMessage>>()
                 when (++requests) {
                     1 -> AssistantTurn("first result", emptyList(), "stop")
@@ -137,7 +137,7 @@ class DirectToolRunTest {
         withTimeout(10_000) {
             val goals = GoalStore(folder.newFile("sleeping-goal.json"))
             val client = mockk<LlmClient> {
-                coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any()) } returns
+                coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any(), any()) } returns
                     AssistantTurn("", listOf(ToolCallRequest("waiting", "goal_update",
                         """{"status":"progress","note":"Started the checks","wait_seconds":60}""")), "tool_calls")
             }
@@ -154,7 +154,7 @@ class DirectToolRunTest {
             assertEquals(GoalStatus.PAUSED, goals.read().status)
             assertEquals("Started the checks", goals.read().progress)
             assertEquals(0L, goals.read().wakeAt)
-            coVerify(exactly = 1) { client.complete(any(), any(), any(), any(), any(), any(), any(), any()) }
+            coVerify(exactly = 1) { client.complete(any(), any(), any(), any(), any(), any(), any(), any(), any()) }
         }
     }
 
@@ -163,7 +163,7 @@ class DirectToolRunTest {
             val goals = GoalStore(folder.newFile("wake-goal.json"))
             var requests = 0
             val client = mockk<LlmClient> {
-                coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
+                coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
                     when (++requests) {
                         1 -> AssistantTurn("", listOf(ToolCallRequest("wait", "goal_update",
                             """{"status":"progress","note":"Started checks","wait_seconds":1}""")), "tool_calls")
@@ -198,7 +198,7 @@ class DirectToolRunTest {
             goals.write("old goal")
             val gate = ApprovalGate()
             val client = mockk<LlmClient> {
-                coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
+                coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
                     assertEquals("approved goal", goals.read().text)
                     AssistantTurn("approved", emptyList(), "stop")
                 }
@@ -214,7 +214,7 @@ class DirectToolRunTest {
             gate.pending.first { "chat" in it }
             assertEquals("old goal", goals.read().text)
             assertTrue(events.any { it is AgentEvent.ToolStarted && it.name == "goal" })
-            coVerify(exactly = 0) { client.complete(any(), any(), any(), any(), any(), any(), any(), any()) }
+            coVerify(exactly = 0) { client.complete(any(), any(), any(), any(), any(), any(), any(), any(), any()) }
             gate.resolve("chat", approved = true)
             assertEquals("approved", running.await().last().text)
             assertTrue(gate.pending.value.isEmpty())
@@ -229,7 +229,7 @@ class DirectToolRunTest {
             val release = CompletableDeferred<Unit>()
             var requests = 0
             val client = mockk<LlmClient> {
-                coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
+                coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
                     if (++requests == 1) {
                         firstRequest.complete(Unit)
                         release.await()
@@ -292,7 +292,7 @@ class DirectToolRunTest {
             assertEquals(false, result.toolOk)
             assertEquals("（已中断：任务被停止，这次调用没有结果）", result.toolOutput)
             assertFalse(engine.isRunning("chat"))
-            coVerify(exactly = 0) { client.complete(any(), any(), any(), any(), any(), any(), any(), any()) }
+            coVerify(exactly = 0) { client.complete(any(), any(), any(), any(), any(), any(), any(), any(), any()) }
         }
     }
 
@@ -312,7 +312,7 @@ class DirectToolRunTest {
             }) }
             val events = mutableListOf<AgentEvent>()
             val client = mockk<LlmClient> {
-                coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any()) } returns
+                coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any(), any()) } returns
                     AssistantTurn("", listOf(ToolCallRequest("first-tool", "parking", "{}")), "tool_calls")
             }
             val engine = AgentEngine(llm = client, goals = goals)
@@ -356,7 +356,7 @@ class DirectToolRunTest {
             }) }
             val events = mutableListOf<AgentEvent>()
             val client = mockk<LlmClient> {
-                coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any()) } returns
+                coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any(), any()) } returns
                     AssistantTurn("", listOf(ToolCallRequest("first-tool", "parking", "{}")), "tool_calls")
             }
             val engine = AgentEngine(llm = client, goals = goals)
@@ -396,7 +396,7 @@ class DirectToolRunTest {
             }
         }) }
         val client = mockk<LlmClient> {
-            coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
+            coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
                 val wire = secondArg<List<ChatMessage>>()
                 assertFalse(wire.first { it.role == "user" }.text.contains(secret))
                 assertTrue(wire.first { it.role == "assistant" }.toolCalls.single().arguments.contains(secret))
@@ -413,7 +413,7 @@ class DirectToolRunTest {
         val goals = GoalStore(folder.newFile("goal.json"))
         goals.write("keep the old goal")
         val client = mockk<LlmClient> {
-            coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any()) } returns
+            coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any(), any()) } returns
                 AssistantTurn("must not run", emptyList(), "stop")
         }
         val gate = ApprovalGate()
@@ -430,6 +430,6 @@ class DirectToolRunTest {
         assertEquals("denied-goal", result.last().toolCallId)
         assertTrue(gate.pending.value.isEmpty())
         assertFalse(engine.isRunning("chat"))
-        coVerify(exactly = 0) { client.complete(any(), any(), any(), any(), any(), any(), any(), any()) }
+        coVerify(exactly = 0) { client.complete(any(), any(), any(), any(), any(), any(), any(), any(), any()) }
     }
 }

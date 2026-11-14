@@ -89,6 +89,9 @@ data class LiveTool(
      * expanded row shows, and without this link a live call's picture never drew.
      */
     val message: StoredMessage? = null,
+    val preparing: Boolean = false,
+    val streamIndex: Int? = null,
+    val callId: String? = null,
 )
 
 

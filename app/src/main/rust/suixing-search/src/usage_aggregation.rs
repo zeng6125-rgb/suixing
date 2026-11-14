@@ -336,7 +336,7 @@ fn aggregate(bytes: &[u8]) -> Result<Vec<u8>, i32> {
             .map(|unit| u16::from_le_bytes([unit[0], unit[1]]))
             .collect();
         // A duplicate pool entry would split same-name aggregation across distinct indices.
-        if !seen.insert(key.clone()) {
+        if !seen.insert(raw) {
             return Err(STATUS_REQUEST_ERROR);
         }
         // Classify each UTF-16 model key once rather than rescanning it for every message.

@@ -15,6 +15,35 @@ import org.junit.Test
 import java.util.concurrent.atomic.AtomicInteger
 
 class SubagentsTest {
+    @Test fun `default child has no deadline and runs until its result is available`() = runBlocking {
+        val created = CompletableDeferred<SubagentTask>()
+        val release = CompletableDeferred<Unit>()
+        val pool = SubagentPool(this, onCreated = { created.complete(it) }) { release.await(); "done" }
+        try {
+            val id = pool.spawn("task").id
+            val task = created.await()
+            assertEquals(0, task.config.timeoutSeconds)
+            assertEquals(0L, task.timeoutMs)
+            assertEquals(SubagentStatus.RUNNING, pool.waitFor(listOf(id), 5).single().status)
+            release.complete(Unit)
+            assertEquals("done", pool.waitFor(listOf(id), 2000).single().result)
+        } finally { pool.close() }
+    }
+
+    @Test fun `spawn tool accepts an explicit unlimited deadline`() = runBlocking {
+        val pool = SubagentPool(this) { "done" }
+        try {
+            val result = pool.execute("spawn_agent", JsonObject(mapOf(
+                "task" to JsonPrimitive("task"), "timeout_seconds" to JsonPrimitive(0),
+            )))
+            assertTrue(result.output, result.ok)
+            val child = pool.waitFor(timeoutMs = 2000).single()
+            assertEquals(0, child.config?.timeoutSeconds)
+            assertEquals(SubagentStatus.COMPLETED, child.status)
+            assertEquals("done", child.result)
+        } finally { pool.close() }
+    }
+
     @Test fun `terminal results report once and explicit collection leaves no automatic duplicates`() = runBlocking {
         val pool = SubagentPool(this) { if (it.task == "bad") error("failure") else "ok" }
         try {

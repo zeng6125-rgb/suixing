@@ -66,7 +66,17 @@ internal suspend fun AgentRun.runLoop(
     publish(RunState.Running(stats()))
 
     val produced = mutableListOf<StoredMessage>()
-    val exitPolicy = createExitPolicy(onEvent)
+    var terminalMessageEmitted = false
+    val exitPolicy = createExitPolicy { event ->
+        when (event) {
+            is AgentEvent.AssistantMessage, is AgentEvent.ToolMessage -> terminalMessageEmitted = true
+            is AgentEvent.RunDuration -> if (!terminalMessageEmitted && produced.isNotEmpty()) {
+                produced[produced.lastIndex] = produced.last().copy(runElapsedMs = event.elapsedMs)
+            }
+            else -> Unit
+        }
+        onEvent(event)
+    }
     fun finish(exit: LoopExit): List<StoredMessage> {
         exitPolicy.finish(exit)
         return produced
@@ -229,7 +239,7 @@ internal suspend fun AgentRun.runLoop(
             fileActivities = result.fileActivities,
         )
         produced += stored
-        onEvent(AgentEvent.ToolMessage(stored))
+        onEvent(AgentEvent.ToolMessage(stored, call.streamIndex))
         // Answered, so a stop from here on must not answer it a second time.
         openCalls = openCalls.filterNot { it.id == call.id }
         val toolAt = wire.size
@@ -249,7 +259,7 @@ internal suspend fun AgentRun.runLoop(
         } else {
             "✗ ${call.name}"
         }
-        onEvent(AgentEvent.ToolFinished(call.name, result.ok, output, result.todoSnapshot))
+        onEvent(AgentEvent.ToolFinished(call.name, result.ok, output, result.todoSnapshot, call.id, call.streamIndex))
         // Only committed outcomes count; hashing large arguments/results must stay off Main.
         val step = ++toolStep
         withContext(Dispatchers.Default) {
@@ -277,7 +287,7 @@ internal suspend fun AgentRun.runLoop(
         wire += ChatMessage.assistant("", listOf(call))
         spans += WireSpan(assistant.id, from, wire.size)
         openCalls = assistant.toolCalls
-        onEvent(AgentEvent.ToolStarted(call.name, arguments))
+        onEvent(AgentEvent.ToolStarted(call.name, arguments, call.id, call.streamIndex))
         val started = System.currentTimeMillis()
         val result = withContext(Dispatchers.Default) { pool.execute(call.name, args) }
         commitTool(ToolOutcome(call, result, System.currentTimeMillis() - started, arguments, args))
@@ -371,6 +381,7 @@ internal suspend fun AgentRun.runLoop(
             // below — must not hand the same paragraph to [finishCancelled] a second time.
             streamed = StringBuilder()
             reasoning = StringBuilder()
+            currentAssistantMessageId = UUID.randomUUID().toString()
             openCalls = emptyList()
             // Steering lands here, on the boundary between two model turns: the
             // model has finished the previous turn and has not been asked for the
@@ -471,7 +482,7 @@ internal suspend fun AgentRun.runLoop(
                             if (curTurnFirstChunkMs == 0L) curTurnFirstChunkMs = arrivedAt
                         }
                         outChars.addAndGet(piece.length)
-                        streamed.append(piece)
+                        appendLiveAnswer(streamed, piece)
                         liveLine = streamed.substring((streamed.length - LIVE_LINE_CHARS).coerceAtLeast(0))
                         onEvent(AgentEvent.TextDelta(piece))
                     },
@@ -485,6 +496,10 @@ internal suspend fun AgentRun.runLoop(
                         reasoning.append(piece)
                         liveLine = "思考中…"
                         onEvent(AgentEvent.ReasoningDelta(piece))
+                    },
+                    onToolPrepared = { index, name ->
+                        liveLine = "准备调用 $name"
+                        onEvent(AgentEvent.ToolPrepared(index, name))
                     },
                     onCall = { inFlight = it },
                     // Visible rather than silent: a retry means the user is waiting longer for
@@ -511,9 +526,12 @@ internal suspend fun AgentRun.runLoop(
                     // 流出去的字清干净（缓冲 + 屏幕），再让客户端重发 —— 否则同一段开头会
                     // 在气泡里出现两遍。屏幕那一半靠 RoundRestarted，VM 把本段 live parts 撤掉。
                     onRestart = {
+                        clearLiveAnswer()
                         streamed = StringBuilder()
                         reasoning = StringBuilder()
+                        currentAssistantMessageId = UUID.randomUUID().toString()
                         openCalls = emptyList()
+                        liveLine = ""
                         onEvent(AgentEvent.RoundRestarted)
                     },
                 )
@@ -528,6 +546,8 @@ internal suspend fun AgentRun.runLoop(
                 // Rethrowing here would kill the run the user just spoke to.
                 if (steeringCut.get()) {
                     steeringCut.set(false)
+                    clearLiveAnswer()
+                    liveLine = ""
                     continue
                 }
                 throw error
@@ -609,7 +629,7 @@ internal suspend fun AgentRun.runLoop(
             }
             if (goalClosing || subagentSummaryOnly || turn.toolCalls.isEmpty()) {
                 val assistant = StoredMessage(
-                    id = UUID.randomUUID().toString(),
+                    id = currentAssistantMessageId,
                     role = Roles.ASSISTANT,
                     text = turn.text,
                     reasoning = thinking,
@@ -660,7 +680,7 @@ internal suspend fun AgentRun.runLoop(
                 }
             }
             val assistant = StoredMessage(
-                id = UUID.randomUUID().toString(),
+                id = currentAssistantMessageId,
                 role = Roles.ASSISTANT,
                 text = turn.text,
                 reasoning = thinking,
@@ -675,7 +695,7 @@ internal suspend fun AgentRun.runLoop(
                 traceNote = traceNoteOf(retriesThisRound, lastRetryReason, cutNote),
             ).withUsage(usage, elapsed, settings.model, firstTokenMs)
             produced += assistant
-            onEvent(AgentEvent.AssistantMessage(assistant))
+            onEvent(AgentEvent.AssistantMessage(assistant, turn.toolCalls.map { it.streamIndex }))
             val assistantAt = wire.size
             wire += ChatMessage.assistant(turn.text, turn.toolCalls)
             spans += WireSpan(assistant.id, assistantAt, wire.size)

@@ -4,6 +4,9 @@ import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.Measurable
@@ -44,6 +47,18 @@ internal class TranscriptPosition(private val list: LazyListState) {
     private var captureAfterPlacement = false
     /** List position at the moment reading became unavailable (press / fling). */
     private var unreadableAt: Pair<Int, Int>? = null
+    private var nestedScrolls by mutableStateOf<Set<LazyListState>>(emptySet())
+    val nestedScrolling: Boolean get() = nestedScrolls.any { it.isScrollInProgress }
+
+    fun registerNestedScroll(state: LazyListState) {
+        nestedScrolls = nestedScrolls + state
+        interactionChanged()
+    }
+
+    fun unregisterNestedScroll(state: LazyListState) {
+        nestedScrolls = nestedScrolls - state
+        interactionChanged()
+    }
 
     fun pauseForUserChange() {
         userChangeUntil = android.os.SystemClock.uptimeMillis() + PROCESS_EXPAND_MS + 48L
@@ -64,7 +79,7 @@ internal class TranscriptPosition(private val list: LazyListState) {
         lastRepair = null
     }
 
-    private fun canRead(): Boolean = reading() && userTransitions == 0 &&
+    private fun canRead(): Boolean = reading() && !nestedScrolling && userTransitions == 0 &&
         android.os.SystemClock.uptimeMillis() >= userChangeUntil
 
     fun attach(invalidate: () -> Unit) { this.invalidate = invalidate }
@@ -97,7 +112,7 @@ internal class TranscriptPosition(private val list: LazyListState) {
         top = layout.beforeContentPadding.toFloat()
         bottom = (layout.viewportSize.height - layout.afterContentPadding).toFloat()
         if (latestRequested && !latestStillWanted()) latestRequested = false
-        if (latestRequested || following()) {
+        if (latestRequested || (following() && !nestedScrolling)) {
             anchor = null
             lastRepair = null
             if (latestRequested && layout.totalItemsCount > 0 && !list.canScrollForward) {
@@ -144,7 +159,7 @@ internal class TranscriptPosition(private val list: LazyListState) {
             // While a press/fling owns scrolling there is no anchor repair to perform.
             // Reading's next idle transition requests the required placement once.
             // A follow-only idle transition still needs one pass if text grew meanwhile.
-            if (following() && list.canScrollForward) invalidate?.invoke()
+            if (following() && !nestedScrolling && list.canScrollForward) invalidate?.invoke()
             return
         }
         // Reading resumed. Repair only if the list never moved; otherwise re-capture fresh.

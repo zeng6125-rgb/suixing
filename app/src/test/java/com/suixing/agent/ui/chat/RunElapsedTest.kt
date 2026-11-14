@@ -2,11 +2,27 @@ package com.suixing.agent.ui.chat
 
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
+import com.suixing.agent.data.StoredMessage
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class RunElapsedTest {
+    @Test fun `a late opened chat uses the actual run origin`() {
+        assertEquals(40_000L, runStartedAtMillis(10_000_000_000L, 70_000_000_000L, 100_000L))
+        assertEquals(40_000L, runStartedAtMillis(10_000_000_000L, 90_000_000_000L, 120_000L))
+    }
+
+    @Test fun `stored tasks prefer their complete duration and legacy tasks keep request sums`() {
+        val messages = listOf(
+            StoredMessage("a", "assistant", runId = "complete", elapsedMs = 10),
+            StoredMessage("b", "assistant", runId = "complete", elapsedMs = 20, runElapsedMs = 60_000),
+            StoredMessage("c", "assistant", runId = "legacy", elapsedMs = 40),
+            StoredMessage("d", "assistant", runId = "legacy", elapsedMs = 50),
+        )
+        assertEquals(mapOf("complete" to 60_000L, "legacy" to 90L), runElapsedById(messages))
+    }
+
     @Test
     fun `clock is available before the first token`() = runBlocking {
         val result = samples(1_000L, 1_000L)

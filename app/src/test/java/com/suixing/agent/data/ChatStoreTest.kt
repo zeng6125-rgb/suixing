@@ -18,6 +18,31 @@ import java.io.File
  */
 class ChatStoreTest {
 
+    @Test fun `a run appended in parts replaces request time with its complete duration`() {
+        val first = listOf(
+            StoredMessage("u", Roles.USER),
+            StoredMessage("a", Roles.ASSISTANT, runId = "run", elapsedMs = 10),
+        )
+        val committed = store.append(emptyMeta(), first)
+        val messages = first + StoredMessage("b", Roles.ASSISTANT, runId = "run", elapsedMs = 20, runElapsedMs = 60_000)
+        val completed = store.append(committed, messages)
+        val restored = ChatStore(folder.root).readMeta(CHAT)!!
+        assertEquals(60_000L, restored.totals.wallElapsedMs)
+        assertEquals(30L, restored.totals.elapsedMs)
+        assertEquals(foldTotals(messages), completed.totals)
+    }
+
+    @Test fun `untagged background runs keep separate complete durations`() {
+        val messages = listOf(
+            StoredMessage("u1", Roles.USER),
+            StoredMessage("a1", Roles.ASSISTANT, elapsedMs = 10, runElapsedMs = 60_000),
+            StoredMessage("u2", Roles.USER),
+            StoredMessage("a2", Roles.ASSISTANT, elapsedMs = 20, runElapsedMs = 90_000),
+        )
+        assertEquals(150_000L, foldTotals(messages).wallElapsedMs)
+        assertEquals(30L, foldTotals(messages).elapsedMs)
+    }
+
     @get:Rule
     val folder = TemporaryFolder()
 

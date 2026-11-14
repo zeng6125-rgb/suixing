@@ -18,6 +18,19 @@ import org.junit.Test
  * lands, which is why the view model caches it on the row count and the last row's counts.
  */
 class SessionStatsTest {
+    @Test fun `complete task time includes waiting without changing decode speed`() {
+        val messages = listOf(
+            answer("a1", prompt = 100, completion = 200, elapsed = 2_000, firstToken = 500)
+                .copy(runId = "run"),
+            answer("a2", prompt = 100, completion = 300, elapsed = 2_000, firstToken = 500)
+                .copy(runId = "run", runElapsedMs = 64_000),
+        )
+        val stats = SessionStats.of(messages, 128_000)!!
+        assertEquals(64_000L, stats.elapsedMs)
+        assertEquals(500.0 / 3.0, stats.perSecond, 0.001)
+        assertEquals(5_000L, SessionStats.of(ChatTotals(promptTokens = 100, elapsedMs = 5_000), 128_000)!!.elapsedMs)
+    }
+
 
     private fun user(id: String) = StoredMessage(id = id, role = Roles.USER, text = "问 $id")
 

@@ -92,8 +92,7 @@ internal fun ChatRuntime.observe() {
             if (environment.chats.conversations.value.isEmpty()) environment.chats.load()
         }
         val savedOpened = async(Dispatchers.IO) { lastOpenedId ?: environment.chats.readLastOpened() }
-        val settings = environment.settings.current()
-        val assistantId = settings.activeAssistant()?.id.orEmpty()
+        val settings = async { environment.settings.current() }
         // Only the cold path reads the files: when the conversations are already in
         // memory the state above is the real one, and loading them again would only
         // make the screen wait for something it already has.
@@ -111,7 +110,13 @@ internal fun ChatRuntime.observe() {
             conversations.firstOrNull { it.id == id }
         }
         val existing = reopened ?: conversations.firstOrNull()
-        if (existing == null) {
+        // **正文只读尾部**（#30）：`existing` 来自只读 meta 的列表，`messages` 是空的。
+        // `readTail` 读最近 OPEN_TURNS 轮；读不到（老格式且未迁移）时它内部回退到旧文件。
+        val opened = existing?.let { environment.chats.readTail(it.id) ?: it }
+        if (!navIntents.isCurrent(startupNavigation)) return@launch
+        val assistantId = settings.await().activeAssistant()?.id.orEmpty()
+        if (!navIntents.isCurrent(startupNavigation)) return@launch
+        if (opened == null) {
             val created = environment.chats.create()
             if (!navIntents.isCurrent(startupNavigation)) {
                 runCatchingCancellable { environment.chats.delete(created.id) }
@@ -124,14 +129,10 @@ internal fun ChatRuntime.observe() {
                 loading = false,
             )
         } else {
-            // **正文只读尾部**（#30）：`existing` 来自只读 meta 的列表，`messages` 是空的。
-            // `readTail` 读最近 OPEN_TURNS 轮；读不到（老格式且未迁移）时它内部回退到旧文件。
-            val opened = environment.chats.readTail(existing.id) ?: existing
-            if (!navIntents.isCurrent(startupNavigation)) return@launch
         // 冷启动自动打开这条入口原来**完全不写缓存** ⇒ 水位对它无效（S1 只修了"点开"那一半）。
         // 从盘读到就记成"已落盘"，合并草稿时才敢清。
         if (opened.messages.isNotEmpty()) {
-            cacheMessages(existing.id, opened.messages, diskBacked = true)
+            cacheMessages(opened.id, opened.messages, diskBacked = true)
         }
             _state.value = opened.toUiState(assistantId).copy(loading = false)
         }

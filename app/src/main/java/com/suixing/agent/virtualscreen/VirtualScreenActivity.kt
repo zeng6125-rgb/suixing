@@ -1,5 +1,6 @@
 package com.suixing.agent.virtualscreen
 
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -36,6 +37,9 @@ import kotlinx.coroutines.delay
 class VirtualScreenActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        @Suppress("DEPRECATION")
+        val displayId = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) display?.displayId ?: -1
+            else windowManager.defaultDisplay.displayId
         setContent {
             SuixingTheme(paletteMode = 2) {
                 var seconds by remember { mutableIntStateOf(0) }
@@ -66,7 +70,7 @@ class VirtualScreenActivity : ComponentActivity() {
                         modifier = Modifier.padding(top = 12.dp),
                     )
                     Text(
-                        text = "displayId=${display?.displayId ?: -1}",
+                        text = "displayId=$displayId",
                         color = Color(0xFF9A958C),
                         fontFamily = FontFamily.Monospace,
                         fontSize = 14.sp,

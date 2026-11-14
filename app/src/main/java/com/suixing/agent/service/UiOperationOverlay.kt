@@ -3,9 +3,11 @@ package com.suixing.agent.service
 import android.content.Context
 import android.content.Intent
 import android.content.res.ColorStateList
+import android.content.res.Configuration
 import android.graphics.PixelFormat
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.os.Build
 import android.provider.Settings
 import android.text.TextUtils
 import android.util.TypedValue
@@ -17,14 +19,20 @@ import android.widget.ImageButton
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
+import androidx.compose.ui.graphics.toArgb
 import com.suixing.agent.MainActivity
 import com.suixing.agent.R
 import com.suixing.agent.core.Core
+import com.suixing.agent.ui.components.ChatTitleShadowColor
+import com.suixing.agent.ui.components.ChatTitleShadowElevationDp
+import com.suixing.agent.ui.components.PopupShadowMarginDp
+import com.suixing.agent.ui.theme.AppearancePalette
 import kotlin.math.roundToInt
 
 /** A touchable window limited to the controls; the full-screen effects remain untouchable. */
 internal object UiOperationOverlay {
     private var root: LinearLayout? = null
+    private var capsule: LinearLayout? = null
     private var manager: WindowManager? = null
     private var params: WindowManager.LayoutParams? = null
     private var title: TextView? = null
@@ -35,8 +43,23 @@ internal object UiOperationOverlay {
     private var stoppingOwner: UiOperationOwner? = null
     private var captureHidden = false
     private var inputDepth = 0
+    private var colorScheme = AppearancePalette.CLAUDE.scheme(dark = false)
 
     val isAttached: Boolean get() = root?.isAttachedToWindow == true
+
+    fun setAppearance(context: Context, themeMode: Int, paletteMode: Int) {
+        val night = context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK ==
+            Configuration.UI_MODE_NIGHT_YES
+        val next = AppearancePalette.fromId(paletteMode).scheme(themeMode == 2 || (themeMode == 0 && night))
+        if (colorScheme == next) return
+        colorScheme = next
+        capsule?.let { container ->
+            (container.background as GradientDrawable).setColor(colorScheme.surfaceContainerHigh.toArgb())
+            open?.imageTintList = ColorStateList.valueOf(colorScheme.primary.toArgb())
+            stop?.imageTintList = ColorStateList.valueOf(colorScheme.error.toArgb())
+            current?.let { show(context, null, it) }
+        }
+    }
 
     fun show(context: Context, service: Context?, snapshot: UiOperationSnapshot) {
         val wasHidden = current == null
@@ -54,11 +77,7 @@ internal object UiOperationOverlay {
         if (title?.text?.toString() != label) title?.text = label
         val controlsAvailable = !captureHidden && inputDepth == 0
         icon?.contentDescription = "JAgent，$label"
-        val color = when (snapshot.result) {
-            UiOperationResult.Failure -> 0xFFFFB4AB.toInt()
-            UiOperationResult.Cancelled -> 0xFFBDC4CF.toInt()
-            else -> 0xFFF3F5F8.toInt()
-        }
+        val color = colorScheme.onSurfaceVariant.toArgb()
         if (title?.currentTextColor != color) title?.setTextColor(color)
         open?.visibility = if (existingChatId(snapshot.owner) != null) View.VISIBLE else View.GONE
         stop?.visibility = if (snapshot.cancelRun != null) View.VISIBLE else View.GONE
@@ -105,12 +124,17 @@ internal object UiOperationOverlay {
         val layout = params ?: return
         val hidden = captureHidden
         val wasVisible = container.visibility == View.VISIBLE
-        val nextFlags = if (captureHidden || inputDepth > 0) layout.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
-        else layout.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
+        val nextFlags = uiOperationWindowFlags(captureHidden, inputDepth)
+        val nextAlpha = feedbackOverlayAlpha(
+            container.context,
+            layout.type == WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            touchable = nextFlags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE == 0,
+        )
         if (hidden && wasVisible) container.animate().cancel()
         container.visibility = if (hidden) View.INVISIBLE else View.VISIBLE
-        if (layout.flags != nextFlags) {
+        if (layout.flags != nextFlags || layout.alpha != nextAlpha) {
             layout.flags = nextFlags
+            layout.alpha = nextAlpha
             runCatching { manager?.updateViewLayout(container, layout) }
         }
         if (!hidden && !wasVisible && current != null) {
@@ -124,6 +148,7 @@ internal object UiOperationOverlay {
         val container = root
         val windowManager = manager
         root = null
+        capsule = null
         manager = null
         params = null
         title = null
@@ -138,44 +163,36 @@ internal object UiOperationOverlay {
     private fun create(host: Context, accessibility: Boolean): LinearLayout? {
         if (!accessibility && !Settings.canDrawOverlays(host)) return null
         val windowManager = host.getSystemService(WindowManager::class.java) ?: return null
-        val container = LinearLayout(host).apply {
+        val card = LinearLayout(host).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            minimumHeight = dp(host, 52)
-            setPadding(dp(host, 8), dp(host, 4), dp(host, 8), dp(host, 4))
+            minimumHeight = dp(host, 48)
+            setPadding(dp(host, 10), dp(host, 2), dp(host, 4), dp(host, 2))
             background = GradientDrawable().apply {
-                setColor(0xF2282A2E.toInt())
-                cornerRadius = dp(host, 8).toFloat()
-                setStroke(dp(host, 1), 0x24FFFFFF)
+                setColor(colorScheme.surfaceContainerHigh.toArgb())
+                cornerRadius = dp(host, 1000).toFloat()
             }
-            elevation = dp(host, 6).toFloat()
+            clipToOutline = true
+            elevation = ChatTitleShadowElevationDp * host.resources.displayMetrics.density
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                val shadowColor = ChatTitleShadowColor.toArgb()
+                outlineAmbientShadowColor = shadowColor
+                outlineSpotShadowColor = shadowColor
+            }
         }
         val badge = ImageView(host).apply {
             scaleType = ImageView.ScaleType.CENTER_INSIDE
             setImageResource(R.drawable.brand_mark_round)
         }
         val label = TextView(host).apply {
-            textSize = 13f
+            textSize = 14f
             typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-            setTextColor(0xFFF3F5F8.toInt())
+            setTextColor(colorScheme.onSurfaceVariant.toArgb())
             includeFontPadding = false
             maxLines = 1
             ellipsize = TextUtils.TruncateAt.END
         }
-        val labels = LinearLayout(host).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, dp(host, 2), dp(host, 4), dp(host, 2))
-            addView(TextView(host).apply {
-                text = "JAgent"
-                textSize = 10f
-                setTextColor(0xFFB1B8C3.toInt())
-                includeFontPadding = false
-                maxLines = 1
-            })
-            addView(label)
-        }
-        val openButton = action(host, R.drawable.ic_arrow_left, "返回当前对话", 0xFFD9DFE9.toInt()).apply {
+        val openButton = action(host, R.drawable.ic_arrow_left, "返回当前对话", colorScheme.primary.toArgb()).apply {
             setOnClickListener {
                 val chatId = existingChatId(current?.owner) ?: return@setOnClickListener
                 host.applicationContext.startActivity(Intent(host, MainActivity::class.java)
@@ -183,7 +200,7 @@ internal object UiOperationOverlay {
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP))
             }
         }
-        val stopButton = action(host, R.drawable.ic_stop_filled, "停止当前屏幕操作任务", 0xFFFFB4AB.toInt()).apply {
+        val stopButton = action(host, R.drawable.ic_stop_filled, "停止当前屏幕操作任务", colorScheme.error.toArgb()).apply {
             setOnClickListener {
                 val operation = current ?: return@setOnClickListener
                 if (operation.cancelRun?.invoke() == true && current?.owner == operation.owner) {
@@ -192,30 +209,41 @@ internal object UiOperationOverlay {
                 }
             }
         }
-        container.addView(badge, LinearLayout.LayoutParams(dp(host, 32), dp(host, 32)).apply {
+        card.addView(badge, LinearLayout.LayoutParams(dp(host, 28), dp(host, 28)).apply {
             rightMargin = dp(host, 8)
         })
-        container.addView(labels, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-        container.addView(openButton, LinearLayout.LayoutParams(dp(host, 44), dp(host, 44)))
-        container.addView(stopButton, LinearLayout.LayoutParams(dp(host, 44), dp(host, 44)))
+        card.addView(label, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        card.addView(openButton, LinearLayout.LayoutParams(dp(host, 44), dp(host, 44)))
+        card.addView(stopButton, LinearLayout.LayoutParams(dp(host, 44), dp(host, 44)))
+        val container = LinearLayout(host).apply {
+            orientation = LinearLayout.VERTICAL
+            clipChildren = false
+            clipToPadding = false
+            val shadowMargin = dp(host, PopupShadowMarginDp)
+            setPadding(shadowMargin, dp(host, 12), shadowMargin, shadowMargin)
+            addView(card, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT,
+            ))
+        }
         val layout = WindowManager.LayoutParams(
-            minOf(dp(host, 264), host.resources.displayMetrics.widthPixels - dp(host, 24)),
+            minOf(dp(host, 312), host.resources.displayMetrics.widthPixels),
             WindowManager.LayoutParams.WRAP_CONTENT,
             if (accessibility) WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY
             else WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+            uiOperationWindowFlags(captureHidden, inputDepth),
             PixelFormat.TRANSLUCENT,
         ).apply {
             gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
             x = 0
-            y = dp(host, 12)
-            alpha = feedbackOverlayAlpha(host, accessibility)
-            if (captureHidden || inputDepth > 0) flags = flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+            y = 0
+            alpha = feedbackOverlayAlpha(host, accessibility,
+                touchable = flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE == 0)
         }
         val hidden = captureHidden
         container.visibility = if (hidden) View.INVISIBLE else View.VISIBLE
         if (runCatching { windowManager.addView(container, layout) }.isFailure) return null
         root = container
+        capsule = card
         manager = windowManager
         params = layout
         title = label
@@ -254,4 +282,11 @@ internal object UiOperationOverlay {
         owner?.chatId?.takeIf { chatId -> Core.chats.conversations.value.any { it.id == chatId } }
 
     private fun dp(context: Context, value: Int): Int = (value * context.resources.displayMetrics.density).roundToInt()
+}
+
+internal fun uiOperationWindowFlags(captureHidden: Boolean, inputDepth: Int): Int {
+    val base = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+        WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+        WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED
+    return if (captureHidden || inputDepth > 0) base or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE else base
 }

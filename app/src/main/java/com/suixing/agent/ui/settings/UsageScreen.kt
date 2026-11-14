@@ -58,8 +58,8 @@ fun UsageScreen(onBack: () -> Unit) {
             val fresh = Core.usage.refresh()
             data = withContext(Dispatchers.Default) {
                 val today = LocalDate.now()
-                UsageViewData(fresh, listOf(7, 30, 90).associateWith { usageWindow(fresh, it, today) },
-                    usageWindow(fresh, 90, today), fresh.coverage, fresh.deletedCoverage)
+                val windows = listOf(7, 30, 90).associateWith { usageWindow(fresh, it, today) }
+                UsageViewData(fresh, windows, windows.getValue(90), fresh.coverage, fresh.deletedCoverage)
             }
         } catch (cancelled: CancellationException) { throw cancelled }
         catch (failure: Exception) { error = failure.message ?: "用量读取失败，请重试。" }

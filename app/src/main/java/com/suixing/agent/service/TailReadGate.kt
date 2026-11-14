@@ -1,6 +1,11 @@
 package com.suixing.agent.service
 
 import com.suixing.agent.data.Conversation
+import com.suixing.agent.data.StoredMessage
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /**
  * 「这个会话的尾部要不要重新读」的轻量判据（issue #69 P1-A）。
@@ -13,25 +18,25 @@ import com.suixing.agent.data.Conversation
  */
 internal class TailReadGate {
 
-    private var chatId: String? = null
-    private var stamp: String? = null
+    private val lock = Mutex()
+    private var stamp: Triple<String, Int, Long>? = null
+    private var messages: List<StoredMessage> = emptyList()
 
-    /** 内容签名：会话变了、条数变了、最后更新时间变了，都算需要重读。 */
-    private fun stampOf(conversation: Conversation): String =
-        conversation.id + '|' + conversation.messageCount + '|' + conversation.updatedAt
-
-    /** true = 需要读尾部；false = 同键重复，可以只更新元数据。 */
-    fun shouldRead(conversation: Conversation): Boolean {
-        val next = stampOf(conversation)
-        if (next == stamp) return false
-        chatId = conversation.id
-        stamp = next
-        return true
-    }
-
-    /** 换会话/退出时重置，避免把上一个会话的签名当成命中。 */
-    fun reset() {
-        chatId = null
-        stamp = null
+    suspend fun read(
+        conversation: Conversation,
+        readTail: suspend (String) -> List<StoredMessage>,
+    ): List<StoredMessage> = lock.withLock {
+        val next = Triple(conversation.id, conversation.messageCount, conversation.updatedAt)
+        if (conversation.messages.isNotEmpty()) {
+            messages = conversation.messages
+            stamp = next
+        } else if (next != stamp) {
+            val loaded = readTail(conversation.id)
+            currentCoroutineContext().ensureActive()
+            // Publish the key with its body, only after the suspended read succeeds.
+            messages = loaded
+            stamp = next
+        }
+        messages
     }
 }

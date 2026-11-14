@@ -25,6 +25,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -86,7 +87,7 @@ fun AvatarCropper(
                 val framePx = with(density) { frameDp.toPx() }
                 // 1× 的定义就是「刚好盖住方框」：短边贴住框，另一轴溢出。初始画面没有黑边。
                 val baseScale = framePx / min(source.width, source.height).toFloat()
-                var zoom by remember { mutableStateOf(1f) }
+                var zoom by remember { mutableFloatStateOf(1f) }
                 var offset by remember { mutableStateOf(Offset.Zero) }
 
                 fun clamp(current: Offset, scale: Float): Offset {

@@ -2,6 +2,7 @@ package com.suixing.agent.ui.chat
 
 import com.suixing.agent.data.TodoItem
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
@@ -16,10 +17,9 @@ import kotlinx.coroutines.launch
  * (the engine's event callback is a plain call), and a `Mutex` can only be taken from
  * inside a coroutine. The same shape as [PendingMessageQueues]' internal monitor.
  *
- * Held for one event and nothing else: no suspending call, no callback into this class
- * except the [removeSteer]/[publishSteers] pair of the 插话 event, which takes
- * the steering queue's monitor — always in that order. Queue methods never call back
- * while holding their monitor, so there is no reverse lock order.
+ * Session updates and recovery text snapshots share this boundary. Disk work and
+ * suspending calls stay outside it. Steering queues take their own monitor after
+ * this one and never call back while holding it.
  */
 
 /**
@@ -43,18 +43,21 @@ internal fun ChatRuntime.mayPublishLocked(chatId: String, now: Long): Boolean =
     deltaBuffer.mayPublish(chatId, now, DELTA_PUBLISH_MS)
 
 
-internal fun ChatRuntime.scheduleTailFlush(chatId: String) {
-    if (tailFlushJobs[chatId]?.isActive == true) return
+internal fun ChatRuntime.scheduleTailFlush(chatId: String) = deltaBuffer.locked {
+    if (tailFlushJobs[chatId]?.isActive == true) return@locked
     tailFlushJobs[chatId] = viewModelScope.launch {
         delay(DELTA_PUBLISH_MS)
-        tailFlushJobs.remove(chatId)
-        flushDeltas(chatId)
+        deltaBuffer.locked {
+            coroutineContext.ensureActive()
+            tailFlushJobs.remove(chatId)
+            flushDeltas(chatId)
+        }
     }
 }
 
 
 internal fun ChatRuntime.cancelTailFlush(chatId: String) {
-    tailFlushJobs.remove(chatId)?.cancel()
+    deltaBuffer.locked { tailFlushJobs.remove(chatId)?.cancel() }
 }
 
 
@@ -127,7 +130,7 @@ internal fun ChatRuntime.applyPending(live: RunSession, text: String, reasoning:
  * from it — because the buffered text is part of the answer and dropping it here is how a
  * stopped or failed run would lose its last words.
  */
-internal fun ChatRuntime.flushDeltas(chatId: String) {
+internal fun ChatRuntime.flushDeltas(chatId: String) = deltaBuffer.locked {
     cancelTailFlush(chatId)
     val live = sessions[chatId]
     if (live == null) {
@@ -135,11 +138,11 @@ internal fun ChatRuntime.flushDeltas(chatId: String) {
         // 留着它会在同一个会话的**下一轮**被 `takeDeltasLocked` 取走、拼到新内容前面 ——
         // 那是「新回答开头莫名多出一段上一轮的话」这种幽灵 bug，且极难复现。
         deltaBuffer.drop(chatId)
-        return
+        return@locked
     }
     // 同一个锁：取走与事件线程的 append 互斥（否则刚收到的 delta 会被这次 flush 顺手带走）。
-    val (text, reasoning) = deltaBuffer.locked { takeDeltasLocked(chatId) }
-    if (text.isEmpty() && reasoning.isEmpty()) return
+    val (text, reasoning) = takeDeltasLocked(chatId)
+    if (text.isEmpty() && reasoning.isEmpty()) return@locked
     putSession(applyPending(live, text, reasoning))
 }
 
@@ -150,7 +153,7 @@ internal fun ChatRuntime.flushDeltas(chatId: String) {
  * other conversation changes nothing here at all — the map keeps it apart, and
  * the display only ever reads its own entry.
  */
-internal fun ChatRuntime.putSession(next: RunSession) {
+internal fun ChatRuntime.putSession(next: RunSession) = deltaBuffer.locked {
     val installed = sessions.compute(next.chatId) { _, current ->
         if (current != null && current.runId == next.runId && current.loadedPrefix.size > next.loadedPrefix.size) {
             next.copy(
@@ -160,7 +163,7 @@ internal fun ChatRuntime.putSession(next: RunSession) {
         } else {
             next
         }
-    } ?: return
+    } ?: return@locked
     // **不在这里刷 LRU 缓存**（#35）：流式期间每 ~80ms 一次 `putSession`，每次都要动缓存
     // （`MessageCache` 内部是一把监视器锁），而切会话时的 `readTail` 读盘也要用同一把 ——
     // 撞在一起就是可感知的抖动。缓存只在「一轮结束」时刷（见 [endSession]）就够：
@@ -194,7 +197,7 @@ internal fun ChatRuntime.putSession(next: RunSession) {
  * looking at: the run's own conversation loses its streaming state, any other one is
  * left exactly as it was.
  */
-internal fun ChatRuntime.endSession(chatId: String, status: String, error: String? = null) {
+internal fun ChatRuntime.endSession(chatId: String, status: String, error: String? = null) = deltaBuffer.locked {
     if (_state.value.conversationId == chatId) _liveStats.value = null
     // **先把攒着的 delta 冲进去，再摘会话**（0.8.333 引入的风险）：后台会话的 delta 现在
     // 只缓冲不发布（屏幕上看不到它，发布只是白做 O(n) 拼接）。而一轮结束是
@@ -241,10 +244,10 @@ internal fun ChatRuntime.endSession(chatId: String, status: String, error: Strin
  * a run owns, the change goes into the run's copy as well — otherwise the next
  * streamed token would mirror the older messages back over the edit.
  */
-internal fun ChatRuntime.editDisplayed(change: (ChatUiState) -> ChatUiState) {
+internal fun ChatRuntime.editDisplayed(change: (ChatUiState) -> ChatUiState) = deltaBuffer.locked {
     _state.update(change)
     val shown = _state.value
-    val live = sessions[shown.conversationId] ?: return
+    val live = sessions[shown.conversationId] ?: return@locked
     putSession(
         live.copy(
             title = shown.title,

@@ -2,17 +2,18 @@
 
 package com.suixing.agent.ui
 
-import android.app.Activity
 import android.content.Intent
 import android.graphics.drawable.ColorDrawable
 import android.net.Uri
 import android.widget.Toast
+import androidx.activity.compose.LocalActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.background
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.WindowInsets
@@ -29,6 +30,7 @@ import com.suixing.agent.ui.drawer.SuixingDrawer
 import com.suixing.agent.ui.drawer.rememberSuixingDrawerState
 import androidx.compose.material3.Scaffold
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.State
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
@@ -36,17 +38,22 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.structuralEqualityPolicy
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.drawWithCache
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.layer.drawLayer
+import androidx.compose.ui.graphics.rememberGraphicsLayer
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalConfiguration
@@ -54,6 +61,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavGraph.Companion.findStartDestination
@@ -73,6 +81,8 @@ import com.suixing.agent.ui.capability.CapabilityScreen
 import com.suixing.agent.ui.automation.UI_AUTOMATION_ROUTE
 import com.suixing.agent.ui.automation.UiAutomationScreen
 import com.suixing.agent.ui.chat.ChatScreen
+import com.suixing.agent.ui.chat.SubagentListScreen
+import com.suixing.agent.ui.chat.SubagentConversationScreen
 import com.suixing.agent.ui.chat.ChatViewModel
 import com.suixing.agent.ui.chat.ObserveConversationRead
 import com.suixing.agent.ui.terminal.TerminalScreen
@@ -104,8 +114,11 @@ import com.suixing.agent.ui.theme.LocalDrawerSurfaceColor
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
@@ -147,6 +160,7 @@ private const val BROWSER_HOME_URL = "https://github.com/zeng6125-rgb/suixing"
 @Composable
 fun SuixingApp() {
     val navController = rememberNavController()
+    val subagentReadingState = rememberSaveableStateHolder()
     val backStackEntry by navController.currentBackStackEntryAsState()
     // 当前**覆盖层**的路由；"empty" 是栈底那层透明的占位 —— 也就是"chat 露着"。
     val route = backStackEntry?.destination?.route?.substringBefore('?') ?: "empty"
@@ -239,6 +253,16 @@ fun SuixingApp() {
     // Publish the busy holder without subscribing the shell to every animation frame.
     val switchIntents = remember { ConversationSwitchIntents() }
     val drawerBusyState = switchIntents.busy
+    val conversationLayer = rememberGraphicsLayer()
+    val conversationHandoff = remember { ConversationSwitchHandoff() }
+    val homeView = LocalView.current
+    val frozenConversation = remember { mutableStateOf<Pair<Int, ImageBitmap>?>(null) }
+    val conversationSwitchJob = remember { mutableStateOf<Job?>(null) }
+    LaunchedEffect(drawerState) {
+        snapshotFlow { drawerState.gestureSession }.filterNotNull().collect {
+            if (drawerBusyState.value) switchIntents.invalidate()
+        }
+    }
 
     val routeNow by androidx.compose.runtime.rememberUpdatedState(route)
     val open: (String) -> Unit = remember(navController) { { target ->
@@ -259,6 +283,11 @@ fun SuixingApp() {
         switchIntents.invalidate()
         navController.navigate(target)
     }
+    val openSubagents: (String, String?) -> Unit = remember(navController, switchIntents) { { chatId, id ->
+        switchIntents.invalidate()
+        val target = "subagents/${Uri.encode(chatId)}" + (id?.let { "/${Uri.encode(it)}" } ?: "")
+        navController.navigate(target)
+    } }
     // chat 常驻（见下面 NavHost 那段），所以"回聊天"不是导航到某个目的地，而是**把覆盖层收掉**：
     // pop 到透明的 "empty" 就等于"什么都没有在盖着 chat"。
     val showChat: () -> Unit = { navController.popBackStack("empty", inclusive = false) }
@@ -303,28 +332,50 @@ fun SuixingApp() {
         }
         showChat()
     }
-    /** Replace the source immediately; restore and reveal only the latest target. */
-    // Repeated taps remain latest-wins; a superseded close cannot release the latest busy flag.
-    val switchFromDrawer: (Conversation) -> Unit = { conversation ->
+    // Keep the source visible while the target mounts. Closing starts after its first draw.
+    val switchFromDrawer: (Conversation) -> Unit = switch@{ conversation ->
+        if (chat.state.value.conversationId == conversation.id &&
+            chat.presentedConversation.value == conversation.id
+        ) {
+            conversationSwitchJob.value?.cancel()
+            frozenConversation.value = null
+            chat.openConversation(conversation)
+            chatFromDrawer()
+            return@switch
+        }
+        val previousImage = frozenConversation.value?.second
         val token = switchIntents.begin()
-        val handoff = ConversationSwitchHandoff()
-        // Start the state animation before publishing the new conversation. UNDISPATCHED
-        // runs it to its first frame wait, so the close and switch have no extra launch-turn gap.
-        scope.launch(start = CoroutineStart.UNDISPATCHED) {
+        frozenConversation.value = previousImage?.let { token to it }
+        conversationSwitchJob.value?.cancel()
+        conversationSwitchJob.value = scope.launch(start = CoroutineStart.UNDISPATCHED) {
             try {
-                handoff.close { drawerState.animateTo(DrawerValue.Closed, DRAWER_CLOSE_SPEC) }
+                conversationHandoff.close(
+                    prepare = prepare@{
+                        val image = previousImage ?: run {
+                            conversationHandoff.awaitDraw(capture = true)
+                            if (!switchIntents.isCurrent(token)) return@prepare false
+                            conversationLayer.toImageBitmap()
+                        }
+                        if (!switchIntents.isCurrent(token)) return@prepare false
+                        frozenConversation.value = token to image
+                        showChat()
+                        chat.openConversation(conversation)
+                        combine(
+                            chat.presentedConversation,
+                            snapshotFlow { !switchIntents.isCurrent(token) },
+                        ) { presented, obsolete -> obsolete || presented == conversation.id }.first { it }
+                        if (!switchIntents.isCurrent(token)) return@prepare false
+                        conversationHandoff.awaitDraw()
+                        switchIntents.isCurrent(token)
+                    },
+                ) {
+                    frozenConversation.value = null
+                    drawerState.animateTo(DrawerValue.Closed, DRAWER_CLOSE_SPEC)
+                }
             } finally {
+                if (frozenConversation.value?.first == token) frozenConversation.value = null
                 switchIntents.finish(token)
             }
-        }
-        scope.launch {
-            // 旧正文不再淡出：等抽屉出现第一个真实关闭帧后直接发布目标会话。
-            // 挂起期间若来了更新的意图或抽屉关闭被打断，awaitClosingFrame 会拒绝交接。
-            if (!handoff.awaitClosingFrame(
-                    isCurrent = { switchIntents.isCurrent(token) },
-                ) { drawerState.progress.value }) return@launch
-            showChat()
-            chat.openConversation(conversation)
         }
     }
     LaunchedEffect(chat) {
@@ -405,9 +456,9 @@ fun SuixingApp() {
         // 用户明确要求保留这一段（2026-10-11：先被自审删掉，用户看到键盘后面那块颜色变了，要求回退）。
         // 把窗口底色刷成主题 surface：键盘圆角/键盘后面那条缝露的就是这个颜色；删掉之后窗口是透明的，
         // 缝里露的是壁纸 —— 用户不要那个效果。
-        val activity = LocalContext.current as? Activity
+        val activity = LocalActivity.current
         val surfaceArgb = MaterialTheme.colorScheme.surface.toArgb()
-        LaunchedEffect(surfaceArgb) {
+        LaunchedEffect(activity, surfaceArgb) {
             activity?.window?.setBackgroundDrawable(ColorDrawable(surfaceArgb))
         }
         // 底色只画到键盘上沿，键盘后面（含它的圆角）留白给壁纸 —— 这是其它 App 的做法；
@@ -535,9 +586,8 @@ fun SuixingApp() {
                     runningId = runningIds,
                     // Motion state is read by the mark/rows, not by the whole drawer content.
                     runningAnimationActive = remember(drawerState, route) {
-                        { route == "empty" && drawerState.homeShieldActive && !drawerState.isMoving }
+                        { route == "empty" && drawerState.homeShieldActive }
                     },
-                    panelMoving = remember(drawerState) { { drawerState.isMoving } },
                     onNew = {
                         switchIntents.invalidate()
                         chat.newConversation()
@@ -598,9 +648,6 @@ fun SuixingApp() {
                 // Home retains the accepted 300dp travel, 0.95 scale and constant screen corners.
                 val panelWidthPx = with(LocalDensity.current) { DRAWER_SHEET_WIDTH.dp.toPx() }
                 val homeShape = remember { RoundedCornerShape(SCREEN_CORNER_DP.dp) }
-                val cacheHomeDuringMotion = remember(context) {
-                    context.getSystemService(android.app.ActivityManager::class.java)?.isLowRamDevice != true
-                }
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
@@ -615,29 +662,18 @@ fun SuixingApp() {
                             val s = 1f - 0.05f * progress
                             scaleX = s
                             scaleY = s
-                            // **阴影属于主页自己**（用户：「边缘阴影圆角都是主页的」）。
-                            // 用 graphicsLayer 的 shadowElevation 得到真实柔和投影，
-                            // 因为主页现在在侧边栏**之上**（侧边栏已移到 content 里），阴影能压上去。
-                            // 阴影跟着进度淡入：16dp 扩散、24% 浓度，得到"范围宽、颜色浅"的效果
-                            // （用户：「扩散小一点点，深一点点就 ok 了」⇒ 22 → 16dp、10% → 24%）。
-                            // API 28+ 生效，以下机型自动忽略。
-                            shadowElevation = 16.dp.toPx() * progress
-                            spotShadowColor = Color.Black.copy(alpha = 0.24f)
-                            ambientShadowColor = Color.Black.copy(alpha = 0.24f)
                             // 从中心缩放，读成"整块浮起来"；从左拉伸会像贴纸。
                             transformOrigin = TransformOrigin(0.5f, 0.5f)
-                            // **恒定圆角**：与屏幕四角半径一致。关着时页面铺满屏幕，
-                            // 这个圆角正好落在屏幕自身的圆角上 ⇒ 肉眼看不出；
-                            // 移动期间同时裁剪内容；完全关闭时让窗口负责屏幕边界，聊天无需常驻圆角遮罩。
+                        }
+                        .graphicsLayer {
+                            // Keep shadow geometry in unscaled page coordinates. The outer layer
+                            // moves the page, while opacity changes leave this mask reusable.
+                            val progress = drawerProgress.value
+                            shadowElevation = if (progress > 0f) 16.dp.toPx() else 0f
+                            spotShadowColor = Color.Black.copy(alpha = 0.24f * progress)
+                            ambientShadowColor = Color.Black.copy(alpha = 0.24f * progress)
                             shape = homeShape
                             clip = progress > 0f
-                            // Cache the clipped home in a GPU layer during the transform. Dirty
-                            // content still redraws; stable text is composited from the texture.
-                            compositingStrategy = if (cacheHomeDuringMotion && progress > 0f && drawerState.isMoving) {
-                                androidx.compose.ui.graphics.CompositingStrategy.Offscreen
-                            } else {
-                                androidx.compose.ui.graphics.CompositingStrategy.Auto
-                            }
                         },
                 ) {
                 // chat 常驻：NavHost 在离开一个目的地之后会把它**销毁**，pop 回来时是从零
@@ -652,6 +688,16 @@ fun SuixingApp() {
                 // 现在整页保持满高，IME 只在聊天内部被消费一次：
                 // 输入框按 IME 做放置偏移，列表/空状态在**布局期**把键盘那一截让出来。
                 Box(Modifier.fillMaxSize()) {
+                Box(Modifier.fillMaxSize().drawWithContent {
+                    conversationHandoff.draw(
+                        content = { this@drawWithContent.drawContent() },
+                        record = {
+                            conversationLayer.record { this@drawWithContent.drawContent() }
+                            drawLayer(conversationLayer)
+                        },
+                        post = { action -> homeView.post { action() } },
+                    )
+                }) {
                     // **首启的引导还没走完时，先别组合 chat**（用户：「第一次出现引导页感觉卡卡的」）。
                     // 冷启动时 chat 要做 turnPage、receipts/transcript 统计、每条消息的 Markdown
                     // 渲染（ChatScreen.kt:465/512/560/621、ChatBlocks.kt:895/1519），
@@ -670,9 +716,12 @@ fun SuixingApp() {
                                 onOpenSettings = remember(open) { { open("settings") } },
                                 onOpenBrowser = openBrowser,
                                 onOpenTerminal = openTerminal,
+                                onViewSubagents = openSubagents,
                             )
                         }
                     }
+                }
+                FrozenConversation(frozenConversation)
                 }
                 }
             }
@@ -735,6 +784,18 @@ fun SuixingApp() {
                         ) {
                             // 栈底那一层：透明，什么都不画（chat 就在它下面）。
                                 composable("empty") { }
+                                composable("subagents/{chatId}") { entry ->
+                                    val parentId = checkNotNull(entry.arguments?.getString("chatId"))
+                                    SubagentListScreen(parentId, goBack, { id -> openSubagents(parentId, id) })
+                                }
+                                composable("subagents/{chatId}/{id}") { entry ->
+                                    SubagentConversationScreen(
+                                        checkNotNull(entry.arguments?.getString("chatId")),
+                                        checkNotNull(entry.arguments?.getString("id")),
+                                        subagentReadingState,
+                                        goBack,
+                                    )
+                                }
                                 composable("files") {
                                     FilesScreen(
                                         onBack = goBack,
@@ -896,6 +957,13 @@ fun SuixingApp() {
     }
 }
 
+
+@Composable
+private fun FrozenConversation(snapshot: State<Pair<Int, ImageBitmap>?>) {
+    snapshot.value?.second?.let { image ->
+        Image(bitmap = image, contentDescription = null, modifier = Modifier.fillMaxSize())
+    }
+}
 
 /**
  * 助手设置整页。整份 settings 下沉到这一层订阅（#54 5.48）：改任何设置只重跑这一页，

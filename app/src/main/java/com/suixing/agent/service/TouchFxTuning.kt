@@ -72,9 +72,9 @@ internal fun edgeLightVisible(
     inForeground: Boolean,
 ): Boolean = masterOn && (showInForeground || !inForeground)
 
-/** The effects and status windows share Android's combined obscuring-opacity limit. */
-internal fun feedbackOverlayAlpha(host: Context, accessibility: Boolean): Float {
-    if (accessibility || Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return 1f
+/** Untouchable fallback windows share an opacity budget; touchable controls stay opaque. */
+internal fun feedbackOverlayAlpha(host: Context, accessibility: Boolean, touchable: Boolean = false): Float {
+    if (touchable || accessibility || Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return 1f
     val maximum = host.getSystemService(InputManager::class.java)?.maximumObscuringOpacityForTouch ?: 0.8f
     return floor((1f - sqrt(1f - maximum)) * 100f) / 100f
 }
@@ -103,14 +103,14 @@ internal const val FX_TRAIL_STROKE_DP = 1.5f
  * drawn on the panel, and that is how it read (「像一个框」). What the user asked for is light
  * coming off the edge, so the band is filled from the screen's own edge inward over
  * [FX_HALO_WIDTH_FRACTION] of the short side, in [FX_HALO_BANDS] steps whose alpha follows
- * `(1 - t)^1.55`: brightest at the edge, gone by the time the fade ends.
+ * `(1 - t)^FX_HALO_FALLOFF`: brightest at the edge, gone by the time the fade ends.
  *
  * [FX_HALO_BANDS] is the one number to touch by eye. 72 is what Operit uses and 16 is the cheap
  * end of the same curve, so if the steps read as rings rather than as a fade, raise it.
  */
-internal const val FX_HALO_WIDTH_FRACTION = 0.046f
+internal const val FX_HALO_WIDTH_FRACTION = 0.06f
 internal const val FX_HALO_BANDS = 16
-internal const val FX_HALO_FALLOFF = 1.55f
+internal const val FX_HALO_FALLOFF = 1.1f
 // Each band's falloff is constant; only the overall alpha changes during drawing.
 internal val FX_HALO_LEVELS = FloatArray(FX_HALO_BANDS) { band ->
     (1f - band / FX_HALO_BANDS.toFloat()).pow(FX_HALO_FALLOFF)
@@ -128,26 +128,26 @@ internal const val FX_HALO_MAX_WIDTH_DP = 24f
 /**
  * 彩虹环的颜色：绕屏幕中心一圈的角度渐变，**首尾同色**，所以 0° 那里没有接缝。
  *
- * 天蓝 → 淡紫 → 玫瑰 → 浅金 → 薄荷 → 水青 → 天蓝，六段等分，明度接近。
+ * 天蓝 → 紫 → 玫瑰 → 金 → 薄荷 → 水青 → 天蓝，六段等分。
  * 颜色不透明，亮度由 `Paint.alpha` 调（shader 的输出会被 paint 的 alpha 调制，所以呼吸与闪光
  * 的 alpha 仍然有效）。
  */
 internal val FX_RAINBOW = intArrayOf(
-    0xFF8AB8F8.toInt(),
-    0xFFB69AE8.toInt(),
-    0xFFE89ABA.toInt(),
-    0xFFEDBF88.toInt(),
-    0xFF83CFB1.toInt(),
-    0xFF83D0DB.toInt(),
-    0xFF8AB8F8.toInt(),
+    0xFF56A8FF.toInt(),
+    0xFFAC7BFA.toInt(),
+    0xFFFF71B0.toInt(),
+    0xFFFFC264.toInt(),
+    0xFF54DBA5.toInt(),
+    0xFF46D9E6.toInt(),
+    0xFF56A8FF.toInt(),
 )
 
 /**
- * 色相转一圈的时间：8s，即 0.045°/ms。
+ * 色相转一圈的时间为 6s。
  *
  * 取模之后再算角度，避免开机时间增长后的 float 精度损失。
  */
-internal const val FX_HUE_PERIOD_MS = 8000L
+internal const val FX_HUE_PERIOD_MS = 6000L
 
 /** A slow, shallow breath keeps an active operation visibly lit through the whole cycle. */
 internal const val FX_BREATH_PERIOD_MS = 4800L

@@ -24,6 +24,7 @@ internal fun rememberChatReadingPosition(
     val listState = transcript.listState
     val viewport = transcript.viewport
     val transcriptPosition = remember(listState) { TranscriptPosition(listState) }
+    val nestedScrollingNow = remember(transcriptPosition) { { transcriptPosition.nestedScrolling } }
     val followPositionNow = rememberUpdatedState {
         settings.autoFollow && scroll.stickToBottom && !scroll.restoring &&
             !pressed && !pressGuardOn && !listState.isScrollInProgress
@@ -33,6 +34,7 @@ internal fun rememberChatReadingPosition(
             !listState.isScrollInProgress && viewport.presented && viewport.entrance.value >= 1f
     }
     SideEffect {
+        scroll.nestedScrolling = nestedScrollingNow
         transcriptPosition.following = { followPositionNow.value() }
         transcriptPosition.reading = { readingPositionNow.value() }
         transcriptPosition.latestStillWanted = { scroll.stickToBottom }
@@ -43,7 +45,7 @@ internal fun rememberChatReadingPosition(
         // The task finishes immediately; only a visible live row's automatic geometry
         // hand-over waits until character anchoring can run without fighting a gesture.
         !scroll.stickToBottom && !scroll.restoring &&
-            (pressed || pressGuardOn || listState.isScrollInProgress) &&
+            (pressed || pressGuardOn || listState.isScrollInProgress || transcriptPosition.nestedScrolling) &&
             listState.layoutInfo.visibleItemsInfo.any {
                 it.key == liveRowKey(state.conversationId, runId)
             }

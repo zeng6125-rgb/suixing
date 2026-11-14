@@ -23,7 +23,11 @@ internal object NativeJsonTree {
     fun string(input: ByteBuffer, maxUnits: Int = 1_048_576): String {
         val length = integer(input)
         valid(length in 0..maxUnits && length.toLong() * 2 <= input.remaining())
-        return CharArray(length) { input.short.toInt().and(0xffff).toChar() }.concatToString()
+        if (length < 32) return CharArray(length) { input.short.toInt().and(0xffff).toChar() }.concatToString()
+        val chars = CharArray(length)
+        input.asCharBuffer().get(chars)
+        input.position(input.position() + length * 2)
+        return chars.concatToString()
     }
     @OptIn(ExperimentalSerializationApi::class)
     fun element(input: ByteBuffer): JsonElement {

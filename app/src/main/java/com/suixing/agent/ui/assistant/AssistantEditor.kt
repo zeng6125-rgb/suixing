@@ -592,7 +592,7 @@ private fun ToolSection(
     toolNames: List<String>,
     onDraft: (Assistant) -> Unit,
 ) {
-    val off = draft.disabledTools.toSet()
+    val off = remember(draft.disabledTools) { draft.disabledTools.toSet() }
     SectionCard(
         title = "工具",
         icon = ImageVector.vectorResource(R.drawable.ic_wrench),

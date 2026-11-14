@@ -105,13 +105,6 @@ class FloatConsoleService : Service() {
         internal const val PANEL_MIN_HEIGHT_DP = 160
         internal const val PANEL_MAX_HEIGHT_DP = 640
 
-        /** How much of a message the panel's summary keeps, per line. */
-        /** 每条消息在悬浮窗里最多截多少字（内容区可滚后放宽，长答也能看个大概）。 */
-        internal const val MESSAGE_PREVIEW_CHARS = 160
-
-        /** 悬浮窗最多回显最近几条会话消息（内容区可滚，用户拖高就能看全这几条）。 */
-        internal const val RECENT_MESSAGE_COUNT = 6
-
         /** The engine publishes a running tool as 「🔧 name…」 on [AgentEngine.RunHandle.liveLine]. */
         internal const val TOOL_LIVE_PREFIX = "🔧 "
 
@@ -195,24 +188,28 @@ class FloatConsoleService : Service() {
     internal lateinit var panel: LinearLayout
     internal lateinit var ballMotionView: ImageView
     internal lateinit var stateText: TextView
-    internal lateinit var liveText: TextView
-    internal lateinit var statsText: TextView
+    internal var conversationProgress = ""
     internal lateinit var conversationText: TextView
-    /** 尾部读取闸门与最近一次结果（issue #69 P1-A）：同内容重复发射不再读盘。 */
+    /** 同内容重复发射复用成功读取的会话尾部。 */
     internal val tailGate = TailReadGate()
-    internal var tailCache: List<com.suixing.agent.data.StoredMessage> = emptyList()
 
     internal lateinit var recentText: TextView
+    internal lateinit var liveAnswerText: TextView
+    internal var liveAnswerChatId: String? = null
+    internal var liveAnswerMessageId: String? = null
+    internal var renderedConversationId: String? = null
+    internal var renderedMessages: List<StoredMessage> = emptyList()
+    internal var renderedMessageCount = 0
+    internal var historyPositioned = false
 
     /** 会话内容的可滚容器：手柄纵向拖动改的就是它的高度（用户拖高＝多看内容）。 */
     internal lateinit var contentScroll: ScrollView
     internal lateinit var steerInput: EditText
     internal lateinit var sendButton: TextView
     internal lateinit var stopArea: LinearLayout
-    internal lateinit var feedbackText: TextView
 
     /** 底部动作行的「停止」按钮：单 run 时显示在「回到对话」右侧，多 run 时隐藏（改走标题行）。 */
-    internal lateinit var stopButton: TextView
+    internal lateinit var stopButton: View
 
     private var initializing = false
     internal var settingsLoaded = false
@@ -385,6 +382,9 @@ class FloatConsoleService : Service() {
      */
     private fun buildConsole() {
         stopAreaKey = null
+        historyPositioned = false
+        renderedConversationId = null
+        renderedMessages = emptyList()
         root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         panel = buildPanel()
         root.addView(buildBall())
@@ -510,7 +510,12 @@ class FloatConsoleService : Service() {
                 "resident=${settings.resident} whileRunning=${settings.whileRunning} automation=$automationActive " +
                 "visible=$visible attached=$attached",
         )
-        if (visible) attach() else detach()
+        if (visible) {
+            attach()
+            renderLiveAnswer()
+        } else {
+            detach()
+        }
         // A transient console has no further work once its final run has ended —— 但只能
         // 延迟复核后再停（见 stopCheck 的注释：run 可能还没注册进来）。
         if (settingsLoaded && !settings.resident && !running) {
@@ -627,6 +632,7 @@ class FloatConsoleService : Service() {
     /** The panel covers the chat screen, so it also has to be able to get back to it. */
     internal fun openChat() {
         val intent = Intent(this, MainActivity::class.java)
+            .putExtra(ChatCompletionNotifications.OPEN_CONVERSATION, renderedConversationId)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
         val pending = PendingIntent.getActivity(
             this,

@@ -80,7 +80,7 @@ class FailedAssistantNameTest {
                 })
             }
             val llm = mockk<LlmClient> {
-                coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any()) } returns
+                coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any(), any()) } returns
                     AssistantTurn("", listOf(ToolCallRequest("call", "echo", "{}")), "tool_calls")
             }
             val capabilities = mockk<CapabilityHub> { every { state } returns MutableStateFlow(CapabilityState()) }

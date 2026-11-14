@@ -10,7 +10,17 @@ import kotlinx.coroutines.launch
 import java.util.UUID
 
 internal fun ChatRuntime.handleEvent(chatId: String, event: AgentEvent) {
-    val live = sessions[chatId] ?: return
+    val next = deltaBuffer.locked { applyEventLocked(chatId, event) } ?: return
+    if (event is AgentEvent.ToolFinished) event.todoSnapshot?.let { board ->
+        setTodos(chatId, board)
+        _state.update { if (it.conversationId == chatId) it.copy(todos = board) else it }
+    }
+    // A handed-over line is persisted after its session update releases the stream lock.
+    if (event is AgentEvent.Steered) viewModelScope.launch { saveSession(next) }
+}
+
+private fun ChatRuntime.applyEventLocked(chatId: String, event: AgentEvent): RunSession? {
+    val live = sessions[chatId] ?: return null
     // The model can send hundreds of deltas a second, and every one of them used to
     // republish the state — which re-parses the whole Markdown body, because the render
     // cache is keyed by the text itself and a text that changes every frame is a miss
@@ -19,53 +29,15 @@ internal fun ChatRuntime.handleEvent(chatId: String, event: AgentEvent) {
     // flushes first, so nothing is ever applied out of order and no tail is lost.
     val textDelta = event is AgentEvent.TextDelta
     val reasoningDelta = event is AgentEvent.ReasoningDelta
-    // **一次事件里的「收 delta → 判断该不该发 → 取走缓冲」必须在一个临界区里做完**
-    // （issue #29）：这三步分开做时，IO 线程刚 append 完、另一线程的 flush 立刻把缓冲
-    // 取走 ⇒ 那一段输出凭空消失；`lastPublishAt` 的「每 DELTA_PUBLISH_MS 最多发一次」
-    // 也会被两个线程同时判定为「该发」。
-    //
-    // 临界区里不做任何挂起调用、也不回调本类 ⇒ 不会死锁。
-    var pending: Pair<String, String> = "" to ""
-    // `locked` 不是 inline（它要守住 DeltaBuffer 内部的锁），所以**不能**在块里 `return` ——
-    // 用 `hold` 标记"这次不发布"，出块后再 return。语义与原来的 `synchronized` + return 一致。
-    var hold = false
-    var needsTailFlush = false
-    deltaBuffer.locked {
-        if (textDelta) appendDeltaLocked(chatId, event.text, "")
-        if (reasoningDelta) appendDeltaLocked(chatId, "", event.text)
-        if (textDelta || reasoningDelta) {
-            val now = SystemClock.uptimeMillis()
-            // 还没到节拍：缓冲留着，攒到下一次一起发（与改动前一致）。
-            if (!mayPublishLocked(chatId, now)) {
-                hold = true
-                // 临界区里只登记意图，真正的调度在出块后做（临界区不许有挂起/分配外的副作用）。
-                needsTailFlush = true
-                return@locked
-            }
-            // **不做前后台区分**（用户明确要求）：后台会话必须与前台**完全一致、依旧实时**。
-            // 之前这里有一句"后台会话不发布"，那是把行为按"是否在屏幕上"分叉了 —— 不允许。
-            // 真正要解决的是"发布这一下有多贵"，而不是"后台干脆不发"：
-            // `applyPending` 实际跑在 IO 读流线程上（`LlmClient.complete` 整体在
-            // `withContext(Dispatchers.IO)` 内回调 `onReasoning`/`onDelta`），
-            // 所以这里的 O(n) 拼接是分配/GC 压力，不是主线程卡顿。
-        }
-        // Whatever has arrived so far, applied in one go. For a non-delta event this is the
-        // flush; for a delta it is the publish that got through the interval above.
-        pending = takeDeltasLocked(chatId)
+    // Buffer removal and session replacement share one transaction with timer flushes.
+    if (textDelta) appendDeltaLocked(chatId, event.text, "")
+    if (reasoningDelta) appendDeltaLocked(chatId, "", event.text)
+    if ((textDelta || reasoningDelta) && !mayPublishLocked(chatId, SystemClock.uptimeMillis())) {
+        scheduleTailFlush(chatId)
+        return null
     }
-    if (hold) {
-        if (needsTailFlush) scheduleTailFlush(chatId)
-        return
-    }
-    val pendingText = pending.first
-    val pendingReasoning = pending.second
-    // **临界区之后重读一次**（评审 M5）：`live` 是在进入临界区**之前**取的快照，
-    // 而 `putSession` 是整体覆盖（`sessions[id] = next`）。若另一线程（主线程的
-    // `flushDeltas` / `mergeLiveDraft`）在这中间写入过，用旧快照算出来的 `next`
-    // 会把它刚合并进去的内容盖掉 —— 那种丢失只会发生在内存里，不报错也不落盘。
-    // 重读把窗口从"整个临界区+applyPending"缩到"两条语句之间"，并保留对方写入的字段。
-    val merged = sessions[chatId] ?: live
-    val base = applyPending(merged, pendingText, pendingReasoning)
+    val (pendingText, pendingReasoning) = takeDeltasLocked(chatId)
+    val base = applyPending(live, pendingText, pendingReasoning)
     val next = when (event) {
         // Already folded into `base` above.
         is AgentEvent.TextDelta -> base.clearRetryStatus()
@@ -79,6 +51,7 @@ internal fun ChatRuntime.handleEvent(chatId: String, event: AgentEvent) {
             // 轮落盘＝一段结束：封口思考块，并把段起点推到封口后的末尾 —— 下一轮（或同一 run
             // 的下一段）的思考/正文不会与这一轮的合并成一个块。
             val sealed = base.parts.sealThinking(base.thinkingStartedAt)
+                .bindPreparedTools(event.message.toolCalls, event.toolStreamIndices)
             base.copy(
                 messages = base.messages + event.message.copy(runId = base.runId),
                 parts = sealed,
@@ -92,9 +65,16 @@ internal fun ChatRuntime.handleEvent(chatId: String, event: AgentEvent) {
             )
         }
 
+        is AgentEvent.ToolPrepared -> base.copy(
+            status = if (base.runningTool == null) "正在准备调用 ${event.name}" else base.status,
+            parts = base.parts.sealThinking(base.thinkingStartedAt)
+                .prepareTool(event.streamIndex, event.name, base.segmentStart),
+        )
+
         is AgentEvent.ToolStarted -> {
             // 工具行＝一段结束（理由同 [appendText]：工具前后的正文是两段话）。
-            val sealed = base.parts.sealThinking(base.thinkingStartedAt).startTool(event.name, event.args)
+            val sealed = base.parts.sealThinking(base.thinkingStartedAt)
+                .startTool(event.name, event.args, event.callId, event.streamIndex)
             base.copy(
                 // 「正在调用」 rather than a bare verb: the line is a sentence the user reads
                 // while waiting, and 「调用 read_file」 read as a log entry.
@@ -111,12 +91,12 @@ internal fun ChatRuntime.handleEvent(chatId: String, event: AgentEvent) {
             runningTool = null,
             // The result hangs off the call it belongs to, not only off the
             // transcript: the row needs its output and its screenshot.
-            parts = base.parts.attachToolMessage(event.message),
+            parts = base.parts.attachToolMessage(event.message, event.streamIndex),
         )
 
         is AgentEvent.ToolFinished -> base.copy(
             runningTool = null,
-            parts = base.parts.finishTool(event.name, event.ok),
+            parts = base.parts.finishTool(event.name, event.ok, event.callId, event.streamIndex),
         )
 
         // The error rides with the run: it shows on the error card only while that
@@ -183,6 +163,13 @@ internal fun ChatRuntime.handleEvent(chatId: String, event: AgentEvent) {
             )
         }
 
+        is AgentEvent.RunDuration -> {
+            val index = base.messages.indexOfLast { it.runId == base.runId }
+            if (index < 0) base else base.copy(messages = base.messages.toMutableList().apply {
+                this[index] = this[index].copy(runElapsedMs = event.elapsedMs)
+            })
+        }
+
         is AgentEvent.Finished -> {
             retriesThisRun = 0
             // 这一轮成功了：屏幕上不该再挂着任何错误。重试成功的轮次走的是过程留痕
@@ -197,6 +184,7 @@ internal fun ChatRuntime.handleEvent(chatId: String, event: AgentEvent) {
             parts = base.parts.take(base.segmentStart.coerceIn(0, base.parts.size)),
             streaming = "",
             reasoningRevision = 0,
+            status = if (base.status.startsWith("正在准备调用 ")) "" else base.status,
         )
 
         // 压缩摘要正在生成：状态行改说这件事（run 中也要有，用户要求）。
@@ -264,11 +252,5 @@ internal fun ChatRuntime.handleEvent(chatId: String, event: AgentEvent) {
         }
     }
     putSession(next)
-    if (event is AgentEvent.ToolFinished) event.todoSnapshot?.let { board ->
-        setTodos(chatId, board)
-        _state.update { if (it.conversationId == chatId) it.copy(todos = board) else it }
-    }
-    // Saved straight away: a handed-over line that only lived in memory would vanish the
-    // moment the user switches conversations, which is when they go looking for it.
-    if (event is AgentEvent.Steered) viewModelScope.launch { saveSession(next) }
+    return next
 }

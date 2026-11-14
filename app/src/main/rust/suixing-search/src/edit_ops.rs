@@ -6,10 +6,12 @@ use std::ptr;
 use std::slice;
 use std::sync::atomic::AtomicBool;
 
-const MAGIC: u32 = 0x3145_5853;
+const MAGIC: u32 = 0x3245_5853;
 const MAX_UNITS: usize = 4 * 1024 * 1024;
 const SUMMARY: usize = 8;
 const POLL: usize = 8192;
+const ACTIVITY_TEXT_LIMIT: usize = 128 * 1024;
+const ACTIVITY_LINE_LIMIT: usize = 4_000;
 const COMPATIBILITY: i32 = 4;
 const SUMMARY_ONLY: u32 = 0;
 const CHANGED: u32 = 1;
@@ -63,7 +65,7 @@ pub unsafe extern "C" fn sx_edit_apply(
         // Check the impossible needle before constructing its slice: on 32-bit targets a Java
         // string's declared length can otherwise exceed Rust's isize-sized u16 slice bound.
         let bytes = if old_len > text_len {
-            response(SUMMARY_ONLY, 0, &[], &[], &cancelled)?
+            response(SUMMARY_ONLY, 0, &[], &[], None, &cancelled)?
         } else {
             let text = if text_len == 0 {
                 &[]
@@ -224,9 +226,11 @@ fn response(
     count: u32,
     lines: &[u32],
     changed: &[u16],
+    activity_counts: Option<(u32, u32)>,
     cancelled: &AtomicBool,
 ) -> Result<Vec<u8>, i32> {
-    let mut bytes = Vec::with_capacity(24 + lines.len() * 4 + changed.len() * 2);
+    let mut bytes = Vec::with_capacity(32 + lines.len() * 4 + changed.len() * 2);
+    let (added, removed) = activity_counts.unwrap_or((u32::MAX, u32::MAX));
     for integer in [
         MAGIC,
         kind,
@@ -234,6 +238,8 @@ fn response(
         lines.len() as u32,
         changed.len() as u32,
         0,
+        added,
+        removed,
     ] {
         bytes.extend_from_slice(&integer.to_le_bytes());
     }
@@ -253,6 +259,93 @@ fn response(
     Ok(bytes)
 }
 
+fn equal_units(before: &[u16], after: &[u16], cancelled: &AtomicBool) -> Result<bool, i32> {
+    if before.len() != after.len() {
+        return Ok(false);
+    }
+    for (old, new) in before.chunks(POLL).zip(after.chunks(POLL)) {
+        check_cancelled(cancelled)?;
+        if old != new {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// CR, LF and CRLF end a logical line; a terminating newline adds no empty line.
+fn activity_line_ends(text: &[u16], cancelled: &AtomicBool) -> Result<Option<Vec<usize>>, i32> {
+    let mut ends = Vec::new();
+    let mut at = 0;
+    let mut work = 0;
+    while at < text.len() {
+        poll(cancelled, &mut work)?;
+        let unit = text[at];
+        at += 1;
+        if unit == 13 || unit == 10 {
+            if unit == 13 && text.get(at) == Some(&10) {
+                at += 1;
+            }
+            ends.push(at);
+            if ends.len() > ACTIVITY_LINE_LIMIT {
+                return Ok(None);
+            }
+        }
+    }
+    if ends.last().copied().unwrap_or(0) < text.len() {
+        ends.push(text.len());
+        if ends.len() > ACTIVITY_LINE_LIMIT {
+            return Ok(None);
+        }
+    }
+    check_cancelled(cancelled)?;
+    Ok(Some(ends))
+}
+
+/// Count the replaced block after trimming equal whole lines, including their newline units.
+fn activity_counts(
+    before: &[u16],
+    after: &[u16],
+    cancelled: &AtomicBool,
+) -> Result<Option<(u32, u32)>, i32> {
+    if before.len() > ACTIVITY_TEXT_LIMIT || after.len() > ACTIVITY_TEXT_LIMIT {
+        return Ok(None);
+    }
+    for chunk in before.chunks(POLL).chain(after.chunks(POLL)) {
+        check_cancelled(cancelled)?;
+        if chunk.contains(&0) {
+            return Ok(None);
+        }
+    }
+    if equal_units(before, after, cancelled)? {
+        return Ok(Some((0, 0)));
+    }
+    let Some(old_ends) = activity_line_ends(before, cancelled)? else {
+        return Ok(None);
+    };
+    let Some(new_ends) = activity_line_ends(after, cancelled)? else {
+        return Ok(None);
+    };
+    let start = |ends: &[usize], index: usize| if index == 0 { 0 } else { ends[index - 1] };
+    let equal_line = |old_index, new_index| {
+        equal_units(
+            &before[start(&old_ends, old_index)..old_ends[old_index]],
+            &after[start(&new_ends, new_index)..new_ends[new_index]],
+            cancelled,
+        )
+    };
+    let mut first = 0;
+    while first < old_ends.len() && first < new_ends.len() && equal_line(first, first)? {
+        first += 1;
+    }
+    let mut old_last = old_ends.len();
+    let mut new_last = new_ends.len();
+    while old_last > first && new_last > first && equal_line(old_last - 1, new_last - 1)? {
+        old_last -= 1;
+        new_last -= 1;
+    }
+    Ok(Some(((new_last - first) as u32, (old_last - first) as u32)))
+}
+
 fn edit(
     text: &[u16],
     old: &[u16],
@@ -263,7 +356,7 @@ fn edit(
     cancelled: &AtomicBool,
 ) -> Result<Vec<u8>, i32> {
     if old.len() > text.len() {
-        return response(SUMMARY_ONLY, 0, &[], &[], cancelled);
+        return response(SUMMARY_ONLY, 0, &[], &[], None, cancelled);
     }
     let needle = Needle::new(old, cancelled)?;
     let mut count = 0u32;
@@ -276,20 +369,20 @@ fn edit(
         Ok(())
     })?;
     if count == 0 || (!replace_all && count > 1) {
-        return response(SUMMARY_ONLY, count, &lines, &[], cancelled);
+        return response(SUMMARY_ONLY, count, &lines, &[], None, cancelled);
     }
     if oversized_replacement {
-        return response(TOO_LARGE, count, &lines, &[], cancelled);
+        return response(TOO_LARGE, count, &lines, &[], None, cancelled);
     }
     let remaining = text.len() - count as usize * old.len();
     let Some(length) = (count as usize)
         .checked_mul(replacement.len())
         .and_then(|n| remaining.checked_add(n))
     else {
-        return response(TOO_LARGE, count, &lines, &[], cancelled);
+        return response(TOO_LARGE, count, &lines, &[], None, cancelled);
     };
     if length > max {
-        return response(TOO_LARGE, count, &lines, &[], cancelled);
+        return response(TOO_LARGE, count, &lines, &[], None, cancelled);
     }
     let mut changed = Vec::with_capacity(length);
     let mut copied = 0;
@@ -301,7 +394,81 @@ fn edit(
     })?;
     append_units(&mut changed, &text[copied..], cancelled)?;
     if !fits_utf8(&changed, max, cancelled)? {
-        return response(TOO_LARGE, count, &lines, &[], cancelled);
+        return response(TOO_LARGE, count, &lines, &[], None, cancelled);
     }
-    response(CHANGED, count, &lines, &changed, cancelled)
+    let counts = activity_counts(text, &changed, cancelled)?;
+    response(CHANGED, count, &lines, &changed, counts, cancelled)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn counts(before: &str, after: &str) -> Option<(u32, u32)> {
+        activity_counts(
+            &before.encode_utf16().collect::<Vec<_>>(),
+            &after.encode_utf16().collect::<Vec<_>>(),
+            &AtomicBool::new(false),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn counts_preserve_whole_logical_lines() {
+        for (before, after, expected) in [
+            ("", "\n", (1, 0)),
+            ("\n", "", (0, 1)),
+            ("a", "a\n", (1, 1)),
+            ("a\n", "a\r\n", (1, 1)),
+            ("a\nb\nc\n", "a\nx\nc\n", (1, 1)),
+            ("a\rb\rc\r", "a\rx\ry\rc\r", (2, 1)),
+            ("a\r\nb\r\nc\r\n", "a\r\nc\r\n", (0, 1)),
+            ("开头\n旧😀\n结尾", "开头\n新😀\n新增\n结尾", (2, 1)),
+            ("same", "same", (0, 0)),
+            ("", "", (0, 0)),
+        ] {
+            assert_eq!(
+                counts(before, after),
+                Some(expected),
+                "{before:?} -> {after:?}"
+            );
+        }
+        assert_eq!(
+            activity_counts(
+                &[0xd800, 10, 0xdc00],
+                &[0xd800, 10, 0xdc01],
+                &AtomicBool::new(false),
+            )
+            .unwrap(),
+            Some((1, 1))
+        );
+    }
+
+    #[test]
+    fn unknown_limits_keep_equality_shortcut_order() {
+        let lines = "a\n".repeat(ACTIVITY_LINE_LIMIT);
+        assert_eq!(counts(&lines, &format!("b\n{}", &lines[2..])), Some((1, 1)));
+        let extra_line = format!("{lines}a\n");
+        assert_eq!(counts(&extra_line, &extra_line), Some((0, 0)));
+        assert_eq!(counts(&extra_line, &lines), None);
+        assert_eq!(counts(&lines, &extra_line), None);
+        let text = "a".repeat(ACTIVITY_TEXT_LIMIT);
+        assert_eq!(
+            counts(&text, &"b".repeat(ACTIVITY_TEXT_LIMIT)),
+            Some((1, 1))
+        );
+        let too_long = format!("{text}a");
+        assert_eq!(counts(&too_long, &too_long), None);
+        assert_eq!(counts(&text, &too_long), None);
+        assert_eq!(counts("a\0b", "a\0b"), None);
+        assert_eq!(counts("ab", "a\0b"), None);
+    }
+
+    #[test]
+    fn counts_propagate_cancellation() {
+        assert_eq!(
+            activity_counts(&[97, 10], &[98, 10], &AtomicBool::new(true)),
+            Err(crate::STATUS_CANCELLED)
+        );
+    }
 }

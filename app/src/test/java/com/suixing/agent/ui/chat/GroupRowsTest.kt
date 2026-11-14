@@ -4,6 +4,7 @@ import com.suixing.agent.data.Roles
 import com.suixing.agent.data.StoredMessage
 import com.suixing.agent.data.StoredToolCall
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -55,6 +56,49 @@ class GroupRowsTest {
         StoredMessage(id = id, role = Roles.USER, text = "插 $id", steer = true, runId = run)
 
     private fun group(messages: List<StoredMessage>) = groupRows(messages, emptyMap(), false)
+
+    @Test fun `the live row owns pending tools steers and system receipts`() {
+        val messages = listOf(
+            question("q0"), round("a0", "saved", "已有回答", null),
+            question("q1"), steer("early", "live"),
+            silentRound("a1", "live", "t1"), result("m1", "live", "t1"),
+            StoredMessage(id = "receipt", role = Roles.SYSTEM, text = "回执", runId = "live"),
+            result("m2", "live", "t2"), steer("s1", "live"),
+            round("a2", "live", "正在回答", "思考"),
+        )
+        val rows = groupRows(messages, emptyMap(), running = true, pendingRun = "live")
+        assertEquals(listOf("q0", "a0", "q1"), rows.map { it.message.id })
+        assertTrue(rows.none { row -> row.parts.any { it is Part.Tools || it is Part.Steer } })
+
+        val settled = groupRows(messages, emptyMap(), running = false)
+        val answer = settled.single { it.message.id == "a2" }
+        assertEquals(listOf("t1", "t2"),
+            answer.parts.filterIsInstance<Part.Tools>().flatMap { it.calls }.map { it.name })
+        assertEquals("s1", answer.parts.filterIsInstance<Part.Steer>().single().message.id)
+        assertTrue(answer.branch?.canRegenerate == true)
+    }
+
+    @Test fun `hiding a live row preserves tool ownership in a mid-turn page`() {
+        val messages = listOf(
+            round("old", "saved", "已有回答", null),
+            silentRound("silent", "live", "t1"), result("m1", "live", "t1"),
+            round("current", "live", "新回答", "思考"), result("m2", "live", "t2"),
+            steer("s1", "live"),
+        )
+        val expected = groupRows(messages, emptyMap(), running = true)
+            .filterNot { it.message.runId == "live" }
+        val actual = groupRows(messages, emptyMap(), running = true, pendingRun = "live")
+        assertEquals(expected, actual)
+        assertEquals(listOf("t1"),
+            actual.single().parts.filterIsInstance<Part.Tools>().flatMap { it.calls }.map { it.name })
+    }
+
+    @Test fun `a pending answer suppresses the old branch before its first stored round`() {
+        val messages = listOf(question("q1"), round("a1", "saved", "旧回答", null))
+        assertEquals(listOf("q1"),
+            groupRows(messages, mapOf("q1" to "live"), running = true, pendingRun = "live")
+                .map { it.message.id })
+    }
 
     /**
      * The reported screenshot: three silent tool rounds, then one round that thought, ran
@@ -292,5 +336,86 @@ class GroupRowsTest {
 
         assertEquals(listOf("q1", "a2"), rows.map { it.message.id })
         assertEquals(listOf("m1", "a2"), rows[1].rounds.map { it.id })
+    }
+
+    @Test
+    fun `a long orphan legacy run keeps its tool blocks and round identities`() {
+        val firstTools = List(128) { result("first-$it", "", "first-$it") }
+        val secondTools = List(128) { result("second-$it", "", "second-$it") }
+        val thinking = round("thinking", "", "", "想过")
+        val answer = round("answer", "", "正文", null)
+
+        val card = group(firstTools + thinking + secondTools + answer).single()
+
+        assertSame(answer, card.message)
+        assertEquals(4, card.parts.size)
+        assertEquals(
+            List(128) { "first-$it" },
+            (card.parts[0] as Part.Tools).calls.map { it.name },
+        )
+        assertEquals("想过", (card.parts[1] as Part.Thinking).text)
+        assertEquals(
+            List(128) { "second-$it" },
+            (card.parts[2] as Part.Tools).calls.map { it.name },
+        )
+        assertEquals("正文", (card.parts[3] as Part.Text).text)
+        assertEquals(listOf("first-0", "thinking", "answer"), card.rounds.map { it.id })
+        assertSame(firstTools.first(), card.rounds[0])
+        assertSame(thinking, card.rounds[1])
+        assertSame(answer, card.rounds[2])
+        assertSame(firstTools.last(), (card.parts[0] as Part.Tools).calls.last().message)
+    }
+
+    @Test
+    fun `retry traces preserve thinking dedup and later tool boundaries`() {
+        val first = round("a1", "r1", "", "想过").copy(reasoningTokens = 7, elapsedMs = 9)
+        val retried = round("a2", "r1", "", "想过").copy(traceNote = "重试")
+        val later = round("a3", "r1", "", "想过")
+        val answer = round("a4", "r1", "正文", "想过")
+
+        val card = group(listOf(
+            question("q1"), first, retried, later, result("m1", "r1", "t1"), answer,
+        ))[1]
+
+        assertEquals(6, card.parts.size)
+        assertEquals(Part.Thinking("想过", 7, 9, "r1"), card.parts[0])
+        assertEquals(Part.Trace("重试"), card.parts[1])
+        assertEquals(Part.Thinking("想过", 0, 0, "r1"), card.parts[2])
+        assertEquals(listOf("t1"), (card.parts[3] as Part.Tools).calls.map { it.name })
+        assertEquals(Part.Thinking("想过", 0, 0, "r1"), card.parts[4])
+        assertEquals(Part.Text("正文"), card.parts[5])
+        assertEquals(listOf("a1", "a2", "a3", "a4"), card.rounds.map { it.id })
+    }
+
+    @Test
+    fun `a system receipt preserves the open tool block and time label anchors`() {
+        val first = round("a1", "r1", "", "想过").copy(timestamp = 1)
+        val answer = round("a2", "r1", "正文", null).copy(timestamp = 5 * TIME_LABEL_GAP_MS)
+        val receipt = StoredMessage(
+            id = "receipt",
+            role = Roles.SYSTEM,
+            text = "回执",
+            runId = "r1",
+            timestamp = 3 * TIME_LABEL_GAP_MS,
+        )
+        val messages = listOf(
+            question("q1").copy(timestamp = 0),
+            first,
+            result("m1", "r1", "t1").copy(timestamp = 2 * TIME_LABEL_GAP_MS),
+            receipt,
+            result("m2", "r1", "t2").copy(timestamp = 4 * TIME_LABEL_GAP_MS),
+            answer,
+            question("q2").copy(timestamp = 6 * TIME_LABEL_GAP_MS),
+        )
+
+        val rows = group(messages)
+
+        assertEquals(listOf("q1", "a2", "receipt", "q2"), rows.map { it.message.id })
+        assertEquals(listOf(true, false, true, false), rows.map { it.showTimeLabel })
+        assertEquals(3, rows[1].parts.size)
+        assertEquals(listOf("t1", "t2"), (rows[1].parts[1] as Part.Tools).calls.map { it.name })
+        assertEquals(listOf("a1", "a2"), rows[1].rounds.map { it.id })
+        assertSame(answer, rows[1].message)
+        assertSame(receipt, rows[2].message)
     }
 }

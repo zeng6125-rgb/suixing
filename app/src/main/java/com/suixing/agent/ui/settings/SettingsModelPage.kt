@@ -1,6 +1,5 @@
 package com.suixing.agent.ui.settings
 
-import com.suixing.agent.data.SecretBox
 import com.suixing.agent.ui.components.settingsPagePadding
 import com.suixing.agent.ui.components.SettingsStyle
 import com.suixing.agent.ui.components.CompletionDot
@@ -134,32 +133,17 @@ internal fun ModelSettingsPage(onBack: () -> Unit) {
     val pendingFields = rememberDebouncedSettingsWrites()
     // Null distinguishes loading from a genuinely empty supplier list.
     val loadedStored by produceState<AppSettings?>(null) {
-        // **密文没变就不重解密**（性能审计）：`decrypted()` 会解密顶层 apiKey + **每个**
-        // provider 的 apiKey，而 `SecretBox.decrypt` 每次都要 `KeyStore.getInstance(
-        // "AndroidKeyStore").load(null)` —— N+1 次 Keystore 往返。原来只要 settings 流发射
-        // （改主题、改字号、改任何字段）就整套重解一次。
-        //
-        // 判据用**密文指纹**：顶层 apiKey + 每个 provider 的 apiKey 按顺序。指纹相同时
-        // 说明密钥压根没变，只需把非密钥字段换成新的、密钥沿用上次解密结果。
-        // 指纹里含 provider 个数 ⇒ 增删供应商必然指纹不同，按位合并不存在错位。
-        var lastSecrets: Pair<String, List<String>>? = null
+        // Compare every stored credential, including search, speech and request headers.
+        // Unrelated settings updates reuse decoded values; changed credentials decode on IO.
+        var lastStored: AppSettings? = null
         var lastDecrypted: AppSettings? = null
         Core.settings.flow.collect { incoming ->
-            val secrets = incoming.apiKey to incoming.providers.map { it.apiKey }
+            val previous = lastStored
             val cached = lastDecrypted
-            val reused = cached != null && secrets == lastSecrets &&
-                cached.providers.size == incoming.providers.size
-            val decrypted = if (reused) {
-                incoming.copy(
-                    apiKey = cached!!.apiKey,
-                    providers = incoming.providers.mapIndexed { index, provider ->
-                        provider.copy(apiKey = cached.providers[index].apiKey)
-                    },
-                )
-            } else {
+            val decrypted = (if (previous != null && cached != null) incoming.reuseDecodedSecrets(previous, cached) else null) ?: run {
                 withContext(Dispatchers.IO) { incoming.decrypted() }
             }
-            lastSecrets = secrets
+            lastStored = incoming
             lastDecrypted = decrypted
             value = decrypted
         }
@@ -815,11 +799,10 @@ internal fun ModelSettingsPage(onBack: () -> Unit) {
                     // 一行一条 `Name: Value`，随每个请求发出（对话与模型列表都带）。raw 文本跟手指
                     // 走、form 解析后单向写 —— 与最大输出输入框同一条教训：value 从 form 反推会在
                     // 每次击键重组时丢焦点。
-                    var headersRaw by remember {
+                    var headersRaw by remember(seeded) {
                         mutableStateOf(
-                            // 请求头在表单里也必须是明文，否则用户看到 `enc1:…` 并把它再存一遍。
                             form.requestHeaders.entries.joinToString("\n") {
-                                "${it.key}: ${SecretBox.decrypt(it.value)}"
+                                "${it.key}: ${it.value}"
                             },
                         )
                     }

@@ -26,6 +26,25 @@ class SubagentConfigTest {
 
     private fun args(raw: String) = Json.parseToJsonElement(raw) as JsonObject
 
+    @Test fun `omitted child and template deadlines default to unlimited`() {
+        val parent = parentSettings()
+        assertEquals(0, parent.resolveSubagentConfig(SubagentLaunchOptions(), catalogue).config.timeoutSeconds)
+        assertEquals(0, Json.decodeFromString(ChildRunConfig.serializer(), "{}").timeoutSeconds)
+        val profile = Json.decodeFromString(SubagentProfile.serializer(), """{"id":"new"}""")
+        assertEquals(0, profile.timeoutSeconds)
+        assertEquals(0, parent.copy(subagentProfiles = listOf(profile), defaultSubagentProfileId = profile.id)
+            .resolveSubagentConfig(SubagentLaunchOptions(), catalogue).config.timeoutSeconds)
+    }
+
+    @Test fun `saved explicit deadline remains effective and launch can choose unlimited`() {
+        val profile = Json.decodeFromString(SubagentProfile.serializer(), """{"id":"limited","timeoutSeconds":180}""")
+        val parent = parentSettings().copy(subagentProfiles = listOf(profile), defaultSubagentProfileId = profile.id)
+        assertEquals(180, parent.resolveSubagentConfig(SubagentLaunchOptions(), catalogue).config.timeoutSeconds)
+        assertEquals(0, parent.resolveSubagentConfig(SubagentLaunchOptions(timeoutSeconds = 0), catalogue).config.timeoutSeconds)
+        assertEquals(90, parent.resolveSubagentConfig(SubagentLaunchOptions(timeoutSeconds = 90), catalogue).config.timeoutSeconds)
+        assertEquals(180, parent.subagentProfiles.single().timeoutSeconds)
+    }
+
     @Test fun `native bash is subject to the effective child tool whitelist`() {
         val parent = parentSettings()
         val allowed = parent.resolveSubagentConfig(SubagentLaunchOptions(allowedTools = listOf("bash")), catalogue).config

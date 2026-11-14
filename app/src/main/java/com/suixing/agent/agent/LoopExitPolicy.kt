@@ -32,6 +32,7 @@ internal class LoopExitPolicy(
     private val stats: () -> StreamStats,
     private val prepareCancelled: (LoopExit.Cancelled) -> Boolean,
     private val prepareCallerCancellation: (LoopExit.CallerCancelled) -> Unit,
+    private val recordDuration: (StreamStats) -> Unit = {},
 ) {
     fun finish(exit: LoopExit) {
         val reason = when (exit) {
@@ -63,14 +64,16 @@ internal class LoopExitPolicy(
             }
             else -> null
         }
+        val terminalStats = stats()
+        recordDuration(terminalStats)
         when (plan.event) {
             NativeLoopPolicy.EVENT_FINISHED_TEXT -> onEvent(AgentEvent.Finished((exit as LoopExit.Done).text))
             NativeLoopPolicy.EVENT_FINISHED_EMPTY -> onEvent(AgentEvent.Finished(""))
             NativeLoopPolicy.EVENT_FAILED -> onEvent(AgentEvent.Failed(checkNotNull(message)))
         }
         when (plan.state) {
-            NativeLoopPolicy.STATE_DONE -> publish(RunState.Done(stats()))
-            NativeLoopPolicy.STATE_CANCELLED -> publish(RunState.Cancelled(stats()))
+            NativeLoopPolicy.STATE_DONE -> publish(RunState.Done(terminalStats))
+            NativeLoopPolicy.STATE_CANCELLED -> publish(RunState.Cancelled(terminalStats))
             NativeLoopPolicy.STATE_FAILED -> publish(RunState.Failed(checkNotNull(message)))
         }
         when (plan.throwAction) {

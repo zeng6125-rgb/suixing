@@ -22,6 +22,8 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.FrameRateCategory
+import androidx.compose.ui.preferredFrameRate
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalConfiguration
@@ -60,12 +62,14 @@ fun ChatScreen(
     /** 顶栏溢出菜单：拉起系统浏览器 / 打开内置终端页。 */
     onOpenBrowser: () -> Unit = {},
     onOpenTerminal: () -> Unit = {},
+    onViewSubagents: (String, String?) -> Unit = { _, _ -> },
 ) {
     val actions = remember(viewModel) { ChatScreenActions(viewModel) }
     val state by actions.screenState.collectAsStateWithLifecycle()
     val accessibleActions = rememberChatAccessibility(state.conversationId)
-    val subagentUi = remember(state.conversationId) { SubagentUiState() }
-    SubagentDialogHost(state.conversationId, subagentUi)
+    val subagentUi = remember(state.conversationId, onViewSubagents) {
+        SubagentUiState { id -> onViewSubagents(state.conversationId, id) }
+    }
     // Only changes consumed by this page and its children invalidate the screen integration.
     // Floating-console geometry is excluded; voice/model settings still reach their consumers.
     val settings by remember {
@@ -203,11 +207,13 @@ fun ChatScreen(
     val loadingEarlier by earlierPaging.loading
     val loadEarlier = earlierPaging.onLoad
     val prepareRows = rememberChatMarkdownPreparation(state, transcript, actions)
+    val contentReadiness = remember(viewport) { ViewportContentReadiness() }
     key(state.conversationId) {
         BindConversationViewport(
             viewport, actions, scroll, visible, rowKeys, rowKeyIndices, rowOffset, itemCount, shownTurns, state.turnCount,
             MaterialTheme.typography.bodyMedium.fontSize.value * LocalDensity.current.fontScale,
-            positionStorageReady, state.messagesRevision, prepareRows,
+            positionStorageReady, state.messagesRevision, prepareRows, contentReadiness,
+            visible.isNotEmpty() || live || state.runningHere,
         )
     }
     // 正常按合并和放置解除 restoring；异常准备等待有上限，异步失败由 onComplete 解锁。
@@ -216,7 +222,7 @@ fun ChatScreen(
     // **key 里不要放 `stickToBottom`**（性能静态审查①）：那是 SnapshotStateMap 里的值，
     // 放在 key 位等于组合期订阅 —— 它每变一次就整屏重组，而拖动过程中它会被反复写。
     // 改成协程内订阅：语义等价（footprint 变或 stick 变都重算），但组合期零订阅。
-    LaunchedEffect(stackFootprint) {
+    LaunchedEffect(scroll, stackFootprint) {
         // 贴底时持续跟随；**另外**只要还没种过（0.dp）就种一次 —— 恢复位置进会话时
         // `stickToBottom` 一开始就是 false，条件永远不成立 ⇒ 整个阅读期间底边距是 0。
         // 贴底时持续跟随；没种过（null）也种一次 —— 恢复位置进会话时 `stickToBottom` 一开始就是
@@ -263,6 +269,7 @@ fun ChatScreen(
     val onPathMenu = remember { { path: String -> pathMenuPath = path } }
     CompositionLocalProvider(LocalPathClick provides onPathMenu, LocalAccessibleChatActions provides accessibleActions) {
     Scaffold(
+        modifier = Modifier.preferredFrameRate(FrameRateCategory.High),
         containerColor = MaterialTheme.colorScheme.background,
         // No topBar slot: the header floats over the transcript as three discs, so the
         // scaffold must not reserve a strip for it — content scrolling behind the
@@ -301,6 +308,7 @@ fun ChatScreen(
                 .padding(padding),
         ) {
 
+            CompositionLocalProvider(LocalViewportContentReadiness provides contentReadiness) {
             ChatTranscriptViewport(
                 state, settings, transcript, contextReadout, runPresentation, actions, inputBindings,
                 transcriptPosition, revealGuardSpec, gesture, scroll, selectionTracker, viewConfig,
@@ -308,6 +316,7 @@ fun ChatScreen(
                 { heldFootprint }, stackFootprint, bubbleMaxWidth, live,
                 loadingEarlier, loadEarlier, editMessage, onOpenSettings,
             )
+            }
 
             ChatScreenHeader(state, actions, contextReadout, subagentUi, canvasColor, onOpenBrowser, onOpenTerminal)
 

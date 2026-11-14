@@ -68,29 +68,26 @@ internal suspend fun ChatRuntime.writeLiveDraft(chatId: String) {
         // 保存之后被写成与 `lastSavedChars` 相同的值 ⇒ 差值恒为 0 ⇒ 永远 1s，2s/3s 不可达。
         // 增量的正确来源只能是“此刻内容有多长 − 上次真正落盘时多长”，所以量测必须在
         // `delay` **之前**、用不重建字符串的方式（见 [draftChars]）。
-        val liveNow = sessions[chatId]
-        val pendingNow = if (liveNow == null) 0
-        else liveNow.draftChars(deltaBuffer.locked { deltaBuffer.sizes(chatId) }) - lastSavedChars
+        val pendingNow = deltaBuffer.locked {
+            sessions[chatId]?.draftChars(deltaBuffer.sizes(chatId))?.minus(lastSavedChars) ?: 0
+        }
         delay(liveDraftIntervalMs(pendingChars = pendingNow.coerceAtLeast(0)))
-        val live = sessions[chatId] ?: continue
-        val pendingSize = deltaBuffer.locked { deltaBuffer.sizes(chatId) }
-        val prior = previous
-        if (prior != null && prior.runId == live.runId &&
-            prior.messages === live.messages && prior.parts === live.parts &&
-            prior.reasoningRevision == live.reasoningRevision && previousPending == pendingSize
-        ) continue
-        // The answer, the thinking beside it, and the rounds this run has already
-        // produced. The reasoning and those rounds are not "extra": the session is the
-        // only place they exist until the run ends, so a run that never ends would
-        // otherwise leave a paragraph with no chain of thought and no tool cards.
-        // **把还没发布的那段也算进去**：后台会话的 delta 只进缓冲、不进 `sessions`
-        // （0.8.333 的"后台不发布"），而 `live.streaming` 只反映已发布的那些 ——
-        // 不补的话，后台跑长回答时草稿永远是旧的/空的，进程一被杀就真丢输出。
-        val (pendingText, pendingReasoning) = deltaBuffer.locked { deltaBuffer.peek(chatId) }
-        // **组装也放 IO**：`derivedStreaming()` 是 O(正文长度) 的字符串重建，
-        // 而原来这一段跑在 `viewModelScope`（Main）上 —— 长回答时每秒在主线程上
-        // 重建一次整段正文。`saveLive` 自身已经在 IO 里，这里把整段一起放过去。
-        val built = withContext(Dispatchers.IO) {
+        val snapshot = withContext(Dispatchers.IO) {
+            // Freeze shared text and its pending tail together; each delta belongs to one side.
+            val captured = deltaBuffer.locked {
+                val live = sessions[chatId] ?: return@locked null
+                val pendingSize = deltaBuffer.sizes(chatId)
+                val prior = previous
+                if (prior != null && prior.runId == live.runId &&
+                    prior.messages === live.messages && prior.parts === live.parts &&
+                    prior.reasoningRevision == live.reasoningRevision && previousPending == pendingSize
+                ) return@locked null
+                val (pendingText, pendingReasoning) = deltaBuffer.peek(chatId)
+                Triple(live, pendingSize,
+                    (live.derivedStreaming() + pendingText) to (live.parts.thinkingText() + pendingReasoning))
+            } ?: return@withContext null
+            val (live, pendingSize, content) = captured
+            // Stored messages are immutable; filtering and disk work need no stream lock.
             if (messageSource !== live.messages || messageRun != live.runId) {
                 runMessages = live.messages.filter { it.runId == live.runId }
                 messageSource = live.messages
@@ -99,13 +96,13 @@ internal suspend fun ChatRuntime.writeLiveDraft(chatId: String) {
             liveDraftFor(
                 chatId = chatId,
                 runId = live.runId,
-                text = live.derivedStreaming() + pendingText,
-                // 正文在需要落盘这一刻从 `parts` 取一次快照（本块已在 IO 上）。
-                reasoning = live.parts.thinkingText() + pendingReasoning,
+                text = content.first,
+                reasoning = content.second,
                 messages = live.messages,
                 preparedMessages = runMessages,
-            )
+            )?.let { Triple(live, pendingSize, it) }
         } ?: continue
+        val (live, pendingSize, built) = snapshot
         if (!built.sameContentAs(written)) {
             environment.chats.saveLive(built)
             written = built
@@ -252,7 +249,9 @@ internal suspend fun ChatRuntime.persistDisplayed() {
         model = shown.model,
         checkpoints = shown.checkpoints,
     ) ?: return
-    if (title != shown.title) _state.update { it.copy(title = title) }
+    if (title != shown.title) _state.update {
+        if (it.conversationId == shown.conversationId) it.copy(title = title) else it
+    }
 }
 
 
@@ -278,9 +277,11 @@ internal suspend fun ChatRuntime.saveSession(live: RunSession): Boolean {
     // 等 `finally` 跑到时会话已被摘掉 ⇒ 水位一直是 false ⇒ 水位对"停止留下的草稿"
     // 几乎不生效。这里补上：写成功的那份就是内存这份。
     cacheMessages(live.chatId, live.messages, diskBacked = true)
-    val current = sessions[live.chatId]
-    if (current != null && title != current.title) {
-        putSession(current.copy(title = title))
+    deltaBuffer.locked {
+        val current = sessions[live.chatId]
+        if (current != null && title != current.title) {
+            putSession(current.copy(title = title))
+        }
     }
     return true
 }

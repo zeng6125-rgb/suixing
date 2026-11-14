@@ -87,7 +87,6 @@ import com.suixing.agent.ui.assistant.AssistantAvatar
 import com.suixing.agent.ui.chat.markdown.LocalPathClick
 import com.suixing.agent.ui.chat.markdown.MarkdownText
 import com.suixing.agent.ui.chat.markdown.MessageSegment
-import com.suixing.agent.ui.chat.markdown.splitImageSegments
 import com.suixing.agent.ui.components.SuixingMark
 import com.suixing.agent.ui.chat.markdown.markdownBody
 import com.suixing.agent.ui.theme.LocalUserBubbleColor
@@ -157,6 +156,7 @@ internal data class ToolLine(
     val elapsedMs: Long,
     /** The stored result; absent while the call is still running. */
     val message: StoredMessage? = null,
+    val preparing: Boolean = false,
 ) {
     companion object {
         fun of(message: StoredMessage): ToolLine = ToolLine(
@@ -175,6 +175,7 @@ internal data class ToolLine(
             ok = call.ok,
             elapsedMs = call.elapsedMs,
             message = call.message,
+            preparing = call.preparing,
         )
     }
 }
@@ -218,7 +219,10 @@ internal sealed interface Part {
         val sourceVersion: Int = -1,
         /** 来源缓冲的实例标识；0 = 没有可信来源。换缓冲 ⇒ 游标作废。 */
         val sourceId: Int = 0,
-    ) : Part
+    ) : Part {
+        // Live projections run on Default; stored rows keep their detection lazy.
+        val hasImageMarker = if (sourceVersion >= 0) text.contains("![") else null
+    }
 
     /**
      * A line the user typed mid-answer.
@@ -782,8 +786,7 @@ internal fun AssistantRow(
         // No footer during the run; do not repeatedly fold invisible tool metadata on token updates.
         emptyList()
     } else {
-        val gatheredFiles = fileActivities ?: remember(IdentityKey(parts)) { fileActivitiesFor(parts) }
-        remember(gatheredFiles) { gatheredFiles }
+        fileActivities ?: remember(IdentityKey(parts)) { fileActivitiesFor(parts) }
     }
     val processRun = runId.ifBlank { message?.id ?: "unkeyed" }
     if (streaming) reasoningExpansion.protectRun(processRun)
@@ -1072,26 +1075,23 @@ internal fun AssistantProse(
         retained = viewport?.prose,
     )
     val renderingLive = streaming || deferSettlement
-    val sourceSegments = remember(part.text, renderingLive) {
-        if (part.text.contains("![")) {
-            val segments = splitImageSegments(part.text, renderingLive)
-            if (segments.any { it is MessageSegment.Image }) segments else emptyList()
-        } else emptyList()
-    }
-    val hasImages = sourceSegments.isNotEmpty()
+    val imageSource = part.hasImageMarker ?: remember(part.text) { part.text.contains("![") }
+    val segments = if (imageSource) com.suixing.agent.ui.chat.markdown.rememberImageSegments(
+        shown, streaming = renderingLive || shown.length < part.text.length,
+        sourceVersion = part.sourceVersion, sourceId = part.sourceId,
+    ) else emptyList()
     // The live and stored rows have different composition owners. Carry the parser along
     // with the typewriter while a gesture holds completion, then release its source/cache.
-    val retainParser = !hasImages && (renderingLive || shown.length < part.text.length)
-    val parser = if (retainParser) viewport?.growingMarkdown() else null
+    val retainParser = !imageSource && (renderingLive || shown.length < part.text.length)
+    val parser = if (imageSource) null else if (retainParser) viewport?.growingMarkdown() else viewport?.retainedMarkdown()
     androidx.compose.runtime.SideEffect { if (!retainParser) viewport?.releaseMarkdown() }
     androidx.compose.runtime.CompositionLocalProvider(
         LocalReadingTextKey provides readingKey,
         com.suixing.agent.ui.chat.markdown.LocalRetainedLiveMarkdown provides parser,
     ) {
     if (renderingLive || !selectable || shown.length < part.text.length) {
-        if (hasImages) {
-            ProseWithImages(shown, streaming = true, part = part,
-                preparedSegments = if (renderingLive && shown === part.text) sourceSegments else null)
+        if (imageSource) {
+            ProseWithImages(segments, streaming = true, part = part)
         } else {
             MarkdownText(
                 text = shown,
@@ -1106,9 +1106,9 @@ internal fun AssistantProse(
                 sourceId = part.sourceId,
             )
         }
-    } else if (hasImages) {
+    } else if (imageSource) {
         SelectableWhenArmed {
-            ProseWithImages(part.text, streaming = false, part = part, preparedSegments = sourceSegments)
+            ProseWithImages(segments, streaming = false, part = part)
         }
     } else {
         SelectableWhenArmed { MarkdownText(text = part.text) }
@@ -1123,30 +1123,33 @@ internal fun AssistantProse(
  */
 @Composable
 private fun ProseWithImages(
-    text: String,
+    segments: List<MessageSegment>,
     streaming: Boolean,
     part: Part.Text,
-    preparedSegments: List<MessageSegment>? = null,
 ) {
-    // Full source text can reuse its detection parse. Typed prefixes still parse independently.
-    val segments = preparedSegments ?: remember(text, streaming) { splitImageSegments(text, streaming) }
+    val readingKey = LocalReadingTextKey.current
     Column(Modifier.fillMaxWidth()) {
-        segments.forEach { segment ->
+        segments.forEachIndexed { index, segment ->
             when (segment) {
                 is MessageSegment.Text -> if (segment.text.isNotBlank()) {
-                    MarkdownText(
-                        text = segment.text,
-                        settled = !streaming,
-                        cursor = false,
-                        appendFrom = part.sourceVersion,
-                        sourceId = part.sourceId,
-                    )
+                    val segmentKey = remember(readingKey, index) { readingKey?.let { imageSegmentReadingKey(it, index) } }
+                    androidx.compose.runtime.CompositionLocalProvider(LocalReadingTextKey provides segmentKey) {
+                        MarkdownText(
+                            text = segment.text,
+                            settled = !streaming,
+                            cursor = false,
+                            appendFrom = part.sourceVersion,
+                            sourceId = part.sourceId,
+                        )
+                    }
                 }
                 is MessageSegment.Image -> MessageImage(segment.url, segment.alt)
             }
         }
     }
 }
+
+internal fun imageSegmentReadingKey(partKey: String, index: Int): String = "$partKey:segment:$index"
 
 /**
  * The row under a reply that says "this answer is one of several". Arrows only

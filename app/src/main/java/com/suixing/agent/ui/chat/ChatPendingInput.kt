@@ -151,12 +151,11 @@ internal fun ChatRuntime.promoteTurn(chatId: String, id: String) {
 
 /** Mirrors one conversation's queue onto the screen, when that is the one on screen. */
 internal fun ChatRuntime.publishSteers(chatId: String) {
-    if (_state.value.conversationId != chatId) return
     // The queue is read **inside** the update's lambda, under the lock: the state update is
     // a compare-and-set loop, so a lost race re-reads the queue and publishes the newer
     // one. Reading it once before the update would let a later publish overwrite a newer
     // one with an older list.
-    _state.update { it.copy(pendingSteers = steersOf(chatId)) }
+    _state.update { if (it.conversationId == chatId) it.copy(pendingSteers = steersOf(chatId)) else it }
 }
 
 
@@ -189,8 +188,7 @@ internal fun ChatRuntime.takePendingTurn(chatId: String, id: String): PendingTur
 
 /** The same, for the 排队 turns waiting to become the next run. */
 internal fun ChatRuntime.publishPendingTurns(chatId: String) {
-    if (_state.value.conversationId != chatId) return
-    _state.update { it.copy(pendingTurns = pendingTurnsOf(chatId)) }
+    _state.update { if (it.conversationId == chatId) it.copy(pendingTurns = pendingTurnsOf(chatId)) else it }
 }
 
 

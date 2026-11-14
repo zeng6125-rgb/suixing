@@ -77,7 +77,7 @@ class AgentUiAutomationSessionTest {
     private fun client(afterTool: suspend () -> AssistantTurn): LlmClient {
         val rounds = AtomicInteger()
         return mockk {
-            coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
+            coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
                 if (rounds.incrementAndGet() == 1) {
                     AssistantTurn("", listOf(ToolCallRequest("tap", "ui_tap", "{}")), "tool_calls")
                 } else afterTool()

@@ -3,7 +3,9 @@ package com.suixing.agent.data
 import android.content.Context
 import io.mockk.every
 import io.mockk.mockk
+import io.mockk.spyk
 import java.io.File
+import java.lang.ref.WeakReference
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import org.junit.Assert.*
@@ -94,6 +96,38 @@ class Issue55StorageTest {
         assertEquals(first.copy(at = 2, text = "second"), repository().readLive("chat"))
         repository.clearLive("chat")
         assertFalse(payload.exists())
+    }
+
+    @Test fun `a collected draft snapshot is reloaded only once before another collection`() = runBlocking {
+        val repository = spyk(repository(), recordPrivateCalls = true)
+        val messages = listOf(StoredMessage(id = "tool", role = Roles.TOOL,
+            toolOutput = "x".repeat(600_000)))
+        val draft = LiveDraft("chat", "run", 1, "first", messages = messages)
+        repository.saveLive(draft)
+        val payload = chats.listFiles { f -> f.name.endsWith(".messages") }!!.single()
+        val retained = mutableListOf<Any?>()
+        var payloadReads = 0
+        every { repository["readSavedPayload"](payload.name) } answers {
+            payloadReads++
+            callOriginal().also { retained.add(it) }
+        }
+        val cache = ChatRepository::class.java.getDeclaredField("draftMessages").let {
+            it.isAccessible = true
+            it.get(repository) as Map<*, *>
+        }
+        val entry = cache["chat"]!!
+        val reference = entry.javaClass.getDeclaredField("messages").let {
+            it.isAccessible = true
+            it.get(entry) as WeakReference<*>
+        }
+        reference.clear()
+
+        repository.saveLive(draft.copy(at = 2, text = "second"))
+        repository.saveLive(draft.copy(at = 3, text = "third"))
+
+        assertEquals("the recovered snapshot must avoid another payload read", 1, payloadReads)
+        assertEquals(listOf(payload.name), chats.listFiles { f -> f.name.endsWith(".messages") }!!.map { it.name })
+        assertEquals(draft.copy(at = 3, text = "third"), repository().readLive("chat"))
     }
 
     @Test fun `legacy inline live payload remains recoverable`() = runBlocking {

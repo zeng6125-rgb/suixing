@@ -57,6 +57,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -83,9 +84,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.layout
-import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
@@ -207,6 +206,26 @@ internal fun popupNudge(anchorLeft: Float, width: Int, windowPx: Float, edgePx: 
     if (width <= 0 || anchorLeft == 0f) return 0f
     val left = anchorLeft.coerceIn(edgePx, (windowPx - edgePx - width).coerceAtLeast(edgePx))
     return left - anchorLeft
+}
+
+/** Position action menus from current layout bounds without publishing coordinates to composition. */
+internal class ComposerMenuPositionProvider(
+    private val edgePx: Float,
+    private val offsetYPx: Int,
+) : PopupPositionProvider {
+    override fun calculatePosition(
+        anchorBounds: IntRect,
+        windowSize: IntSize,
+        layoutDirection: LayoutDirection,
+        popupContentSize: IntSize,
+    ): IntOffset {
+        val nudge = popupNudge(anchorBounds.left.toFloat(), popupContentSize.width,
+            windowSize.width.toFloat(), edgePx).roundToInt()
+        return anchorBounds.topLeft +
+            Alignment.BottomStart.align(IntSize.Zero, anchorBounds.size, layoutDirection) -
+            Alignment.BottomStart.align(IntSize.Zero, popupContentSize, layoutDirection) +
+            IntOffset(if (layoutDirection == LayoutDirection.Ltr) nudge else -nudge, offsetYPx)
+    }
 }
 
 /**
@@ -538,14 +557,15 @@ internal fun Composer(
     // The window's own width, which is what a popup has to fit inside. `screenWidthDp` is the
     // window's, not the display's, so a card that fits here also fits a split-screen window.
     val windowWidth = LocalConfiguration.current.screenWidthDp.dp
-    val screenWidthPx = with(density) { windowWidth.toPx() }
-    val popupEdgePx = with(density) { POPUP_EDGE_AIR.toPx() }
+    val menuPopup = remember(density) {
+        with(density) {
+            ComposerMenuPositionProvider(edgePx = POPUP_EDGE_AIR.toPx(), offsetYPx = -44.dp.roundToPx())
+        }
+    }
     var menuOpen by remember { mutableStateOf(false) }
     var sheetOpen by remember { mutableStateOf(false) }
     // The approval mode's own card, anchored to its button like the other two.
     var approvalOpen by remember { mutableStateOf(false) }
-    var approvalAnchorLeft by remember { mutableStateOf(0f) }
-    var approvalWidth by remember { mutableStateOf(0) }
     // The two cards this row opens are focus-less (see [MenuCard]'s focusable): a focusable
     // popup window takes the keyboard away from the field, the shell then lays the composer
     // out a keyboard lower, and the card stays anchored to where the composer was — 250dp
@@ -777,7 +797,7 @@ internal fun Composer(
             }
             // 窗口里的内容没有父布局可量，卡片宽度只能取 pill 量到的宽度：左右各缩一个
             // STEER_QUEUE_INSET，与排队行同一个内缩。
-            var pillWidthPx by remember { mutableStateOf(0) }
+            var pillWidthPx by remember { mutableIntStateOf(0) }
             val slashInsetPx = with(density) { STEER_QUEUE_INSET.roundToPx() }
             val slashGapPx = with(density) { 6.dp.roundToPx() }
             val slashWidth = with(density) {
@@ -951,9 +971,7 @@ internal fun Composer(
                     // a 48dp minimum touch target, and a shorter row squeezed them into
                     // ellipses with the circle clipped to a 40x36 box.
                     val leadingControls: @Composable () -> Unit = {
-                        var plusAnchorLeft by remember { mutableStateOf(0f) }
-                        var plusWidth by remember { mutableStateOf(0) }
-                        Box(Modifier.onGloballyPositioned { plusAnchorLeft = it.boundsInWindow().left }) {
+                        Box {
                             IconButton(
                                 onClick = { sheetOpen = false; approvalOpen = false; menuOpen = true },
                                 // 36dp around the glyph's original 22dp. What the eye measures is the
@@ -984,24 +1002,13 @@ internal fun Composer(
                                 // air the card is meant to leave above it (-8dp alone left the card
                                 // sitting on the button).
                                 alignment = Alignment.BottomStart,
-                                offset = with(density) {
-                                    IntOffset(
-                                        popupNudge(
-                                            anchorLeft = plusAnchorLeft,
-                                            width = plusWidth,
-                                            windowPx = screenWidthPx,
-                                            edgePx = popupEdgePx,
-                                        ).roundToInt(),
-                                        -44.dp.roundToPx(),
-                                    )
-                                },
+                                offset = IntOffset.Zero,
+                                popupPositionProvider = menuPopup,
                                 // Same reason as the model sheet: this card hangs off a button of
                                 // the composer too, and a focusable popup here would move the
                                 // composer out from under it.
                                 focusable = false,
-                                modifier = Modifier
-                                    .widthIn(max = popupCap(200.dp, windowWidth))
-                                    .onSizeChanged { plusWidth = it.width },
+                                modifier = Modifier.widthIn(max = popupCap(200.dp, windowWidth)),
                                 compactMotion = true,
                             ) {
                                 MenuItemRow(
@@ -1065,11 +1072,7 @@ internal fun Composer(
                         // The icon is the mode itself, so the row says which one is in force without
                         // being opened: a tick when it runs on its own, a shield while it asks, an
                         // alert shield when it refuses.
-                        Box(
-                            Modifier.onGloballyPositioned {
-                                approvalAnchorLeft = it.boundsInWindow().left
-                            },
-                        ) {
+                        Box {
                             IconButton(
                                 onClick = { menuOpen = false; sheetOpen = false; approvalOpen = true },
                                 // Same 36dp box and the same glyph size as the 「+」 beside it: the two are
@@ -1092,21 +1095,10 @@ internal fun Composer(
                                 scrim = false,
                                 onDismiss = { approvalOpen = false },
                                 alignment = Alignment.BottomStart,
-                                offset = with(density) {
-                                    IntOffset(
-                                        popupNudge(
-                                            anchorLeft = approvalAnchorLeft,
-                                            width = approvalWidth,
-                                            windowPx = screenWidthPx,
-                                            edgePx = popupEdgePx,
-                                        ).roundToInt(),
-                                        -44.dp.roundToPx(),
-                                    )
-                                },
+                                offset = IntOffset.Zero,
+                                popupPositionProvider = menuPopup,
                                 focusable = false,
-                                modifier = Modifier
-                                    .widthIn(max = popupCap(220.dp, windowWidth))
-                                    .onSizeChanged { approvalWidth = it.width },
+                                modifier = Modifier.widthIn(max = popupCap(220.dp, windowWidth)),
                                 compactMotion = true,
                             ) {
                                 ApprovalMode.entries.forEach { mode ->

@@ -2,6 +2,7 @@ package com.suixing.agent.ui.chat
 
 import com.suixing.agent.data.ContextCheckpoint
 import com.suixing.agent.data.StoredMessage
+import com.suixing.agent.data.StoredToolCall
 
 /**
  * 流式气泡里画的东西，以及它们的**增量更新**规则（issue #38）。
@@ -220,47 +221,88 @@ internal fun List<LivePart>.sealThinking(startedAt: Long): List<LivePart> {
         return dropLast(1) + LivePart.Thinking(last.buffer, tokens, elapsed)
 }
 
-/** A call joins the round of tools already open, or starts one. */
-internal fun List<LivePart>.startTool(name: String, args: String): List<LivePart> {
-        val call = LiveTool(name = name, args = args, startedAt = System.currentTimeMillis())
-        return when (val last = lastOrNull()) {
-            is LivePart.Tools -> dropLast(1) + last.copy(calls = last.calls + call)
-            else -> this + LivePart.Tools(listOf(call))
-        }
+/** A preparation stays in this round so a retry can discard it with the other deltas. */
+internal fun List<LivePart>.prepareTool(streamIndex: Int, name: String, segmentStart: Int): List<LivePart> {
+    val call = LiveTool(name, "", 0L, preparing = true, streamIndex = streamIndex)
+    val last = lastOrNull()
+    return if (lastIndex >= segmentStart && last is LivePart.Tools) {
+        dropLast(1) + last.copy(calls = last.calls + call)
+    } else this + LivePart.Tools(listOf(call))
 }
 
-/**
-     * Marks the oldest still-running call of that name as done.
-     *
-     * Matched by name, not by index: the engine reports the finish by name, and a run that
-     * calls the same tool twice must not have the second result close the first row.
-     */
-internal fun List<LivePart>.finishTool(name: String, ok: Boolean): List<LivePart> = map { part ->
+/** Bind the completed response's wire IDs before validation or cancellation can return a result. */
+internal fun List<LivePart>.bindPreparedTools(calls: List<StoredToolCall>, streamIndices: List<Int?>): List<LivePart> {
+    if (streamIndices.isEmpty()) return this
+    val bindings = buildMap {
+        streamIndices.forEachIndexed { index, streamIndex ->
+            if (streamIndex != null) put(streamIndex, calls[index])
+        }
+    }
+    return map { part ->
+        if (part !is LivePart.Tools || part.calls.none { it.preparing }) return@map part
+        part.copy(calls = part.calls.map { call ->
+            val binding = call.streamIndex?.let { bindings[it] }
+            if (call.preparing && binding != null) call.copy(name = binding.name, callId = binding.id) else call
+        })
+    }
+}
+
+private fun LiveTool.matches(name: String, callId: String?, streamIndex: Int?): Boolean = when {
+    streamIndex != null -> this.streamIndex == streamIndex
+    callId != null && this.callId != null -> this.callId == callId
+    else -> this.streamIndex == null && this.name == name
+}
+
+/** Turn a prepared slot into the same executing row; direct calls still append normally. */
+internal fun List<LivePart>.startTool(name: String, args: String, callId: String? = null, streamIndex: Int? = null): List<LivePart> {
+    val call = LiveTool(name, args, System.currentTimeMillis(), callId = callId, streamIndex = streamIndex)
+    if (callId != null || streamIndex != null) {
+        for (index in indices) {
+            val part = this[index] as? LivePart.Tools ?: continue
+            val at = part.calls.indexOfFirst { it.preparing && it.matches(name, callId, streamIndex) }
+            if (at < 0) continue
+            val calls = part.calls.toMutableList().apply { this[at] = call }
+            return toMutableList().apply { this[index] = part.copy(calls = calls) }
+        }
+    }
+    return when (val last = lastOrNull()) {
+        is LivePart.Tools -> dropLast(1) + last.copy(calls = last.calls + call)
+        else -> this + LivePart.Tools(listOf(call))
+    }
+}
+
+/** Finish the matching pending call; events without identity retain their name matching. */
+internal fun List<LivePart>.finishTool(name: String, ok: Boolean, callId: String? = null, streamIndex: Int? = null): List<LivePart> = map { part ->
         if (part !is LivePart.Tools) return@map part
-        val index = part.calls.indexOfFirst { it.name == name && !it.done }
+        val index = part.calls.indexOfFirst { !it.done && it.matches(name, callId, streamIndex) }
         if (index < 0) return@map part
         val calls = part.calls.toMutableList()
         val call = calls[index]
         calls[index] = call.copy(
             done = true,
             ok = ok,
-            elapsedMs = System.currentTimeMillis() - call.startedAt,
+            elapsedMs = if (call.preparing) 0L else System.currentTimeMillis() - call.startedAt,
+            preparing = false,
         )
         part.copy(calls = calls)
 }
 
-/**
-     * Hangs a landed TOOL message on the call it reports, matching the way
-     * [finishTool] matches: oldest open call of that name. The message carries the
-     * output and any screenshot, which only the row that owns it may draw.
-     */
-internal fun List<LivePart>.attachToolMessage(message: StoredMessage): List<LivePart> = map { part ->
+/** Attach the result to its call, including a call rejected before execution began. */
+internal fun List<LivePart>.attachToolMessage(message: StoredMessage, streamIndex: Int? = null): List<LivePart> = map { part ->
         if (part !is LivePart.Tools) return@map part
         val name = message.toolName.orEmpty()
-        val index = part.calls.indexOfFirst { it.name == name && it.message == null }
+        val index = part.calls.indexOfFirst { it.message == null && it.matches(name, message.toolCallId, streamIndex) }
         if (index < 0) return@map part
         val calls = part.calls.toMutableList()
-        calls[index] = calls[index].copy(message = message)
+        val call = calls[index]
+        calls[index] = call.copy(
+            message = message,
+            callId = message.toolCallId ?: call.callId,
+            args = if (call.preparing) message.toolArgs.orEmpty() else call.args,
+            done = call.done || call.preparing,
+            ok = if (call.preparing) message.toolOk != false else call.ok,
+            preparing = false,
+        )
         part.copy(calls = calls)
 }
 

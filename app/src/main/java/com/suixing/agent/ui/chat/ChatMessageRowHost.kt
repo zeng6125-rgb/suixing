@@ -15,6 +15,7 @@ import com.suixing.agent.data.Assistant
 import com.suixing.agent.data.ProviderConfig
 import com.suixing.agent.data.StoredMessage
 import com.suixing.agent.ui.chat.markdown.LocalPreparedMarkdown
+import com.suixing.agent.ui.chat.markdown.LocalPreparedImageSegments
 
 /** Stored message rendering; transcript keys, paging and checkpoints stay with the list. */
 @Composable
@@ -99,6 +100,7 @@ internal fun ChatMessageRowHost(
         }
         CompositionLocalProvider(
             LocalPreparedMarkdown provides rowDocuments.documentsFor(row.message.id).value,
+            LocalPreparedImageSegments provides rowDocuments.imageSegmentsFor(row.message.id).value,
             LocalReadingRowKey provides readingKey,
         ) {
             MessageRow(

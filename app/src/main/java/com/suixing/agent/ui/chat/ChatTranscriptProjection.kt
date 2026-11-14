@@ -2,6 +2,7 @@ package com.suixing.agent.ui.chat
 
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.MutableState
@@ -17,6 +18,8 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.structuralEqualityPolicy
 import androidx.compose.ui.layout.layout
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalDensity
 import com.suixing.agent.data.ContextCheckpoint
 import com.suixing.agent.data.Roles
 import com.suixing.agent.data.StoredMessage
@@ -133,10 +136,10 @@ internal fun rememberChatTranscriptProjection(
     // Tool-only assistant turns carry no text of their own, so their tool calls are
     // folded into the bubble above them instead of standing alone in the transcript.
     // Only the branch the user picked is drawn; the other answers stay on disk.
-    // liveRunId is a key AND a filter: the rounds of the run still streaming are
+    // liveRunId is a key AND a grouping exclusion: the rounds of the run still streaming are
     // already in `messages` (every event is appended there as it lands), so without
-    // the filter groupRows drew them as their own settled bubble beside the live one
-    // — the double bubble. The filter is what makes the settle frame atomic: the
+    // this exclusion groupRows drew them as their own settled bubble beside the live one.
+    // Their payload is built only by the live row. The exclusion makes the settle frame atomic: the
     // rounds leave the stored list in the same state update that empties liveParts.
     // The transcript itself is keyed by [ChatUiState.messagesRevision], not by the list: `remember`
     // compares keys with `equals`, and a message carries its screenshot as base64 — keyed on the
@@ -168,21 +171,24 @@ internal fun rememberChatTranscriptProjection(
             // 空串要变 null：`liveRunId` 用空串表示"没有在跑"。
             state.liveRunId.ifEmpty { null },
         )
-            .filterNot { it.message.runId == state.liveRunId && state.liveRunId.isNotEmpty() }
     }
     // Long settled bodies are parsed only for the next mount batch. Those rows consume the
     // returned blocks directly; there is no competing full-page parse or global cache prewarm.
     // The physical feed uses the same old-to-new order as this projection.
     val rowKeys = remember(visibleShape) { presentationKeys(state.conversationId, visible) }
     val rowKeyIndices = remember(rowKeys) { rowKeys.withIndex().associate { it.value to it.index } }
-    val viewport = remember(state.conversationId, positionStorageReady) {
-        ConversationViewport(state.conversationId, openingBookmark)
-    }
+    val viewportCache = remember { ConversationViewportCache() }
+    val geometry = Triple(
+        LocalConfiguration.current.screenWidthDp,
+        LocalDensity.current.fontScale,
+        MaterialTheme.typography.bodyMedium.fontSize.value,
+    )
+    val viewport = viewportCache.get(state, openingBookmark, shownTurns, geometry, positionStorageReady)
     val listState = viewport.listState
 
     // Markdown preparation is cached by message; navigation reads LazyList's own layout.
     // Per-row state publishes preparation without invalidating unrelated messages.
-    val rowDocuments = remember(state.conversationId) { RowMarkdownCache() }
+    val rowDocuments = viewport.rowDocuments
     val visibleIds = remember(visibleShape) { visible.mapTo(HashSet()) { it.message.id } }
     SideEffect {
         rowDocuments.retainRows(visibleIds)
@@ -277,28 +283,14 @@ internal fun rememberChatTranscriptProjection(
     // Which compression records belong under which row. A record names the first and last
     // message it folded away, so it is drawn under the row that holds that last message —
     // the place in the transcript where the model stopped seeing the conversation verbatim.
-    // **记忆键必须真正决定结果**（本轮对抗评审证伪了初版）：`placeCheckpoints` 的输出是按
-    // **每行的 `message.id`** 作键、按**全部轮次 id** 反查锚点，所以形状至少要包含这两样。
-    // 初版用 `rowKeys` 是错的 —— 多轮行的 rowKey 只有 `rounds.first().id`（不含 message.id），
-    // 于是"末轮换了个 id、首轮没变"这种形态会在键相同的情况下产出不同结果（评审给了反例）。
-    // 现在的形状 = 每行的 (message.id, 全部轮次 id)；比较时全是同一批 String 实例，走引用短路。
-    // [visible] 作为 `remember` 键会通过 equals 判断是否变化，非空时保持原有结果缓存路径。
-    // 空 checkpoint 的结果固定为空，因此直接返回，省去 `remember` 对 `visible` 的比较。
+    // Placement reads each message ID and every folded round ID. visibleShape changes
+    // whenever those rows are rebuilt; checkpoint inputs are replaced as a whole.
     val checkpointsByRow =
-        if (state.checkpoints.isEmpty()) emptyMap() else remember(state.checkpoints, visible) {
+        if (state.checkpoints.isEmpty()) emptyMap() else remember(IdentityKey(state.checkpoints), visibleShape) {
             placeCheckpoints(visible, state.checkpoints)
         }
-    val runElapsed = remember(rowsKey) {
-        // One pass and one map. The old sequence/filter/groupBy/mapValues chain built a
-        // list per run and three intermediate collections for a value read per row.
-        buildMap<String, Long> {
-            state.messages.forEach { message ->
-                val run = message.runId
-                if (!run.isNullOrEmpty() && message.elapsedMs > 0) {
-                    put(run, (get(run) ?: 0L) + message.elapsedMs)
-                }
-            }
-        }
+    val runElapsed = remember(state.conversationId, state.messagesRevision, page) {
+        runElapsedById(state.messages.subList(page.from.coerceIn(0, state.messages.size), state.messages.size))
     }
 
     return ChatTranscriptProjection(

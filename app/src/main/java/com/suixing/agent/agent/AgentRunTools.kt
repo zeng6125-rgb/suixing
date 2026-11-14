@@ -149,7 +149,7 @@ internal suspend fun AgentRun.executeOneTool(
         val pool = subagents
         if (pool == null || registry.isHidden(call.name)) return ToolOutcome(call,
             ToolResult.failure("当前运行未启用此子任务工具"), 0, argsPreview, args)
-        onEvent(AgentEvent.ToolStarted(call.name, argsPreview))
+        onEvent(AgentEvent.ToolStarted(call.name, argsPreview, call.id, call.streamIndex))
         val started = System.currentTimeMillis()
         val result = pool.execute(call.name, args)
         return ToolOutcome(call, result, System.currentTimeMillis() - started, argsPreview, args)
@@ -242,7 +242,7 @@ internal suspend fun AgentRun.executeOneTool(
             ToolResult.failure(blocked)
         } else {
             liveLine = "🔧 ${call.name}…"
-            onEvent(AgentEvent.ToolStarted(call.name, argsPreview))
+            onEvent(AgentEvent.ToolStarted(call.name, argsPreview, call.id, call.streamIndex))
             // AUTO 档**不弹任何授权**（用户多次明确要求）：插件的 require_confirm
             // 不再把 AUTO 升级成「问一次」——它降级为日志（preExecute 里已记）。
             // deny 仍拦（不弹窗，只让那次调用失败并说明原因）；ASK/DENY 档与

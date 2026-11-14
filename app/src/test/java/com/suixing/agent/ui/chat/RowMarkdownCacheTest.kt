@@ -4,6 +4,7 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.snapshots.Snapshot
 import androidx.compose.runtime.snapshots.SnapshotStateObserver
 import com.suixing.agent.ui.chat.markdown.MdBlock
+import com.suixing.agent.ui.chat.markdown.MessageSegment
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotSame
 import org.junit.Assert.assertSame
@@ -11,6 +12,21 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class RowMarkdownCacheTest {
+    @Test fun imageSegmentsAreReleasedWithTheirRowWindowEvenWhenNoLongTextWasParsed() {
+        val cache = RowMarkdownCache()
+        val segments = mapOf("![image](https://example.com/image.png)" to listOf(MessageSegment.Image("image", "https://example.com/image.png")))
+        val slot = cache.imageSegmentsFor("images")
+        cache.publish("images", emptyMap(), segments)
+        assertSame(segments, slot.value)
+        cache.retainDocuments(emptySet())
+        assertTrue(slot.value.isEmpty())
+        cache.publish("images", emptyMap(), segments)
+        assertSame(slot, cache.imageSegmentsFor("images"))
+        cache.retainRows(emptySet())
+        assertNotSame(slot, cache.imageSegmentsFor("images"))
+        assertTrue(cache.imageSegmentsFor("images").value.isEmpty())
+    }
+
     private fun documents(text: String): RowMarkdownDocuments = mapOf(text to emptyList<MdBlock>())
 
     @Test fun preparingAnotherMessageInvalidatesOnlyItsOwnReader() {

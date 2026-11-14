@@ -4,15 +4,18 @@ import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.lazy.LazyListLayoutInfo
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.layout.LazyLayoutCacheWindow
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.referentialEqualityPolicy
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.platform.LocalConfiguration
@@ -24,6 +27,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.suixing.agent.core.Core
 import com.suixing.agent.data.Roles
 import com.suixing.agent.data.ViewportBookmark
+import com.suixing.agent.ui.components.LocalDrawerBusy
 import kotlin.math.abs
 import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.flow.filterNotNull
@@ -75,26 +79,26 @@ internal fun bookmarkRow(bookmark: ViewportBookmark?, keys: List<String>, rows: 
 }
 
 @OptIn(ExperimentalFoundationApi::class)
-internal class ConversationViewport(val conversationId: String, val bookmark: ViewportBookmark?) {
+internal class ConversationViewport(val conversationId: String, var bookmark: ViewportBookmark?) {
     // Two screens ahead, one behind: bounded reuse instead of retaining whole transcripts.
     val listState = LazyListState(cacheWindow = LazyLayoutCacheWindow(aheadFraction = 2f, behindFraction = 1f))
-    // Fade the restored transcript in place; the rail reads the same draw-phase clock.
+    // The restored transcript and rail share one short, stationary reveal.
     val entrance = Animatable(0f)
     val navigation = NavigationMotion()
+    val rowDocuments = RowMarkdownCache()
     var prepared by mutableStateOf(false)
     var presented by mutableStateOf(false)
     var followOverride by mutableStateOf(false)
 }
 
-/** A short fade + rise on every switch; the reading position is restored before it starts. */
+/** Restore the reading position before a brief fade, with no additional vertical travel. */
 internal object ConversationEntrance {
-    const val DURATION_MS = 280
-    val EASING = CubicBezierEasing(0.2f, 0f, 0f, 1f)
-    /** 入场起始的下沉量（dp）：progress 到达 1 时精确归零。 */
-    const val RISE_DP = 12f
+    const val DURATION_MS = 160
+    val EASING = CubicBezierEasing(0.25f, 0f, 0.25f, 1f)
+    const val RISE_DP = 0f
 
     fun alpha(progress: Float): Float = progress.coerceIn(0f, 1f)
-    /** Draw-phase translationY in dp: start low, rise into the restored position. */
+    /** Transcript and rail remain at the restored reading position throughout the fade. */
     fun offsetYDp(progress: Float): Float = (1f - progress.coerceIn(0f, 1f)) * RISE_DP
 }
 
@@ -114,6 +118,10 @@ private class NearbyPreparation(
         revision.hashCode()) + prefix) + first) + last
 }
 
+@Composable
+internal fun <T> rememberViewportInput(newValue: T): State<T> =
+    remember { mutableStateOf(newValue, referentialEqualityPolicy()) }.apply { value = newValue }
+
 /** Bound under key(conversationId): disposal cannot read the next chat's providers. */
 @Composable
 internal fun BindConversationViewport(
@@ -131,12 +139,15 @@ internal fun BindConversationViewport(
     storageReady: Boolean,
     messagesRevision: Long,
     prepare: suspend (List<ChatRow>) -> Unit,
+    contentReadiness: ViewportContentReadiness,
+    hasTranscript: Boolean,
 ) {
-    val rowsNow = rememberUpdatedState(rows)
-    val keysNow = rememberUpdatedState(keys)
-    val keyIndicesNow = rememberUpdatedState(keyIndices)
+    val rowsNow = rememberViewportInput(rows)
+    val keysNow = rememberViewportInput(keys)
+    val keyIndicesNow = rememberViewportInput(keyIndices)
     val prefixNow = rememberUpdatedState(feedPrefix)
     val countNow = rememberUpdatedState(itemCount)
+    val hasTranscriptNow = rememberUpdatedState(hasTranscript)
     val turnsNow = rememberUpdatedState(shownTurns)
     val totalNow = rememberUpdatedState(totalTurns)
     val fontNow = rememberUpdatedState(fontScale)
@@ -144,6 +155,18 @@ internal fun BindConversationViewport(
     val revisionNow = rememberUpdatedState(messagesRevision)
     val expectedWidth = with(LocalDensity.current) { LocalConfiguration.current.screenWidthDp.dp.roundToPx() }
     val owner = LocalLifecycleOwner.current
+    val drawerBusy = LocalDrawerBusy.current
+    val drawerSwitch = remember(viewport) { drawerBusy.value }
+    val mountingPosition = remember(contentReadiness) {
+        viewport.listState.firstVisibleItemIndex to viewport.listState.firstVisibleItemScrollOffset
+    }
+    suspend fun awaitLayoutAfter(previous: LazyListLayoutInfo) {
+        snapshotFlow {
+            !hasTranscriptNow.value || viewport.listState.layoutInfo.let {
+                it !== previous && it.visibleItemsInfo.isNotEmpty()
+            }
+        }.first { it }
+    }
 
     val capture = remember(viewport, scroll) {
         {
@@ -194,8 +217,24 @@ internal fun BindConversationViewport(
         }
     }
 
-    LaunchedEffect(viewport, storageReady) {
+    LaunchedEffect(viewport, storageReady, contentReadiness) {
         if (!storageReady || viewport.conversationId.isBlank()) return@LaunchedEffect
+        if (viewport.presented) {
+            scroll.restoring = true
+            if (hasTranscriptNow.value) {
+                val initialLayout = viewport.listState.layoutInfo
+                viewport.listState.requestScrollToItem(mountingPosition.first, 0)
+                awaitLayoutAfter(initialLayout)
+                contentReadiness.awaitReady()
+                val beforeLayout = viewport.listState.layoutInfo
+                viewport.listState.requestScrollToItem(mountingPosition.first, mountingPosition.second)
+                awaitLayoutAfter(beforeLayout)
+            }
+            viewport.entrance.snapTo(1f)
+            scroll.restoring = false
+            actions.presentViewport(viewport.conversationId)
+            return@LaunchedEffect
+        }
         scroll.restoring = true
         actions.state.first { !it.loading && it.conversationId == viewport.conversationId }
         val bookmark = viewport.bookmark
@@ -239,16 +278,18 @@ internal fun BindConversationViewport(
         val compatible = bookmark == null || (bookmark.width == 0 || abs(bookmark.width - expectedWidth) <= 2) &&
             abs(bookmark.fontScale - fontNow.value) < 0.01f
         val offset = if (following) TRANSCRIPT_END_OFFSET
-            else if (compatible && bookmark?.topAnchored == true && (target >= 0 || liveKey != null)) bookmark.offset
+            else if (compatible && bookmark.topAnchored && (target >= 0 || liveKey != null)) bookmark.offset
             else 0
         scroll.stickToBottom = following
         val beforeLayout = viewport.listState.layoutInfo
-        viewport.listState.requestScrollToItem(index, offset)
+        viewport.listState.requestScrollToItem(index)
         viewport.prepared = true
-        if (rowsNow.value.isNotEmpty() || actions.state.value.runningHere) {
-            snapshotFlow { viewport.listState.layoutInfo }.first {
-                it !== beforeLayout && it.totalItemsCount > 0 && it.visibleItemsInfo.isNotEmpty()
-            }
+        if (hasTranscriptNow.value) {
+            awaitLayoutAfter(beforeLayout)
+            contentReadiness.awaitReady()
+            val preparedLayout = viewport.listState.layoutInfo
+            viewport.listState.requestScrollToItem(index, offset)
+            awaitLayoutAfter(preparedLayout)
             val targetKey = if (viewport.followOverride) null else if (target >= 0) keysNow.value.getOrNull(target) else liveKey
             if (targetKey != null && viewport.listState.layoutInfo.visibleItemsInfo.none { it.key == targetKey }) {
                 // Edited/shortened rows may invalidate a pixel offset. Retry the same stable
@@ -258,12 +299,16 @@ internal fun BindConversationViewport(
                 val previous = viewport.listState.layoutInfo
                 viewport.listState.requestScrollToItem(retry)
                 withTimeoutOrNull(2_000) {
-                    snapshotFlow { viewport.listState.layoutInfo }.first { it !== previous && it.visibleItemsInfo.isNotEmpty() }
+                    awaitLayoutAfter(previous)
                 }
+                contentReadiness.awaitReady()
+                val preparedRetryLayout = viewport.listState.layoutInfo
+                viewport.listState.requestScrollToItem(retry)
+                awaitLayoutAfter(preparedRetryLayout)
             }
             // Old bookmarks measured an item's bottom against the bottom reading edge.
             // Convert only after its height is known and while the list is still hidden.
-            if (!following && compatible && bookmark?.topAnchored == false && targetKey != null) {
+            if (!following && compatible && !bookmark.topAnchored && targetKey != null) {
                 val layout = viewport.listState.layoutInfo
                 val item = layout.visibleItemsInfo.firstOrNull { it.key == targetKey }
                 if (item != null) {
@@ -273,15 +318,21 @@ internal fun BindConversationViewport(
                         legacyReadingOffset(bookmark.offset, item.size, readingHeight) else 0
                     viewport.listState.requestScrollToItem(item.index, converted)
                     withTimeoutOrNull(2_000) {
-                        snapshotFlow { viewport.listState.layoutInfo }.first { it !== layout && it.visibleItemsInfo.isNotEmpty() }
+                        awaitLayoutAfter(layout)
                     }
                 }
             }
         }
-        // Keep one entrance regardless of when loading finishes relative to drawer close.
-        // Only reveal after restoration and layout; no spatial motion can shift that reading point.
+        // The drawer already moves the entire page. Reveal its restored target as part
+        // of that motion, including when disk loading finishes after the close.
         scroll.restoring = false
         viewport.presented = true
+        if (drawerSwitch) {
+            viewport.entrance.snapTo(1f)
+            actions.presentViewport(viewport.conversationId)
+            Core.startup.contentPresented()
+            return@LaunchedEffect
+        }
         var acknowledged = false
         viewport.entrance.animateTo(1f, tween(ConversationEntrance.DURATION_MS, easing = ConversationEntrance.EASING)) {
             if (!acknowledged && value > 0f) {

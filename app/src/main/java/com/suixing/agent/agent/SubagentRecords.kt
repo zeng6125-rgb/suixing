@@ -182,9 +182,17 @@ internal object SubagentRecords {
                     currentTool = event.name,
                     currentToolArgs = TranscriptRedaction.argumentsForTranscript(event.name, event.args),
                     statusLine = "正在调用 ${event.name}")
+                is AgentEvent.ToolPrepared -> if (entry.value.currentTool.isBlank()) {
+                    entry.value = entry.value.copy(statusLine = "正在准备调用 ${event.name}")
+                }
                 is AgentEvent.ToolFinished -> entry.value = entry.value.copy(currentTool = "", currentToolArgs = "", statusLine = "")
                 is AgentEvent.Failed -> entry.value = entry.value.copy(statusLine = event.message)
                 is AgentEvent.Finished -> entry.value = entry.value.copy(currentTool = "", currentToolArgs = "", statusLine = "")
+                is AgentEvent.RunDuration -> entry.messages.entries.lastOrNull()?.let { last ->
+                    last.setValue(last.value.copy(runElapsedMs = event.elapsedMs))
+                    entry.messagesChanged = true
+                    entry.transcriptVersion++
+                }
                 is AgentEvent.Steered -> {
                     entry.messages[event.id] = StoredMessage(
                         id = event.id, role = "user", text = event.text, imagesBase64 = event.imagesBase64, steer = true)
@@ -192,7 +200,13 @@ internal object SubagentRecords {
                     entry.transcriptVersion++
                 }
                 is AgentEvent.Retrying -> entry.value = entry.value.copy(statusLine = "正在重试：${event.reason}")
-                AgentEvent.RoundRestarted -> { entry.text.setLength(0); entry.reasoning.setLength(0) }
+                AgentEvent.RoundRestarted -> {
+                    entry.text.setLength(0)
+                    entry.reasoning.setLength(0)
+                    if (entry.value.statusLine.startsWith("正在准备调用 ")) {
+                        entry.value = entry.value.copy(statusLine = "")
+                    }
+                }
                 is AgentEvent.Compressing -> entry.value = entry.value.copy(statusLine = if (event.on) "正在压缩上下文" else "")
             }
             entry.dirty = true
@@ -227,6 +241,7 @@ internal object SubagentRecords {
             entry.value = entry.value.copy(status = status, result = result,
                 currentTool = if (terminal) "" else entry.value.currentTool,
                 currentToolArgs = if (terminal) "" else entry.value.currentToolArgs,
+                statusLine = if (terminal && entry.value.statusLine.startsWith("正在准备调用 ")) "" else entry.value.statusLine,
                 finishedAt = if (terminal) System.currentTimeMillis() else null)
             entry.dirty = true
         }

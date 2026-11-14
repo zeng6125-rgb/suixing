@@ -10,6 +10,21 @@ import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import com.suixing.agent.data.StoredMessage
+
+internal fun runElapsedById(messages: List<StoredMessage>): Map<String, Long> = buildMap {
+    for (message in messages) {
+        val run = message.runId ?: continue
+        if (run.isNotEmpty() && message.elapsedMs > 0) put(run, (get(run) ?: 0L) + message.elapsedMs)
+    }
+    for (message in messages) {
+        val run = message.runId ?: continue
+        if (run.isNotEmpty()) message.runElapsedMs?.let { put(run, it) }
+    }
+}
+
+internal fun runStartedAtMillis(startedAtNanos: Long, nowNanos: Long, nowMillis: Long): Long =
+    nowMillis - ((nowNanos - startedAtNanos) / 1_000_000L).coerceAtLeast(0L)
 
 /** Both visible captions read this one sample; neither starts a clock when it is composed. */
 @Composable

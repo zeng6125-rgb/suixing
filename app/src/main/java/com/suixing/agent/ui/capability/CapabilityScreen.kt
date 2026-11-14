@@ -89,7 +89,7 @@ fun CapabilityScreen(onBack: () -> Unit, onOpen: (String) -> Unit = {}) {
         Core.settings.flow
             .map { capabilityUiSettings(it) }
             .distinctUntilChanged()
-    }.collectAsStateWithLifecycle(initialValue = capabilityUiSettings(AppSettings()))
+    }.collectAsStateWithLifecycle(initialValue = remember { capabilityUiSettings(AppSettings()) })
     val scope = rememberCoroutineScope()
     var probing by remember { mutableStateOf(false) }
     var notice by remember { mutableStateOf<String?>(null) }

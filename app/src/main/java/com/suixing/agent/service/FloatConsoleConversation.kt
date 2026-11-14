@@ -15,6 +15,7 @@ import com.suixing.agent.data.Roles
 import com.suixing.agent.data.StoredMessage
 import com.suixing.agent.data.withConversationApproval
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.ensureActive
@@ -22,8 +23,6 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.UUID
-import com.suixing.agent.service.FloatConsoleService.Companion.MESSAGE_PREVIEW_CHARS
-import com.suixing.agent.service.FloatConsoleService.Companion.RECENT_MESSAGE_COUNT
 import com.suixing.agent.service.FloatConsoleService.Companion.TOOL_LIVE_PREFIX
 import com.suixing.agent.service.FloatConsoleService.ConsoleSettings
 
@@ -59,14 +58,7 @@ internal fun FloatConsoleService.observeRun() {
                 // checkForRelayout() ⇒ requestLayout()+invalidate()。状态流 8Hz 抖动时
                 // 内容常常没变，却每秒 8 次整窗 measure/layout/draw。
                 stateText.setTextIfChanged(consoleStatus(state, handle))
-                showStats(state.detail())
-                // The live line is re-read on every state, and the engine ticks its state
-                // while a run is in flight, so this stays current without a second stream.
-                // 空时整行收起：截图里「正在执行」与会话名之间那条空白带，就是空的 liveText
-                // 仍占着一行行高。有内容才显示。
-                val live = if (state is RunState.Running) handle?.liveLine.orEmpty() else ""
-                liveText.setTextIfChanged(live)
-                liveText.visibility = if (live.isBlank()) View.GONE else View.VISIBLE
+                renderLiveAnswer(handle)
                 // One button, two meanings, decided by the same question the label answers:
                 // while something is running a line typed here joins that run, and with
                 // nothing running it opens the conversation's next turn. The chat composer
@@ -120,28 +112,18 @@ internal fun FloatConsoleService.consoleStatus(state: RunState, handle: AgentEng
         val tool = live.removePrefix(TOOL_LIVE_PREFIX).trimEnd('…')
         if (tool.startsWith("ui_")) return "正在操作手机（$tool）"
     }
-    return state.title()
+    val detail = if (state is RunState.Running) {
+        val body = if (attached && panel.visibility == View.VISIBLE) handle?.liveAnswerSnapshot()?.text else null
+        live.takeUnless { it.isNotBlank() && body?.endsWith(it) == true }.orEmpty()
+    } else if (state is RunState.Idle) conversationProgress
+    else state.detail().ifBlank { conversationProgress }
+    return listOf(state.title(), detail.replace(consoleWhitespace, " ").trim())
+        .filter { it.isNotBlank() }.joinToString(" · ")
 }
 
-/**
- * The conversation the panel is showing, and its last one or two lines.
- *
- * The one running wins over the one used last, because that is the chat a steer typed here
- * would land in: the panel must name the conversation its own box writes to, or the user would
- * be typing into a chat they cannot see. With nothing running it falls back to the top of the
- * list, which is the conversation the app itself would open.
- */
-/**
- * 设置第三行的文案；空串时把这一行整个收起（GONE），而不是留一条空行。
- *
- * Running/Done 时 [detail] 返回空 ⇒ 这行消失，那一格空间让给 [liveText]（正在生成的内容）与
- * [contentScroll]（会话内容）—— 就是用户要的「悬浮窗最主要显示内容，不刷统计」。瞬态反馈
- * （已发送/已插话/发送失败）非空，照常显示。
- */
+/** Transient feedback shares the single progress line above the body. */
 internal fun FloatConsoleService.showStats(text: String) {
-    statsText.setTextIfChanged(text)
-    val wanted = if (text.isBlank()) View.GONE else View.VISIBLE
-    if (statsText.visibility != wanted) statsText.visibility = wanted
+    if (text.isNotBlank()) stateText.setTextIfChanged(text.replace(consoleWhitespace, " ").trim())
 }
 
 /**
@@ -154,6 +136,47 @@ private fun TextView.setTextIfChanged(next: CharSequence) {
     if (!text.contentEquals(next)) text = next
 }
 
+internal fun FloatConsoleService.renderLiveAnswer(handle: AgentEngine.RunHandle? = Core.engine.newestRun()) {
+    if (!attached || panel.visibility != View.VISIBLE || handle == null) return
+    val snapshot = handle.liveAnswerSnapshot()
+    val answer = consoleLivePreview(snapshot?.text.orEmpty())
+    if (liveAnswerChatId != handle.chatId || liveAnswerMessageId != snapshot?.messageId ||
+        !liveAnswerText.text.contentEquals(answer)
+    ) {
+        val previousY = contentScroll.scrollY
+        val follow = !contentScroll.canScrollVertically(1)
+        liveAnswerChatId = handle.chatId
+        liveAnswerMessageId = snapshot?.messageId
+        liveAnswerText.setTextIfChanged(answer)
+        liveAnswerText.visibility = if (answer.isBlank() || consoleHistoryContainsAnswer(
+                renderedConversationId, renderedMessages, liveAnswerChatId, liveAnswerMessageId,
+            )
+        ) View.GONE else View.VISIBLE
+        if (follow) contentScroll.post {
+            if (panel.visibility == View.VISIBLE && contentScroll.scrollY == previousY) {
+                contentScroll.fullScroll(View.FOCUS_DOWN)
+            }
+        }
+    }
+}
+
+internal fun consoleLivePreview(text: String): String {
+    val end = text.indexOfLast { !it.isWhitespace() } + 1
+    if (end == 0) return ""
+    val paragraphStart = text.lastIndexOf("\n\n", end - 1).let { if (it < 0) 0 else it + 2 }
+    var start = maxOf(paragraphStart, end - 240)
+    if (start > 0 && text[start].isLowSurrogate()) start++
+    return (if (start > paragraphStart) "…" else "") + text.substring(start, end)
+}
+
+internal fun consoleHistoryContainsAnswer(
+    historyChatId: String?,
+    messages: List<StoredMessage>,
+    answerChatId: String?,
+    answerMessageId: String?,
+): Boolean = historyChatId == answerChatId && answerMessageId != null &&
+    messages.any { it.role == Roles.ASSISTANT && it.id == answerMessageId }
+
 /**
  * **改成挂起**（#30）：正文要按需从磁盘读（列表只带 meta）。
  * 两个调用点都在协程里（`collectLatest`），所以这里挂起是安全的；
@@ -165,39 +188,113 @@ internal suspend fun FloatConsoleService.renderConversation() {
     val running = Core.engine.newestRun()?.chatId
     val conversation: Conversation? =
         conversations.firstOrNull { it.id == running } ?: conversations.firstOrNull()
+    if (liveAnswerChatId != null && liveAnswerChatId != conversation?.id) {
+        liveAnswerChatId = null
+        liveAnswerMessageId = null
+        liveAnswerText.setTextIfChanged("")
+        liveAnswerText.visibility = View.GONE
+    }
     if (conversation == null) {
+        conversationProgress = ""
+        renderedConversationId = null
+        renderedMessages = emptyList()
         conversationText.text = "还没有会话"
         recentText.text = "在下面的输入框里说一句，就会开一个新会话"
         return
     }
-    conversationText.text = conversation.title.ifBlank { "新会话" }
-    // 只留有正文的行：工具消息（role=TOOL、text=""）与失败回执等以前会显示成一条空的
-    // 「JAgent：」，占位却没内容。内容区可滚后回显最近 6 条，拖高就能多看。
-    // **正文要自己读**（#30）：列表只带 meta。用 runBlocking 拉全文会很糟，
-    // 所以这里只在后台线程取；renderConversation 由 UI 线程调用，改为 post 一次。
-    // 只取尾部几条就够回显；`readTail` 给的是「最近 N 轮」，比全文小一个数量级。
-    val recentMessages = conversation.messages.ifEmpty {
-        // **同键不重读**（issue #69 P1-A）：列表会因标题/其它会话的新消息而频繁发射，
-        // 那些都与本会话正文无关。只有会话/条数/更新时间变了才读一次尾部。
-        if (tailGate.shouldRead(conversation)) {
-            tailCache = runCatching { Core.chats.readTail(conversation.id)?.messages }
-                .getOrNull().orEmpty()
+    conversationText.setTextIfChanged(conversation.title.ifBlank { "新会话" })
+    val recentMessages = try {
+        tailGate.read(conversation) { Core.chats.readTail(it)?.messages.orEmpty() }
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (_: Exception) {
+        if (revision == conversationRenderRevision) {
+            renderedConversationId = null
+            recentText.setTextIfChanged("历史消息加载失败")
         }
-        tailCache
+        return
+    }
+    if (revision != conversationRenderRevision) return
+    val projected = if (renderedConversationId == conversation.id &&
+        renderedMessages === recentMessages && renderedMessageCount == conversation.messageCount
+    ) {
+        null
+    } else {
+        withContext(Dispatchers.Default) {
+            val earlier = if (conversation.messageCount > recentMessages.size) {
+                "较早的消息可回到对话查看\n\n"
+            } else ""
+            (earlier + consoleConversationText(recentMessages)) to consoleConversationProgress(recentMessages)
+        }
     }
     kotlinx.coroutines.currentCoroutineContext().ensureActive()
     if (revision != conversationRenderRevision) return
-    val recent = recentMessages
-        .filter { it.text.isNotBlank() }
-        .takeLast(RECENT_MESSAGE_COUNT)
-    recentText.text = if (recent.isEmpty()) {
-        "这个会话还没有消息"
-    } else {
-        recent.joinToString("\n\n") { message ->
-            val speaker = if (message.role == Roles.USER) "你：" else "JAgent："
-            speaker + message.text.replace('\n', ' ').trim().take(MESSAGE_PREVIEW_CHARS)
+    val previousY = contentScroll.scrollY
+    val follow = !contentScroll.canScrollVertically(1)
+    val changed = projected != null && !recentText.text.contentEquals(projected.first)
+    if (projected != null) {
+        if (changed) recentText.text = projected.first
+        conversationProgress = projected.second
+        renderedConversationId = conversation.id
+        renderedMessages = recentMessages
+        renderedMessageCount = conversation.messageCount
+    }
+    if (Core.engine.newestRun() == null) showStats(conversationProgress)
+    val answer = liveAnswerText.text.toString()
+    if (liveAnswerChatId == conversation.id && answer.isNotBlank()) {
+        if (consoleHistoryContainsAnswer(
+                renderedConversationId, renderedMessages, liveAnswerChatId, liveAnswerMessageId,
+            )
+        ) {
+            liveAnswerText.setTextIfChanged("")
+            liveAnswerText.visibility = View.GONE
+            liveAnswerChatId = null
+            liveAnswerMessageId = null
+        } else {
+            liveAnswerText.visibility = View.VISIBLE
         }
     }
+    if (changed && follow) contentScroll.post {
+        if (panel.visibility == View.VISIBLE && contentScroll.scrollY == previousY) {
+            contentScroll.fullScroll(View.FOCUS_DOWN)
+        }
+    }
+}
+
+private val consoleWhitespace = Regex("\\s+")
+
+internal fun consoleConversationText(messages: List<StoredMessage>): String {
+    return messages.mapNotNull { message ->
+        if ((message.role != Roles.USER && message.role != Roles.ASSISTANT) || message.text.isBlank()) null
+        else "${if (message.role == Roles.USER) "你" else "JAgent"}\n${message.text}"
+    }.joinToString("\n\n").ifBlank { "这个会话还没有正文" }
+}
+
+internal fun consoleConversationProgress(messages: List<StoredMessage>): String {
+    val blocks = messages.mapNotNull { message ->
+        buildList {
+            message.reasoning?.takeIf { it.isNotBlank() }?.let {
+                add("思考 · " + it.replace(consoleWhitespace, " ").trim().take(120))
+            }
+            if (message.toolCalls.isNotEmpty()) {
+                add("调用工具 · " + message.toolCalls.joinToString("、") { it.name })
+            }
+            if (message.role == Roles.TOOL) {
+                val status = when (message.toolOk) {
+                    true -> "完成"
+                    false -> "失败"
+                    null -> "已返回"
+                }
+                add("工具 ${message.toolName.orEmpty()} · $status")
+            } else if (message.role == Roles.SYSTEM && message.text.isNotBlank()) {
+                add("系统 · " + message.text.replace(consoleWhitespace, " ").trim().take(120))
+            }
+            if (message.imageCount > 0) {
+                add("你 · ${message.imageCount} 张图片")
+            }
+        }.joinToString(" · ").takeIf { it.isNotBlank() }
+    }
+    return blocks.asReversed().joinToString(" · ")
 }
 
 /**
@@ -214,13 +311,12 @@ internal fun FloatConsoleService.renderStopArea(handles: List<AgentEngine.RunHan
     stopAreaKey = key
     stopArea.removeAllViews()
     if (handles.size <= 1) {
-        // 单 run（或没有）：停止键就落在底部动作行「回到对话」的右侧（[stopButton]），
-        // 不再单独占一行 —— 截图里那行孤悬右下角的停止按钮和它上面的死空间就是这么来的。
+        // A single run uses the header stop action; parallel runs get individual rows.
         stopArea.visibility = View.GONE
         stopButton.visibility = if (handles.isEmpty()) View.GONE else View.VISIBLE
         return
     }
-    // 两个以上：每个 run 一条带标题的行（一个按钮猜不出用户想停哪个），底部那枚隐藏。
+    // Parallel runs each retain a named stop action in the scrollable body.
     stopArea.visibility = View.VISIBLE
     stopButton.visibility = View.GONE
     for (handle in handles) {
@@ -252,8 +348,7 @@ internal fun FloatConsoleService.stopRun(handle: AgentEngine.RunHandle) {
     val stopped = Core.engine.cancel(handle.chatId)
     // Named, so a stop aimed at one of several runs says which one it hit — and on its own
     // line, because the run it names is about to leave the list and take its row with it.
-    feedbackText.text = if (stopped) "已请求停止：${titleOf(handle)}" else "这个任务已经结束了"
-    feedbackText.visibility = View.VISIBLE
+    showStats(if (stopped) "已请求停止：${titleOf(handle)}" else "这个任务已经结束了")
 }
 
 /**
@@ -351,6 +446,9 @@ internal suspend fun FloatConsoleService.startRunFor(chatId: String?, text: Stri
                 when (event) {
                     is AgentEvent.AssistantMessage -> emitted += event.message
                     is AgentEvent.ToolMessage -> emitted += event.message
+                    is AgentEvent.RunDuration -> if (emitted.isNotEmpty()) {
+                        emitted[emitted.lastIndex] = emitted.last().copy(runElapsedMs = event.elapsedMs)
+                    }
                     else -> Unit
                 }
             },
@@ -387,13 +485,7 @@ private fun RunState.title(): String = when (this) {
     is RunState.Failed -> "失败"
 }
 
-/**
- * The second line: what went wrong, or a short idle note.
- *
- * 悬浮窗**不再刷 token/tps 统计**（用户：「悬浮窗不用显示这些，最主要的是显示内容给用户」）。
- * 那些数字属于聊天页的统计卡与圆环；悬浮窗这一行只保留真正有用的话——失败原因、中断、空闲提示。
- * Running/Done 时返回空串，[statsText] 随之隐藏，把空间让给 liveText（正在生成的内容）。
- */
+/** Failure and cancellation details join the same progress line. */
 private fun RunState.detail(): String = when (this) {
     is RunState.Idle -> "没有进行中的任务"
     is RunState.Running -> ""

@@ -56,7 +56,7 @@ class SubagentEngineTest {
             pending.keys.forEach { gate.resolve(it, approved = true) }
         }
         val client = mockk<LlmClient> {
-            coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
+            coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
                 val settings = firstArg<AppSettings>()
                 val wire = secondArg<List<ChatMessage>>()
                 if (settings.subagentsEnabled) {
@@ -112,7 +112,7 @@ class SubagentEngineTest {
         var replay: List<ChatMessage> = emptyList()
         val checkpoints = mutableListOf<ContextCheckpoint>()
         val client = mockk<LlmClient> {
-            coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
+            coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
                 val wire = secondArg<List<ChatMessage>>()
                 if (thirdArg<List<ToolSpec>>().isEmpty()) AssistantTurn("saved decisions and unfinished work", emptyList(), "stop")
                 else when (++normalCalls) {
@@ -134,7 +134,7 @@ class SubagentEngineTest {
 
     @Test fun `manual compression refuses truncated summaries without changing checkpoint`() = runBlocking {
         val client = mockk<LlmClient> {
-            coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any()) } returns
+            coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any(), any()) } returns
                 AssistantTurn("partial", emptyList(), "length")
         }
         val history = (1..20).map { StoredMessage("m$it", Roles.USER, "text".repeat(100)) }
@@ -152,7 +152,7 @@ class SubagentEngineTest {
             every { cancel() } answers { readReleased.complete(Unit); Unit }
         }
         val client = mockk<LlmClient> {
-            coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
+            coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
                 if (firstArg<AppSettings>().subagentsEnabled) {
                     if (parentTurns.incrementAndGet() == 1) AssistantTurn("",
                         listOf(ToolCallRequest("spawn", "spawn_agent", """{"task":"blocking child"}""")), "tool_calls")
@@ -193,7 +193,7 @@ class SubagentEngineTest {
             val seen = CompletableDeferred<Int>()
             val parentTurns = AtomicInteger()
             val client = mockk<LlmClient> {
-                coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
+                coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
                     val settings = firstArg<AppSettings>()
                     val wire = secondArg<List<ChatMessage>>()
                     if (settings.subagentsEnabled) {

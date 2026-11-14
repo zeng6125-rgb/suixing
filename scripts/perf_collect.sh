@@ -83,7 +83,7 @@ sleep "$SECONDS_TO_SAMPLE"
 RAW=$("${ADB_CMD[@]}" shell dumpsys gfxinfo "$PKG" 2>/dev/null)
 # 「TOTAL PSS:   829857   TOTAL RSS:   676024」—— 数字在标签**后面**一个字段，
 # 取 $2 只会拿到标签本身（PSS:）。
-RSS=$("${ADB_CMD[@]}" shell dumpsys meminfo "$PKG" 2>/dev/null | awk '{ for (i=1;i<=NF;i++) if ($i=="PSS:") { print $(i+1); exit } }')
+RSS=$("${ADB_CMD[@]}" shell dumpsys meminfo "$PKG" 2>/dev/null | awk '{ for (i=1;i<=NF;i++) if ($i=="RSS:") { print $(i+1); exit } }')
 
 IFS='|' read -r P50 P95 P99 JANKY TOTAL < <(parse_gfxinfo "$RAW")
 if [ "${TOTAL:-0}" = "0" ]; then P50="-"; P95="-"; P99="-"; JANKY="-"; fi

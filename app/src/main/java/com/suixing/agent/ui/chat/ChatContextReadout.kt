@@ -90,19 +90,8 @@ internal fun rememberChatContextReadout(
     // 键用 **messagesRevision**，不是 rowsKey：`rowsKey` 是（会话, 条数, 末条 id），
     // 编辑某条消息、或流式把文本追加进已落盘消息时，条数与末条 id 都不变 ⇒ 估算值不刷新，
     // 圆环读数会停在旧数字。revision 是 ViewModel 在每次发布时统一盖的章。
-    // **逐条缓存 token 估算**（审计 1§2）：`estimateTokens` 对正文做逐字符 CJK 判定，
-    // 12 轮 + 工具输出可达 5~20 万字符 ⇒ 每次 revision 一次几 ms 的主线程尖峰，
-    // 与 frame.log 里「成对 24ms+16ms、每 100~350 帧一次」的形态吻合。
-    // 按 id 缓存，指纹快速筛选后仍核对正文、工具字段和图片数，避免同长度编辑或哈希碰撞。
-    //
-    // **缓存改成进程级、不再按会话重建**（切换会话卡的主线程开销之一，见 tokenCache 的 KDoc）：
-    // 原来是 `remember(state.conversationId)` ⇒ 每次切会话换一张**空表** ⇒ 整页正文被逐字符
-    // 重估一遍（就发生在组合期、主线程）；切回来再估一遍。内容指纹（stamp）本来就在条目里，
-    // 全局表核对完整估算输入；LRU 上限及弱引用避免保留大正文。
-    // **估算移出组合期主线程**（issue #56 R39）：`estimateTokens` 对正文做逐字符 CJK 判定，
-    // 一页 12 轮可达 5~20 万字符。原来整段跑在 `remember` 里 ⇒ 组合期（主线程）一次几 ms。
-    // 切会话时只使用该会话的完整缓存；缓存不完整时等后台结果。发消息时保留本会话的
-    // 上次估算，等新结果一次替换。
+    // 消息不可变，组合期只按实例读取进程级缓存，不计算全文指纹或比较长字段。
+    // 新实例在后台核对并估算；切会话只使用完整缓存，更新期间保留本会话的上次估算。
     val estimateInput = remember(state.conversationId, state.messagesRevision, state.checkpoints) {
         val last = state.checkpoints.lastOrNull()
         // issue #53 B-2：同一次建表里查 id（firstPositions 保留首个重复 id 的语义）。
@@ -116,20 +105,14 @@ internal fun rememberChatContextReadout(
         } else {
             state.messages
         }
-        // 消息不可变 ⇒ 指纹按 id 缓存的既有做法不变（`String.hashCode` 自带缓存）。
-        val stamps = kept.map { message ->
-            message.text.hashCode().toLong() * 31 +
-                message.toolOutput.orEmpty().length +
-                message.toolArgs.orEmpty().length * 7
-        }
-        Triple(kept.toList(), stamps, (last?.summary?.length ?: 0) / 3)
+        kept to (last?.summary?.length ?: 0) / 3
     }
-    val (estimateMessages, estimateStamps, estimateSummaryChars) = estimateInput
+    val (estimateMessages, estimateSummaryChars) = estimateInput
     var transcriptEstimate by remember(state.conversationId, checkpoint?.id) {
         if (state.loading) return@remember mutableStateOf<Int?>(null)
         var cached = estimateSummaryChars
-        for (i in estimateMessages.indices) {
-            val tokens = TokenEstimateCache.peek(estimateMessages[i], estimateStamps[i])
+        for (message in estimateMessages) {
+            val tokens = TokenEstimateCache.peek(message)
                 ?: return@remember mutableStateOf<Int?>(null)
             cached += tokens
         }
@@ -138,9 +121,7 @@ internal fun rememberChatContextReadout(
     LaunchedEffect(state.conversationId, state.messagesRevision, state.checkpoints, state.loading) {
         if (state.loading) return@LaunchedEffect
         transcriptEstimate = withContext(Dispatchers.Default) {
-            estimateMessages.indices.sumOf { i ->
-                TokenEstimateCache.tokensFor(estimateMessages[i], estimateStamps[i])
-            } + estimateSummaryChars
+            estimateMessages.sumOf { TokenEstimateCache.tokensFor(it) } + estimateSummaryChars
         }
     }
     val transcriptTokens = transcriptEstimate ?: 0

@@ -29,8 +29,26 @@ class PreparedMarkdownTest {
         assertEquals(cacheSize, SettledBlocks.sizeForTest())
     }
 
-    @Test fun `short text does not enqueue background preparation`() = runBlocking {
+    @Test fun `short text does not require parsing`() = runBlocking {
         assertTrue(prepareMarkdownTexts(listOf("small", "")).isEmpty())
+    }
+
+    @Test fun `preparation traverses document inputs off the calling thread`() = runBlocking {
+        val caller = Thread.currentThread()
+        val text = ("background paragraph\n\n- first\n- second\n\n").repeat(40)
+        val texts = object : AbstractList<String>() {
+            override val size = 2
+
+            override fun get(index: Int): String {
+                assertTrue("document traversal must run in the background", Thread.currentThread() !== caller)
+                return text
+            }
+        }
+
+        val prepared = prepareMarkdownTexts(texts)
+
+        assertEquals(setOf(text), prepared.keys)
+        assertEquals(parseMarkdown(text), prepared[text])
     }
 
     @Test fun `prepared cache reuses parses and evicts least recently used entry`() = runBlocking {

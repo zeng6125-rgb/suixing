@@ -428,7 +428,8 @@ internal fun FetchedModelsDialog(
 ) {
     var query by remember(provider.id) { mutableStateOf("") }
     val groups = remember(candidates, query) {
-        groupModels(candidates.distinct().filter { query.isBlank() || it.contains(query.trim(), true) })
+        val needle = query.trim()
+        groupModels(candidates.distinct().filter { needle.isEmpty() || it.contains(needle, true) })
     }
     SuixingDialog(
         onDismissRequest = onDismiss,

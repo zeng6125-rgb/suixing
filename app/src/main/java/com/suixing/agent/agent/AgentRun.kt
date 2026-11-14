@@ -33,6 +33,8 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.coroutines.cancellation.CancellationException
 
+internal data class LiveAnswerSnapshot(val messageId: String, val text: String)
+
 /** Per-run mutable state. Shared engine services arrive explicitly through [host]. */
 internal class AgentRun(
     private val host: AgentRunHost,
@@ -93,6 +95,42 @@ internal class AgentRun(
     @Volatile
     var liveLine: String = ""
         internal set
+
+    internal var currentAssistantMessageId = UUID.randomUUID().toString()
+    private val liveAnswerLock = Any()
+    private var liveAnswerSource: StringBuilder? = null
+    private var liveAnswerMessageId = ""
+    private var snapshotSource: StringBuilder? = null
+    private var answerSnapshot: LiveAnswerSnapshot? = null
+
+    internal fun appendLiveAnswer(buffer: StringBuilder, text: String) {
+        synchronized(liveAnswerLock) {
+            buffer.append(text)
+            if (text.isNotEmpty()) {
+                liveAnswerSource = buffer
+                liveAnswerMessageId = currentAssistantMessageId
+            }
+        }
+    }
+
+    /** Copy the current body only when a visible console requests changed text. */
+    internal fun liveAnswerSnapshot(): LiveAnswerSnapshot? = synchronized(liveAnswerLock) {
+        val source = liveAnswerSource ?: return@synchronized null
+        if (source !== snapshotSource || source.length != answerSnapshot?.text?.length) {
+            answerSnapshot = LiveAnswerSnapshot(liveAnswerMessageId, source.toString())
+            snapshotSource = source
+        }
+        answerSnapshot
+    }
+
+    internal fun clearLiveAnswer() {
+        synchronized(liveAnswerLock) {
+            if (liveAnswerMessageId != currentAssistantMessageId) return
+            liveAnswerSource = null
+            snapshotSource = null
+            answerSnapshot = null
+        }
+    }
 
     /**
      * The coroutine driving this run: the run's own job, a child of the caller's, so that
@@ -482,6 +520,7 @@ internal class AgentRun(
         onEvent = onEvent,
         publish = ::publish,
         stats = ::stats,
+        recordDuration = { onEvent(AgentEvent.RunDuration(it.elapsedMs)) },
         prepareCancelled = { exit ->
             // A stop can cross both runLoop and execute; commit its transcript only once.
             if (cancellationReported.compareAndSet(false, true)) {
@@ -544,7 +583,11 @@ internal class AgentRun(
         onEvent(
             AgentEvent.AssistantMessage(
                 StoredMessage(
-                    id = UUID.randomUUID().toString(),
+                    id = if (partial.isNotBlank() || reasoning.isNotBlank()) {
+                        currentAssistantMessageId
+                    } else {
+                        UUID.randomUUID().toString()
+                    },
                     role = Roles.ASSISTANT,
                     text = if (noteAsText) note.orEmpty() else partial.toString(),
                     reasoning = reasoning.toString().takeIf { it.isNotBlank() },

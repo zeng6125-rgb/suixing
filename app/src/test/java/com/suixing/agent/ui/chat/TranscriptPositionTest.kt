@@ -3,8 +3,22 @@ package com.suixing.agent.ui.chat
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import com.suixing.agent.ui.chat.markdown.MessageSegment
+import com.suixing.agent.ui.chat.markdown.splitImageSegments
 
 class TranscriptPositionTest {
+    @Test fun `text around images registers separate stable reading regions`() {
+        val source = "before\n![image](https://example.com/image.png)\nafter"
+        val segments = splitImageSegments(source)
+        val regions = buildMap {
+            segments.forEachIndexed { index, segment ->
+                if (segment is MessageSegment.Text) put(imageSegmentReadingKey("run:text:0", index), segment.text)
+            }
+        }
+        assertEquals(mapOf("run:text:0:segment:0" to "before\n", "run:text:0:segment:2" to "\nafter"), regions)
+        assertEquals("run:text:0:segment:2", imageSegmentReadingKey("run:text:0", 2))
+    }
+
     @Test fun `repeated phrases keep the actual reading occurrence`() {
         val text = "repeat ".repeat(100)
         assertEquals(350, readingCharacterOffset(text, 350, "repeat "))
