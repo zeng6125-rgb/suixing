@@ -82,7 +82,7 @@ internal fun ChatRuntime.setTodos(chatId: String, board: List<TodoItem>) {
  * 把这一拍攒下来的正文/思考并进 [live]。
  *
  * **只做一次 `copy`**：原来每有一种增量就 copy 一次（每次都重建整份 Session）。
- * 一轮跑起来时这个方法每 80ms 调一次，少一次全量复制就少一次分配与 GC 压力；
+ * 活跃输出时这个方法随 [DELTA_PUBLISH_MS] 节流调用，少一次全量复制就少一次分配与 GC 压力；
  * 字段与取值顺序与改动前逐字一致，行为不变。
  *
  * 正文**不再另存一份**（`streaming` 留空，由 [derivedStreaming] 派生）——
@@ -161,7 +161,7 @@ internal fun ChatRuntime.putSession(next: RunSession) {
             next
         }
     } ?: return
-    // **不在这里刷 LRU 缓存**（#35）：流式期间每 ~80ms 一次 `putSession`，每次都要动缓存
+    // **不在这里刷 LRU 缓存**（#35）：流式期间随每次增量发布都会调用 `putSession`，每次都要动缓存
     // （`MessageCache` 内部是一把监视器锁），而切会话时的 `readTail` 读盘也要用同一把 ——
     // 撞在一起就是可感知的抖动。缓存只在「一轮结束」时刷（见 [endSession]）就够：
     // 一轮中途切回来走的是 `sessions`（live 分支），根本不看缓存。

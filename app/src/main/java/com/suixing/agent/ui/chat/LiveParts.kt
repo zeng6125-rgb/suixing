@@ -25,7 +25,7 @@ import com.suixing.agent.data.StoredMessage
  * **教训**：改这块之前先读 `app/src/test/.../LivePartsFreezeTest.kt` —— 它把机制写得很死，
  * 而当时没人去读它。
  *
- * 为什么单独成文件：这些函数处在**每个 delta 都会走的路径**上（`applyPending` 每 80ms 一批，
+ * 为什么单独成文件：这些函数处在**每个 delta 都会走的路径**上（`applyPending` 随 [DELTA_PUBLISH_MS] 节流，
  * 一轮几千个 delta）。它们原来散在 `ChatViewModel`（3,600 行、依赖整个 `Core`、无法单测）里，
  * 于是"改坏一处不会有人发现"——而这里恰好已经出过两次 O(n²) 事故。
  * 现在它们是纯函数（只依赖 `List<LivePart>`），可以直接断言。

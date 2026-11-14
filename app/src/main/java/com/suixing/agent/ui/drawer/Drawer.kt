@@ -115,14 +115,15 @@ internal val DRAWER_SHEET_WIDTH = 300
  *    同一个抽屉就有两套手感。
  *  ⇒ 现在**所有入口**都走这一条 spring，`Animatable.animateTo` 会自然吃进初速度。
  *
- * `dampingRatio = 1f`（临界阻尼、不回弹）、`stiffness = 700`：约 250ms 收敛，
- * 与原来 210ms tween 的观感接近，但起步/收尾都是连续的。
+ * `dampingRatio = 1f`（临界阻尼、不回弹）、`stiffness = 700`：约 251ms 到 99%。
+ * `visibilityThreshold = 0.003f` 时约 302ms 收尾；原 `0.001f` 要约 349ms。裁掉的尾段
+ * 是 300dp 面板不足 1dp 的移动，此时主页遮罩与离屏层仍保持启用。
  */
 internal val DRAWER_SPEC: androidx.compose.animation.core.FiniteAnimationSpec<Float> =
     androidx.compose.animation.core.spring(
         dampingRatio = 1f,
         stiffness = 700f,
-        visibilityThreshold = 0.001f,
+        visibilityThreshold = 0.003f,
     )
 
 /** Programmatic closing uses the shared critically damped spring; it has no fixed duration. */

@@ -25,6 +25,9 @@ import com.suixing.agent.data.ContextCheckpoint
 import com.suixing.agent.data.ProviderConfig
 import com.suixing.agent.data.StoredMessage
 
+internal fun transcriptItemsRegistered(prepared: Boolean, conversationId: String): Boolean =
+    prepared || conversationId.isBlank()
+
 /** List registration stays chronological; each rendering branch has its own composition scope. */
 internal fun LazyListScope.chatTranscriptItems(
     state: ChatUiState,
@@ -46,6 +49,7 @@ internal fun LazyListScope.chatTranscriptItems(
     earlierCount: Int,
     loadingEarlier: Boolean,
     presented: Boolean,
+    prepared: Boolean,
     onLoadEarlier: () -> Unit,
     errorLine: Boolean,
     live: Boolean,
@@ -53,6 +57,8 @@ internal fun LazyListScope.chatTranscriptItems(
     runStartedAt: Long,
     runElapsedClock: State<Long>,
 ) {
+    if (!transcriptItemsRegistered(prepared, state.conversationId)) return
+
     if (hasEarlier) {
         item(key = "load-earlier", contentType = "load-earlier") {
             LoadEarlierRow(earlierCount, loadingEarlier, presented, onLoadEarlier)

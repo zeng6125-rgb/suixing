@@ -211,6 +211,7 @@ internal fun ChatTranscriptViewport(
                     earlierCount = page.earlier,
                     loadingEarlier = loadingEarlier,
                     presented = viewport.presented,
+                    prepared = viewport.prepared,
                     onLoadEarlier = loadEarlier,
                     errorLine = errorLine,
                     live = live,

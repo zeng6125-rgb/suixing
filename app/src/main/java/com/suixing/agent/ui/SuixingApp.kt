@@ -163,6 +163,8 @@ fun SuixingApp() {
     // Owned here rather than inside the chat screen: the drawer lists and switches the
     // very conversations the screen is showing.
     val chat: ChatViewModel = viewModel()
+    val liveActiveState = remember(chat) { chat.liveActive }
+        .collectAsStateWithLifecycle(initialValue = false)
     LaunchedEffect(Unit) {
         Core.settings.writeFailures.collect { message ->
             android.widget.Toast.makeText(Core.appContext, message, android.widget.Toast.LENGTH_LONG).show()
@@ -295,11 +297,15 @@ fun SuixingApp() {
     // 点会话 / 新对话：与点页面行不同——那是"换我在读的那一份内容"，覆盖层收掉、抽屉也收起来，
     // 用户直接落在会话里。
     val chatFromDrawer: () -> Unit = {
-        switchIntents.invalidate()
+        val token = switchIntents.begin()
         // **与 `closeDrawer()`（助手 / 返回键）逐字相同**：只启动同一条
         // `animateTo(Closed, DRAWER_CLOSE_SPEC)` —— 同一帧开始、同一时长、同一曲线。
         scope.launch(start = CoroutineStart.UNDISPATCHED) {
-            drawerState.animateTo(DrawerValue.Closed, DRAWER_CLOSE_SPEC)
+            try {
+                drawerState.animateTo(DrawerValue.Closed, DRAWER_CLOSE_SPEC)
+            } finally {
+                switchIntents.finish(token)
+            }
         }
         showChat()
     }
@@ -608,6 +614,7 @@ fun SuixingApp() {
                             // 主页浮在侧边栏之上：右移 + 轻微缩放 + 恒定圆角裁剪 + 淡投影。
                             // 全部在绘制期做，不改布局尺寸，也不在组合作用域里读进度。
                             val progress = drawerProgress.value
+                            val homeContentChanging = liveActiveState.value || drawerBusyState.value
                             // 自建宿主只平移侧边栏本体，主页这一层得自己跟上进度，否则会露出
                             // 一块没动的内容。位移 = 面板宽 × 进度，与面板的 translationX 互补。
                             translationX = panelWidthPx * progress
@@ -633,7 +640,9 @@ fun SuixingApp() {
                             clip = progress > 0f
                             // Cache the clipped home in a GPU layer during the transform. Dirty
                             // content still redraws; stable text is composited from the texture.
-                            compositingStrategy = if (cacheHomeDuringMotion && progress > 0f && drawerState.isMoving) {
+                            compositingStrategy = if (cacheHomeDuringMotion && progress > 0f &&
+                                drawerState.isMoving && !homeContentChanging
+                            ) {
                                 androidx.compose.ui.graphics.CompositingStrategy.Offscreen
                             } else {
                                 androidx.compose.ui.graphics.CompositingStrategy.Auto

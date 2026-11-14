@@ -105,7 +105,7 @@ internal fun drawerHomeShieldStartPx(panelWidthPx: Float, progress: Float): Floa
  * ```
  * ⇒ 手势松手后的回弹速度只能走库的 token（开 `spring(0.9, 700)` / 关 `spring(1.0, 3800)`），
  * App 改不了。这里改用 `Animatable` + `detectHorizontalDragGestures`，
- * 回弹曲线由 [animateTo] 的调用方传入（与汉堡键同一条 `DRAWER_*_SPEC`，210ms）。
+ * 回弹曲线由 [animateTo] 的调用方传入（与汉堡键共用临界阻尼弹簧 [DRAWER_SPEC]）。
  *
  * `isOpen` 表示已停靠端点；所有可见层与命中遮罩共用 [visualProgress]。
  */

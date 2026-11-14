@@ -2,6 +2,7 @@
 # issue #47 的验收口径测量脚本（只读，不安装、不改设备）
 #
 # 用法：
+#   scripts/measure_jank.sh compile   # 安装后先编译 speed-profile，再测量
 #   scripts/measure_jank.sh reset      # 清空 gfxinfo 统计
 #   scripts/measure_jank.sh report     # 输出直方图与关键指标
 #
@@ -21,6 +22,9 @@ DEV=("${ADB_CMD[@]:1}")
 cmd="${1:-report}"
 
 case "$cmd" in
+  compile)
+    "$ADB" "${DEV[@]}" shell cmd package compile -m speed-profile -f "$PKG"
+    ;;
   reset)
     "$ADB" "${DEV[@]}" shell dumpsys gfxinfo "$PKG" reset >/dev/null 2>&1
     echo "gfxinfo 已重置（现在去滚动会话列表，然后跑 report）"
@@ -45,5 +49,5 @@ case "$cmd" in
       | grep -iE "RenderThread|main|TID" | head -6
     ;;
   *)
-    echo "用法: $0 {reset|report}"; exit 2;;
+    echo "用法: $0 {compile|reset|report}"; exit 2;;
 esac
