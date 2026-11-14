@@ -53,7 +53,7 @@ internal fun ChatRuntime.observe() {
                         sessions[chatId]?.let { before ->
                             // **先 flush 再取快照**（可达性已证）：这条分支由引擎的
                             // `RunState.Cancelled`（**状态**观察）触发，**不经过 `handleEvent`**
-                            // ⇒ 没有任何地方替它 flush。而攒批最多 80ms 才发一次 ——
+                            // ⇒ 没有任何地方替它 flush。而攒批按 [DELTA_PUBLISH_MS] 节流 ——
                             // 用户点「停止」时若刚到一个 chunk，它还在 `DeltaBuffer` 里。
                             // 原来 `saveSession(live)` 捕获的是 **flush 之前**那个对象，
                             // `endSession` 里的 flush 再写回 `sessions` 也追不回这份快照
