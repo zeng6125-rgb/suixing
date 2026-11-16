@@ -555,7 +555,7 @@ internal fun ModelSettingsPage(onBack: () -> Unit) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     OutlinedButton(
                         enabled = !loadingModels && selected != null && baseUrlText.isNotBlank(),
-                        modifier = Modifier.heightIn(min = 36.dp),
+                        modifier = Modifier.heightIn(min = SettingsStyle.ControlHeight),
                         contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
                         shape = MaterialTheme.shapes.small,
                         onClick = {
@@ -617,7 +617,7 @@ internal fun ModelSettingsPage(onBack: () -> Unit) {
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                Spacer(Modifier.height(4.dp))
+                Spacer(Modifier.height(SettingsStyle.FieldGap))
                 Text(
                     text = "从接口获取后在弹窗勾选启用模型；只有启用/停用需要点底部保存。",
                     style = SettingsStyle.description,

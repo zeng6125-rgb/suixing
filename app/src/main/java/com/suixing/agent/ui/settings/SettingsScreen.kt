@@ -734,7 +734,7 @@ internal fun OutcomeCard(outcome: TestOutcome, onDismiss: () -> Unit) {
     SuixingCard(
         containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
     ) {
-        Row(verticalAlignment = Alignment.Top) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
             Icon(
                 imageVector = if (outcome.ok) ImageVector.vectorResource(R.drawable.ic_circle_check) else ImageVector.vectorResource(R.drawable.ic_circle_alert),
                 contentDescription = null,
@@ -748,6 +748,7 @@ internal fun OutcomeCard(outcome: TestOutcome, onDismiss: () -> Unit) {
                 color = MaterialTheme.colorScheme.onSurface,
                 modifier = Modifier.weight(1f),
             )
+            Spacer(Modifier.width(SettingsStyle.FieldGap))
             IconButton(onClick = onDismiss, modifier = Modifier.size(24.dp)) {
                 Icon(
                     imageVector = ImageVector.vectorResource(R.drawable.ic_x),

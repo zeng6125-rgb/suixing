@@ -274,6 +274,7 @@ internal fun AppearanceSettingsPage(onBack: () -> Unit) {
                                 paletteMode = defaults.paletteMode,
                                 fontScale = defaults.fontScale,
                                 bubbleWidth = defaults.bubbleWidth,
+                                assistantCard = defaults.assistantCard,
                                 cornerScale = defaults.cornerScale,
                                 // 只重置此页管理的外观参数；边缘光由 UI自动化页管理。
                                 bannerSeconds = defaults.bannerSeconds,

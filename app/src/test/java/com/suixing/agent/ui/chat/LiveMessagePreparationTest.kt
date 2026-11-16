@@ -139,6 +139,7 @@ class LiveMessagePreparationTest {
     }
 
     @Test fun initialLiveAndInlineContentMustBeAppliedBeforeTheSwitchCanClose() = runBlocking {
+        val ownerThread = Thread.currentThread()
         val liveEntered = CountDownLatch(1)
         val liveRelease = CountDownLatch(1)
         val inlineEntered = CountDownLatch(1)
@@ -157,6 +158,7 @@ class LiveMessagePreparationTest {
         harness.inlineSource.value = InlineMarkdownSource("**stored** body")
         mockkObject(NativeMarkdown)
         every { NativeMarkdown.inlineRuns(any()) } answers {
+            if (Thread.currentThread() === ownerThread) return@answers null
             if (firstArg<String>() == "**stored** body") {
                 inlineEntered.countDown()
                 assertTrue(inlineRelease.await(5, TimeUnit.SECONDS))
@@ -232,6 +234,7 @@ class LiveMessagePreparationTest {
     }
 
     @Test fun disposingThePendingLeafReleasesANonOwnedOrEmptyLiveViewport() = runBlocking {
+        val ownerThread = Thread.currentThread()
         val inlineEntered = CountDownLatch(1)
         val inlineRelease = CountDownLatch(1)
         val foreign = spyk(GrowableText("foreign run"))
@@ -241,6 +244,7 @@ class LiveMessagePreparationTest {
         harness.inlineSource.value = InlineMarkdownSource("**pending** stored body")
         mockkObject(NativeMarkdown)
         every { NativeMarkdown.inlineRuns(any()) } answers {
+            if (Thread.currentThread() === ownerThread) return@answers null
             inlineEntered.countDown()
             assertTrue(inlineRelease.await(5, TimeUnit.SECONDS))
             null

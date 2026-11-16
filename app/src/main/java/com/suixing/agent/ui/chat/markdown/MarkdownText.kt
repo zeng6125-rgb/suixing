@@ -555,11 +555,13 @@ private class InlineScanner(
         fontSize = codeFontSize,
     )
 
-    fun scan(appendCaret: Boolean = false): AnnotatedString {
+    fun scan(
+        appendCaret: Boolean = false,
+        prepared: List<NativeInlineRun>? = if (parseMarkup) NativeMarkdown.inlineRuns(text) else null,
+    ): AnnotatedString {
         val base = if (baseWeight == null) EMPTY_SPAN else SpanStyle(fontWeight = baseWeight)
         // Only consume exact-text runs prepared by the cold-document worker here.
         // Streaming searchState still updates upstream before a later append resumes it.
-        val prepared = if (parseMarkup) NativeMarkdown.inlineRuns(text) else null
         if (prepared == null) {
             emit(0, text.length, base, null)
         } else {
@@ -1467,15 +1469,40 @@ internal data class InlineMarkdownSource(
             codeFontSize == other.codeFontSize && cursor == other.cursor
 }
 
+private fun preparedInlineMarkdown(source: InlineMarkdownSource): AnnotatedString? {
+    val runs = NativeMarkdown.inlineRuns(source.text) ?: return null
+    return InlineScanner(
+        text = source.text,
+        codeBackground = source.codeBackground,
+        codeColor = source.codeColor,
+        linkColor = source.linkColor,
+        baseWeight = null,
+        onUrlClick = source.onUrlClick,
+        onPathClick = source.onPathClick,
+        codeFontSize = source.codeFontSize,
+    ).scan(source.cursor, runs)
+}
+
 @Composable
 internal fun rememberInlineMarkdown(requestedSource: InlineMarkdownSource): AnnotatedString {
     val source = androidx.compose.runtime.rememberUpdatedState(requestedSource)
-    val annotated = remember { mutableStateOf<AnnotatedString?>(null, referentialEqualityPolicy()) }
+    val initial = remember { requestedSource to preparedInlineMarkdown(requestedSource) }
+    val annotated = remember { mutableStateOf(initial.second, referentialEqualityPolicy()) }
     com.suixing.agent.ui.chat.InitialViewportContentReady(annotated.value != null)
     LaunchedEffect(annotated) {
         val literalSource = InlineLiteralSource()
         val searchState = InlineSearchState("")
+        var preparedSource = initial.first.takeIf { initial.second != null }
+        preparedSource?.let {
+            withContext(Dispatchers.Default) {
+                literalSource.accepts(it.text)
+                searchState.update(it.text, appendOnly = false)
+            }
+        }
         snapshotFlow { source.value }.conflate().collect { requested ->
+            val alreadyPrepared = requested === preparedSource
+            preparedSource = null
+            if (alreadyPrepared) return@collect
             val literal = withContext(Dispatchers.Default) { literalSource.accepts(requested.text) }
             val appendOnly = literalSource.lastWasAppend
             if (!appendOnly && source.value === requested) annotated.value = null

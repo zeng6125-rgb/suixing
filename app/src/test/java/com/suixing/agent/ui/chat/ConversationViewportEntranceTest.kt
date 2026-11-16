@@ -205,6 +205,7 @@ class ConversationViewportEntranceTest {
     }
 
     private class OffsetHarness(scope: CoroutineScope, cached: Boolean) {
+        private val ownerThread = Thread.currentThread()
         private val text = "historical **target** message"
         private val rows = listOf(
             ChatRow(StoredMessage("target", "assistant", text), false, listOf(Part.Text(text))),
@@ -276,6 +277,7 @@ class ConversationViewportEntranceTest {
             every { Core.conversationViewports } returns mockk(relaxed = true)
             every { Core.startup } returns mockk(relaxed = true)
             every { NativeMarkdown.inlineRuns(any()) } answers {
+                if (Thread.currentThread() === ownerThread) return@answers null
                 started.countDown()
                 assertTrue(release.await(5, TimeUnit.SECONDS))
                 null

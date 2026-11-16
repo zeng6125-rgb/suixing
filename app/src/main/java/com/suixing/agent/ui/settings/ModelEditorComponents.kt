@@ -75,7 +75,7 @@ internal fun ProviderApiKeyField(
     )
 }
 
-/** Compact native actions: a 40dp visual minimum, with Material's standard touch target. */
+/** Native actions share the settings control height and grow with scaled text. */
 @Composable
 internal fun ModelActionButton(
     text: String, onClick: () -> Unit, modifier: Modifier = Modifier,
@@ -84,7 +84,7 @@ internal fun ModelActionButton(
     val colors = MaterialTheme.colorScheme
     Button(
         onClick = onClick, enabled = enabled && !busy,
-        modifier = modifier.heightIn(min = 40.dp), shape = MaterialTheme.shapes.small,
+        modifier = modifier.heightIn(min = SettingsStyle.ControlHeight), shape = MaterialTheme.shapes.small,
         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
         colors = ButtonDefaults.buttonColors(
             containerColor = if (primary) colors.primary else colors.surfaceContainerHigh,

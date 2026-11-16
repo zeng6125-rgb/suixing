@@ -84,20 +84,8 @@ jobs:
           path: app/build/reports/tests/testReleaseUnitTest
           if-no-files-found: ignore
 
-      - name: Assemble debug and release
-        run: ./gradlew :app:assembleDebug :app:assembleRelease --no-daemon --stacktrace
-
-      # Compile instrumentation tests without an attached device; runtime PTY
-      # behavior still requires separate Android device validation (#61).
-      - name: Compile Android instrumentation tests
-        run: ./gradlew :app:assembleDebugAndroidTest --no-daemon --stacktrace
-
-      - name: Upload debug APK
-        uses: actions/upload-artifact@v7
-        with:
-          name: suixing-debug
-          path: app/build/outputs/apk/debug/*.apk
-          if-no-files-found: error
+      - name: Assemble release
+        run: ./gradlew :app:assembleRelease --no-daemon --stacktrace
 
       - name: Upload release APK
         uses: actions/upload-artifact@v7

@@ -3,10 +3,8 @@ package com.suixing.agent.ui.chat
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.tween
-import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.lazy.LazyListLayoutInfo
 import androidx.compose.foundation.lazy.LazyListState
-import androidx.compose.foundation.lazy.layout.LazyLayoutCacheWindow
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -78,10 +76,8 @@ internal fun bookmarkRow(bookmark: ViewportBookmark?, keys: List<String>, rows: 
     return -1
 }
 
-@OptIn(ExperimentalFoundationApi::class)
 internal class ConversationViewport(val conversationId: String, var bookmark: ViewportBookmark?) {
-    // Two screens ahead, one behind: bounded reuse instead of retaining whole transcripts.
-    val listState = LazyListState(cacheWindow = LazyLayoutCacheWindow(aheadFraction = 2f, behindFraction = 1f))
+    val listState = LazyListState()
     // The restored transcript and rail share one short, stationary reveal.
     val entrance = Animatable(0f)
     val navigation = NavigationMotion()
