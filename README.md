@@ -412,6 +412,13 @@ GLM、OpenAI 兼容（自填地址）、本机 Ollama、Kimi、千问、硅基�
 - **冷启动不读盘**：`Application.onCreate` 不再 `runBlocking` 读 DataStore，主题模式改从一个几百字节的 `SharedPreferences` 同步读；DataStore 的收集器继续负责后续更新。
 - **审批弹卡**：待审批请求带单调序号，显式取最早的一条，不再依赖 `Map` 的迭代顺序。
 
+## 贡献者
+
+- [zeng6125-rgb](https://github.com/zeng6125-rgb)：项目维护与开发。
+- Codex：代码实现、问题修复与性能优化协作。
+
+提交贡献记录见 [GitHub Contributors](https://github.com/zeng6125-rgb/suixing/graphs/contributors)。
+
 ## 开源许可与第三方声明
 
 - 本项目自身的代码以 **MIT** 许可发布，见 [LICENSE](LICENSE)。
