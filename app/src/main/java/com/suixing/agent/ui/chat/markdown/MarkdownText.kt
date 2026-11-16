@@ -39,6 +39,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import com.suixing.agent.ui.drawer.drawerScrollPriority
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
@@ -1847,7 +1848,7 @@ private fun CodeBlock(block: MdBlock.Code, palette: MarkdownPalette, cursor: Boo
                 annotated = remember(block.code, cursor) { codeBlockAnnotatedText(block.code, cursor) },
                 caretColor = palette.linkColor,
                 cursor = cursor,
-                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                modifier = Modifier.drawerScrollPriority().horizontalScroll(rememberScrollState()),
                 // bodySmall is already 13sp monospace-sized; only the leading differs,
                 // and it is scaled off the font size so 字号 still applies.
                 style = MaterialTheme.typography.bodySmall.copy(

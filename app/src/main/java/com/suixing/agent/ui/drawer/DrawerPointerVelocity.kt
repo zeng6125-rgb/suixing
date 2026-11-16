@@ -8,14 +8,17 @@ import androidx.compose.ui.unit.Velocity
 
 /** Shared sampling for the fixed host and the home shield that moves with the drawer. */
 internal class DrawerPointerVelocity {
-    private val tracker = VelocityTracker1D(isDataDifferential = true)
+    // Absolute physical samples let Impulse forget earlier motion after a reversal.
+    private val tracker = VelocityTracker1D(isDataDifferential = false)
     private var pointerId: PointerId? = null
+    private var physicalX = 0f
     private var lastMotionTime = 0L
 
     fun trackDrawerPointer(change: PointerInputChange) {
         if (pointerId != change.id || change.changedToDownIgnoreConsumed()) {
             pointerId = change.id
             tracker.resetTracking()
+            physicalX = 0f
             lastMotionTime = change.previousUptimeMillis
             if (change.previousPressed) {
                 tracker.addDataPoint(change.previousUptimeMillis, 0f)
@@ -29,12 +32,14 @@ internal class DrawerPointerVelocity {
         var previousX = change.previousPosition.x
         for (sample in change.historical) {
             val dx = sample.position.x - previousX
-            tracker.addDataPoint(sample.uptimeMillis, dx)
+            physicalX += dx
+            tracker.addDataPoint(sample.uptimeMillis, physicalX)
             if (dx != 0f) lastMotionTime = sample.uptimeMillis
             previousX = sample.position.x
         }
         val dx = change.position.x - previousX
-        tracker.addDataPoint(change.uptimeMillis, dx)
+        physicalX += dx
+        tracker.addDataPoint(change.uptimeMillis, physicalX)
         if (dx != 0f) lastMotionTime = change.uptimeMillis
     }
 

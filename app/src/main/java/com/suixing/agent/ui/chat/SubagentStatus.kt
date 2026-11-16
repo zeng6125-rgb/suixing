@@ -10,6 +10,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import com.suixing.agent.ui.drawer.drawerScrollPriority
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -34,7 +35,8 @@ internal fun SubagentInlineQueue(chatId: String, runId: String, running: Boolean
     }.collectAsStateWithLifecycle(initialValue = emptyList())
     if (queue.isEmpty()) return
     Column(Modifier.fillMaxWidth().padding(horizontal = STEER_QUEUE_INSET)) {
-        LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+        LazyRow(modifier = Modifier.drawerScrollPriority(),
+            horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
             items(queue, key = { it.id }, contentType = { "subagent-queue" }) { task ->
                 Surface(onClick = { onSelect(task.id) }, shape = RoundedCornerShape(14.dp),
                     color = MaterialTheme.colorScheme.surfaceContainerHigh,

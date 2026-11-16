@@ -64,6 +64,7 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import com.suixing.agent.ui.drawer.drawerScrollPriority
 import com.suixing.agent.ui.components.bottomInsetPadding
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
@@ -664,6 +665,7 @@ internal fun Composer(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(start = STEER_QUEUE_INSET)
+                        .drawerScrollPriority()
                         .horizontalScroll(rememberScrollState()),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {

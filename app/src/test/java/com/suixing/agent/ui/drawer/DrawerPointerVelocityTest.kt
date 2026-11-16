@@ -10,6 +10,19 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class DrawerPointerVelocityTest {
+    @Test fun `a reversal decision discards the earlier opening impulse`() {
+        val tracker = DrawerPointerVelocity()
+        val positions = listOf(100f, 140f, 180f, 220f, 216f, 212f, 208f, 204f)
+        positions.forEachIndexed { index, x ->
+            tracker.trackDrawerPointer(pointerChange(1L, index * 16L, x,
+                if (index == 0) x else positions[index - 1], previousPressed = index != 0))
+        }
+        tracker.trackDrawerPointer(pointerChange(1L, 128L, 204f, 204f, pressed = false))
+
+        val velocity = tracker.calculateVelocity().x
+        assertTrue("64ms of closing movement must not retain an opening velocity: $velocity", velocity < 0f)
+    }
+
     @Test fun `a left swipe keeps its closing velocity when the shield moves with the finger`() {
         val velocity = sampleSwipe(localStep = 0f, pointerStep = -20f)
         assertTrue("the moving shield must not erase a closing fling: $velocity", velocity < -800f)

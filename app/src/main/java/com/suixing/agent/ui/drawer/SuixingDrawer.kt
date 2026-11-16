@@ -6,17 +6,16 @@ import androidx.compose.animation.core.spring
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
-import androidx.compose.ui.input.pointer.positionChange
-import androidx.compose.foundation.gestures.detectDragGestures
-import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerId
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.width
 import androidx.compose.material3.DrawerValue
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.State
 import androidx.compose.runtime.derivedStateOf
@@ -27,6 +26,7 @@ import androidx.compose.runtime.structuralEqualityPolicy
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.FrameRateCategory
 import androidx.compose.ui.preferredFrameRate
@@ -46,6 +46,8 @@ import kotlinx.coroutines.launch
 
 /** One pointer gesture's ownership token. A newer token permanently invalidates this one. */
 internal class DrawerGestureSession internal constructor(internal val generation: Long)
+
+internal class DrawerMotion(val target: DrawerValue, val spec: AnimationSpec<Float>)
 
 /**
  * Discrete input-shield lifecycle for the home page. Only [Closed] may drop the shield; every
@@ -99,7 +101,7 @@ internal fun drawerHomeShieldStartPx(panelWidthPx: Float, progress: Float): Floa
  * NavigationDrawer.kt:303  fun rememberDrawerState(initialValue, confirmStateChange)
  * ```
  * ⇒ 手势松手后的回弹速度只能走库的 token（开 `spring(0.9, 700)` / 关 `spring(1.0, 3800)`），
- * App 改不了。这里改用 `Animatable` + 横向 `detectDragGestures`，
+ * App 改不了。这里改用 `Animatable` + 横向指针循环，
  * 回弹曲线由 [animateTo] 的调用方传入（与汉堡键共用临界阻尼弹簧 [DRAWER_SPEC]）。
  *
  * `isOpen` 表示已停靠端点；所有可见层与命中遮罩共用 [visualProgress]。
@@ -144,6 +146,9 @@ internal class SuixingDrawerState(initialValue: DrawerValue) {
     private var gestureGeneration = 0L
     private var activeGesture: DrawerGestureSession? = null
     private var motionJob: Job? = null
+    internal var motion: DrawerMotion? = null
+        private set
+    internal var priorityPointerId: PointerId? = null
 
     /** Navigation observes ownership changes, not pointer positions. */
     internal var gestureSession by mutableStateOf<DrawerGestureSession?>(null)
@@ -211,6 +216,7 @@ internal class SuixingDrawerState(initialValue: DrawerValue) {
         revokeGestures()
         val job = currentCoroutineContext()[Job]
         motionJob = job
+        motion = DrawerMotion(target, spec)
         homeLifecycle = drawerMotionLifecycle(target)
         var reached = false
         try {
@@ -229,6 +235,7 @@ internal class SuixingDrawerState(initialValue: DrawerValue) {
         } finally {
             if (motionJob === job) {
                 motionJob = null
+                motion = null
                 if (!reached) homeLifecycle = drawerIdleLifecycle(visualProgress.value)
             }
         }
@@ -260,6 +267,7 @@ internal class SuixingDrawerState(initialValue: DrawerValue) {
         val startingProgress = releaseProgress ?: visualProgress.value
         val job = currentCoroutineContext()[Job]
         motionJob = job
+        motion = DrawerMotion(target, spec)
         homeLifecycle = drawerMotionLifecycle(target)
         var reached = false
         try {
@@ -284,6 +292,7 @@ internal class SuixingDrawerState(initialValue: DrawerValue) {
         } finally {
             if (motionJob === job) {
                 motionJob = null
+                motion = null
                 if (!reached) homeLifecycle = drawerIdleLifecycle(visualProgress.value)
             }
         }
@@ -299,6 +308,26 @@ internal class SuixingDrawerState(initialValue: DrawerValue) {
     private fun cancelMotion() {
         motionJob?.cancel()
         motionJob = null
+        motion = null
+    }
+}
+
+private val LocalDrawerGestureState = staticCompositionLocalOf<SuixingDrawerState?> { null }
+
+/** Existing horizontal scrollers keep gestures that start inside their bounds. */
+@Composable
+internal fun Modifier.drawerScrollPriority(): Modifier {
+    val state = LocalDrawerGestureState.current ?: return this
+    return pointerInput(state) {
+        awaitEachGesture {
+            val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+            state.priorityPointerId = down.id
+            try {
+                while (currentEvent.changes.any { it.pressed }) awaitPointerEvent(PointerEventPass.Final)
+            } finally {
+                if (state.priorityPointerId == down.id) state.priorityPointerId = null
+            }
+        }
     }
 }
 
@@ -339,7 +368,7 @@ private fun DrawerPanelFrameRateHost(
  * 抽屉宿主：侧边栏在下、主页在上（先画侧边栏，后画主页 ⇒ 主页的阴影能压上去）。
  *
  * ⚠️ 宿主与冻结层是**两套故意不同**的手势循环，不要"统一"成一份：
- *  · 宿主 = 横向 `detectDragGestures`：横向 slop 之后才消费事件，竖滑要原样放行
+ *  · 宿主 = 横向判定后才消费事件，竖滑要原样放行
  *    给聊天列表滚动；
  *  · 冻结层 = `awaitEachGesture` 全消费：抽屉开着时竖滑也必须吞掉（挡列表滚动），
  *    轻点算"点遮罩"。消费语义相反，合并必然破坏其中一边。
@@ -364,9 +393,9 @@ internal fun SuixingDrawer(
     // **松手回弹用 spring 并吃进手指速度**（用户：「手势的收起动画好像有点违和」）。
     // tween 不认初速度 ⇒ 快划松手时动画会从 0 速度重新起步，看着像"顿一下再走"。
     // spring 带 initialVelocity 才能与手指的甩动连续。
-    val settle: (DrawerGestureSession, DrawerValue, Float, DrawerDragRelease) -> Unit =
+    val settle: (DrawerGestureSession, DrawerValue, Float, DrawerDragRelease, AnimationSpec<Float>) -> Unit =
         remember(scope, state, panelPx) {
-            { session, target, velocityPx, releaseProgress ->
+            { session, target, velocityPx, releaseProgress, spec ->
                 scope.launch(start = CoroutineStart.UNDISPATCHED) {
                     // A newer drag or external close invalidates this release.
                     if (!dragAccumulator.canSettle(releaseProgress) ||
@@ -377,7 +406,7 @@ internal fun SuixingDrawer(
                     state.settleGesture(
                         session,
                         target,
-                        DRAWER_SPEC,
+                        spec,
                         initialVelocity = velocityPx / panelPx,
                         releaseProgress = releaseProgress.progress,
                     )
@@ -387,93 +416,118 @@ internal fun SuixingDrawer(
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .pointerInput(gesturesEnabled, panelPx) {
+            .pointerInput(state, gesturesEnabled, panelPx) {
                 if (!gesturesEnabled) return@pointerInput
                 val tracker = DrawerPointerVelocity()
-                // detectDragGestures does not promise onDragCancel when its Job is
-                // cancelled for a key change. Keep the owner here and release only this drag in
-                // finally; a normal release clears the owner first so finally cannot settle.
-                var ownedSession: DrawerGestureSession? = null
-                var ownedGeneration: Long? = null
-                var dismissKeyboardOnOpen = false
-                try {
-                    detectDragGestures(
-                        orientationLock = Orientation.Horizontal,
-                        onDragStart = { down, _, _ ->
-                            // The shield may already own this down on the Main pass.
-                            if (state.gestureSession != null) return@detectDragGestures
-                            dismissKeyboardOnOpen = !state.homeShieldActive
-                            val session = state.beginGesture()
-                            ownedSession = session
-                            ownedGeneration = dragAccumulator.begin(state.visualProgress.value, panelPx)
-                            tracker.trackDrawerPointer(down)
-                        },
-                        onDrag = { change, dragAmount ->
-                            val dx = dragAmount.x
-                            if (dismissKeyboardOnOpen && dx > 0f) {
-                                dismissKeyboardOnOpen = false
-                                keyboardController?.hide()
-                                focusManager.clearFocus(force = true)
-                            }
-                            val session = ownedSession ?: return@detectDragGestures
-                            val generation = ownedGeneration ?: return@detectDragGestures
-                            change.consume()
-                            dragAccumulator.dragBy(generation, dx)?.let {
-                                state.applyGestureFrame(session, it)
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                    // Let descendants register their DOWN before choosing the gesture owner.
+                    awaitPointerEvent(PointerEventPass.Main)
+                    if (state.priorityPointerId == down.id) return@awaitEachGesture
+                    val interruptedMotion = state.motion
+                    val interruptedVelocity = state.progress.velocity
+                    var dismissKeyboardOnOpen = !state.homeShieldActive
+                    var ownedSession = interruptedMotion?.let { state.beginGesture() }
+                    var ownedGeneration = ownedSession?.let {
+                        dragAccumulator.begin(state.visualProgress.value, panelPx)
+                    }
+                    tracker.trackDrawerPointer(down)
+                    var pointerId = down.id
+                    var horizontal = 0f
+                    var vertical = 0f
+                    var appliedHorizontal = 0f
+                    var isDrag = false
+                    var released = false
+                    var childOwnsGesture = false
+                    try {
+                        while (true) {
+                            val event = awaitPointerEvent(PointerEventPass.Initial)
+                            val change = event.changes.firstOrNull { it.id == pointerId } ?: break
+                            val childFirst = !isDrag &&
+                                change.uptimeMillis - down.uptimeMillis >= viewConfiguration.longPressTimeoutMillis
+                            if (childFirst) {
+                                // Long-press selection may already own movement in a descendant.
+                                awaitPointerEvent(PointerEventPass.Main)
+                                if (change.isConsumed) {
+                                    childOwnsGesture = true
+                                    break
+                                }
                             }
                             tracker.trackDrawerPointer(change)
-                        },
-                        onDragEnd = { up ->
-                            tracker.trackDrawerPointer(up)
-                            val session = ownedSession ?: return@detectDragGestures
-                            val generation = ownedGeneration
-                                ?: return@detectDragGestures
-                            dragAccumulator.dragBy(generation, up.position.x - up.previousPosition.x)?.let {
-                                state.applyGestureFrame(session, it)
+                            val dx = change.position.x - change.previousPosition.x
+                            horizontal += dx
+                            vertical += change.position.y - change.previousPosition.y
+                            if (!isDrag && maxOf(abs(horizontal), abs(vertical)) > viewConfiguration.touchSlop) {
+                                if (abs(vertical) >= abs(horizontal)) {
+                                    childOwnsGesture = true
+                                    break
+                                }
+                                isDrag = true
+                                if (ownedSession == null) {
+                                    appliedHorizontal = if (horizontal > 0f) viewConfiguration.touchSlop
+                                        else -viewConfiguration.touchSlop
+                                    ownedSession = state.beginGesture()
+                                    ownedGeneration = dragAccumulator.begin(state.visualProgress.value, panelPx)
+                                }
                             }
+                            val session = ownedSession
+                            val generation = ownedGeneration
+                            if (session != null && generation != null) {
+                                dragAccumulator.dragBy(generation, horizontal - appliedHorizontal)?.let {
+                                    state.applyGestureFrame(session, it)
+                                }
+                                appliedHorizontal = horizontal
+                            }
+                            if (isDrag) {
+                                change.consume()
+                                if (dismissKeyboardOnOpen && dx > 0f) {
+                                    dismissKeyboardOnOpen = false
+                                    keyboardController?.hide()
+                                    focusManager.clearFocus(force = true)
+                                }
+                            }
+                            if (change.changedToUpIgnoreConsumed()) {
+                                val replacement = event.changes.firstOrNull { it.pressed }
+                                if (replacement != null) {
+                                    pointerId = replacement.id
+                                    tracker.trackDrawerPointer(replacement)
+                                    continue
+                                }
+                                // An ordinary row tap may trigger an external drawer action.
+                                if (!isDrag && !childFirst) awaitPointerEvent(PointerEventPass.Main)
+                                released = true
+                                break
+                            }
+                            if (!isDrag) {
+                                awaitPointerEvent(PointerEventPass.Final)
+                                if (change.isConsumed) {
+                                    childOwnsGesture = true
+                                    break
+                                }
+                            }
+                        }
+                        val session = ownedSession
+                        val generation = ownedGeneration
+                        if ((released || childOwnsGesture) && session != null && generation != null) {
+                            val release = dragAccumulator.finish(generation)
+                            val stillOwned = state.finishGesture(session)
                             ownedSession = null
                             ownedGeneration = null
-                            // **带速度判断**（用户：「手势很大程度都滑不动，得滑很久」）。
-                            // 快速滑动（|v| > 800px/s）按方向吸附；否则离开原开/关端点
-                            // 超过 25% 行程即可换端，不能让收起必须拖过 75%。
-                            val v = tracker.calculateVelocity().x
-                            val releaseProgress = dragAccumulator.finish(generation)
-                            val stillOwned = state.finishGesture(session)
-                            if (releaseProgress == null || !stillOwned) {
-                                return@detectDragGestures
+                            if (release != null && stillOwned) {
+                                if (isDrag && !childOwnsGesture) {
+                                    val v = tracker.calculateVelocity().x
+                                    settle(session,
+                                        drawerDragTarget(state.isOpen, release.progress, v, release.startProgress),
+                                        v, release, DRAWER_SPEC)
+                                } else if (interruptedMotion != null) {
+                                    settle(session, interruptedMotion.target, interruptedVelocity * panelPx,
+                                        release, interruptedMotion.spec)
+                                }
                             }
-                            settle(
-                                session,
-                                drawerDragTarget(state.isOpen, releaseProgress.progress, v),
-                                v,
-                                releaseProgress,
-                            )
-                        },
-                        onDragCancel = {
-                            val session = ownedSession ?: return@detectDragGestures
-                            val generation = ownedGeneration
-                                ?: return@detectDragGestures
-                            ownedSession = null
-                            ownedGeneration = null
-                            val releaseProgress = dragAccumulator.finish(generation)
-                            val stillOwned = state.finishGesture(session)
-                            if (releaseProgress == null || !stillOwned) {
-                                return@detectDragGestures
-                            }
-                            settle(
-                                session,
-                                drawerDragTarget(state.isOpen, releaseProgress.progress, 0f),
-                                0f,
-                                releaseProgress,
-                            )
-                        },
-                    )
-                } finally {
-                    val session = ownedSession
-                    val generation = ownedGeneration
-                    ownedSession = null
-                    ownedGeneration = null
-                    cancelOwnedDrawerDrag(state, dragAccumulator, session, generation)
+                        }
+                    } finally {
+                        cancelOwnedDrawerDrag(state, dragAccumulator, ownedSession, ownedGeneration)
+                    }
                 }
             },
     ) {
@@ -493,7 +547,9 @@ internal fun SuixingDrawer(
             drawerContent()
         }
         // 主页：后画 ⇒ 在上层。
-        content()
+        CompositionLocalProvider(LocalDrawerGestureState provides state) {
+            content()
+        }
         // **抽屉开合期间冻结可能露出的主页**。只在完全关闭时卸下，避免动画期间触控泄漏。
         //
         // 为什么需要：主页被推到右边后，露出的一条仍然是**活的**——可以点按钮、
@@ -519,18 +575,23 @@ internal fun SuixingDrawer(
                     // **一个手势处理器，不要拆成两个 detector**：
                     // `detectHorizontalDragGestures` 与 `detectTapGestures` 各自独立消费指针，
                     // 轻点很可能先被拖动那边吃掉 ⇒ "点一下关闭"不稳定。
-                    // 这里用 `awaitEachGesture` 自己分流：横向超阈值算拖动，否则抬起算轻点。
-                    .pointerInput(panelPx) {
+                    // 这里用 `awaitEachGesture` 分流横拖、竖滑与轻点，并全程消费事件。
+                    .pointerInput(state, panelPx) {
                         awaitEachGesture {
                             val down = awaitFirstDown(requireUnconsumed = false)
                             down.consume()
+                            state.priorityPointerId = down.id
                             val tracker = DrawerPointerVelocity()
                             tracker.trackDrawerPointer(down)
                             var pointerId = down.id
                             var horizontal = 0f
+                            var vertical = 0f
                             var isDrag = false
+                            var isVertical = false
                             var appliedHorizontal = 0f
-                            var ownedSession = if (state.progress.isRunning) state.beginGesture() else null
+                            val interruptedMotion = state.motion
+                            val interruptedVelocity = state.progress.velocity
+                            var ownedSession = interruptedMotion?.let { state.beginGesture() }
                             var ownedGeneration = ownedSession?.let {
                                 dragAccumulator.begin(state.visualProgress.value, panelPx)
                             }
@@ -539,22 +600,50 @@ internal fun SuixingDrawer(
                                     val event = awaitPointerEvent()
                                     val change = event.changes.firstOrNull { it.id == pointerId } ?: break
                                     tracker.trackDrawerPointer(change)
-                                    if (change.changedToUpIgnoreConsumed()) {
-                                        val session = ownedSession
-                                        val generation = ownedGeneration
-                                        if (session != null && generation != null) {
-                                            dragAccumulator.dragBy(generation,
-                                                change.position.x - change.previousPosition.x)?.let {
-                                                state.applyGestureFrame(session, it)
+                                    horizontal += change.position.x - change.previousPosition.x
+                                    vertical += change.position.y - change.previousPosition.y
+                                    event.changes.forEach { it.consume() }
+                                    if (!isDrag && !isVertical &&
+                                        maxOf(abs(horizontal), abs(vertical)) > viewConfiguration.touchSlop
+                                    ) {
+                                        isVertical = abs(vertical) >= abs(horizontal)
+                                        isDrag = !isVertical
+                                        if (isDrag && ownedSession == null) {
+                                            appliedHorizontal = if (horizontal > 0f) viewConfiguration.touchSlop
+                                                else -viewConfiguration.touchSlop
+                                            ownedSession = state.beginGesture()
+                                            ownedGeneration = dragAccumulator.begin(state.visualProgress.value, panelPx)
+                                        } else if (isVertical) {
+                                            val session = ownedSession
+                                            val generation = ownedGeneration
+                                            ownedSession = null
+                                            ownedGeneration = null
+                                            if (session != null && generation != null) {
+                                                val release = dragAccumulator.finish(generation)
+                                                val stillOwned = state.finishGesture(session)
+                                                if (release != null && stillOwned && interruptedMotion != null) {
+                                                    settle(session, interruptedMotion.target,
+                                                        interruptedVelocity * panelPx, release, interruptedMotion.spec)
+                                                }
                                             }
                                         }
-                                        event.changes.forEach { it.consume() }
+                                    }
+                                    val session = ownedSession
+                                    val generation = ownedGeneration
+                                    if (session != null && generation != null) {
+                                        dragAccumulator.dragBy(generation, horizontal - appliedHorizontal)?.let {
+                                            state.applyGestureFrame(session, it)
+                                        }
+                                        appliedHorizontal = horizontal
+                                    }
+                                    if (change.changedToUpIgnoreConsumed()) {
                                         val replacement = event.changes.firstOrNull { it.pressed }
                                         if (replacement != null) {
                                             pointerId = replacement.id
                                             tracker.trackDrawerPointer(replacement)
                                             continue
                                         }
+                                        if (isVertical) break
                                         if (!isDrag) {
                                             // **轻点 = 点遮罩**：外部状态动作优先，作废旧拖拽。
                                             scope.launch(start = CoroutineStart.UNDISPATCHED) {
@@ -572,37 +661,15 @@ internal fun SuixingDrawer(
                                                 val v = tracker.calculateVelocity().x
                                                 settle(
                                                     session,
-                                                    drawerDragTarget(state.isOpen, releaseProgress.progress, v),
+                                                    drawerDragTarget(state.isOpen, releaseProgress.progress, v,
+                                                        releaseProgress.startProgress),
                                                     v,
                                                     releaseProgress,
+                                                    DRAWER_SPEC,
                                                 )
                                             }
                                         }
                                         break
-                                    }
-                                    val dx = change.positionChange().x
-                                    horizontal += dx
-                                    event.changes.forEach { it.consume() }
-                                    if (!isDrag && abs(horizontal) > viewConfiguration.touchSlop) {
-                                        isDrag = true
-                                        if (ownedSession == null) {
-                                            // A stationary panel keeps touch slop; a caught spring follows immediately.
-                                            appliedHorizontal = if (horizontal > 0f) viewConfiguration.touchSlop
-                                                else -viewConfiguration.touchSlop
-                                            ownedSession = state.beginGesture()
-                                            ownedGeneration = dragAccumulator.begin(state.visualProgress.value, panelPx)
-                                        }
-                                    }
-                                    if (ownedSession != null) {
-                                        // Append the claimed delta once, then only this event's motion.
-                                        val session = ownedSession
-                                        val generation = ownedGeneration
-                                        if (generation != null) {
-                                            dragAccumulator.dragBy(generation, horizontal - appliedHorizontal)?.let {
-                                                state.applyGestureFrame(session, it)
-                                            }
-                                        }
-                                        appliedHorizontal = horizontal
                                     }
                                 }
                             } finally {
@@ -610,6 +677,7 @@ internal fun SuixingDrawer(
                                 val generation = ownedGeneration
                                 ownedSession = null
                                 ownedGeneration = null
+                                if (state.priorityPointerId == down.id) state.priorityPointerId = null
                                 cancelOwnedDrawerDrag(state, dragAccumulator, session, generation)
                             }
                         }

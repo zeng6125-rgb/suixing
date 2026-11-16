@@ -1,10 +1,10 @@
 package com.suixing.agent.ui.drawer
 
 /** The final progress for one drag; a later begin invalidates this release. */
-internal data class DrawerDragRelease(val generation: Long, val progress: Float)
+internal data class DrawerDragRelease(val generation: Long, val progress: Float, val startProgress: Float)
 
 /**
- * Accumulates pointer deltas from the progress captured when a horizontal drag wins touch slop.
+ * Accumulates pointer deltas from the progress captured when a gesture takes ownership.
  * The release animation never supplies the next pointer position.
  */
 internal class DrawerDragAccumulator {
@@ -59,6 +59,6 @@ internal class DrawerDragAccumulator {
         if (!active || generation != dragGeneration) return null
         active = false
         generation++
-        return DrawerDragRelease(generation, latestProgress)
+        return DrawerDragRelease(generation, latestProgress, startProgress)
     }
 }

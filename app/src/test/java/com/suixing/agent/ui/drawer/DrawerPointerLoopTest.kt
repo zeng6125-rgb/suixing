@@ -1,6 +1,10 @@
 package com.suixing.agent.ui.drawer
 
 import androidx.compose.material3.DrawerValue
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.runtime.Applier
 import androidx.compose.runtime.BroadcastFrameClock
@@ -23,6 +27,7 @@ import androidx.compose.ui.input.pointer.PointerId
 import androidx.compose.ui.input.pointer.PointerInputChange
 import androidx.compose.ui.input.pointer.PointerInputEventHandler
 import androidx.compose.ui.input.pointer.PointerInputScope
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalLayoutDirection
@@ -53,6 +58,148 @@ import kotlin.coroutines.suspendCoroutine
 
 /** Run the drawer's actual pointerInput handlers with finite events, without Android windows. */
 class DrawerPointerLoopTest {
+    @Test fun `a horizontal decision wins a diagonal move before the vertical child`() {
+        var childScroll = 0f
+        withPointerLoop(DrawerValue.Closed, shield = false, includeHost = true,
+            childOrientation = Orientation.Vertical, childDrag = { childScroll += it }, events = listOf(
+                event(change(0L, 100f, 100f, previousPressed = false, y = 100f, previousY = 100f)),
+                event(change(16L, 140f, 100f, y = 120f, previousY = 100f)),
+                event(change(32L, 180f, 140f, pressed = false, y = 130f, previousY = 120f)),
+            )) {
+            assertEquals("a mainly horizontal move must reach the drawer", 72f / 300f,
+                state.visualProgress.value, 0.0001f)
+            assertEquals("the vertical child must not steal this drag", 0f, childScroll, 0.0001f)
+        }
+    }
+
+    @Test fun `a horizontal decision includes movement carried only by up`() =
+        withPointerLoop(DrawerValue.Closed, shield = false, events = listOf(
+            event(change(0L, 100f, 100f, previousPressed = false)),
+            event(change(16L, 105f, 100f)),
+            event(change(32L, 140f, 105f, pressed = false)),
+        )) {
+            assertEquals("UP may be the first event to cross horizontal touch slop", 32f / 300f,
+                state.visualProgress.value, 0.0001f)
+        }
+
+    @Test fun `a closing decision follows the finger while opening is interrupted`() =
+        withPointerLoop(DrawerValue.Closed, shield = true, includeHost = true, events = listOf(
+            event(change(0L, 350f, 350f, previousPressed = false)),
+            event(change(64L, 338f, 350f)),
+            event(change(80L, 338f, 338f, pressed = false)),
+        ), beforeInput = {
+            scope.launch(clock, CoroutineStart.UNDISPATCHED) {
+                state.animateTo(DrawerValue.Open, tween(1_000))
+            }
+            frames(30)
+        }) {
+            frames(90)
+            assertEquals("a closing drag must not reopen from the old closed anchor", 0f,
+                state.visualProgress.value, 0.0001f)
+        }
+
+    @Test fun `an opening decision follows the finger while closing is interrupted`() =
+        withPointerLoop(DrawerValue.Open, shield = true, includeHost = true, events = listOf(
+            event(change(0L, 350f, 350f, previousPressed = false)),
+            event(change(64L, 362f, 350f)),
+            event(change(80L, 362f, 362f, pressed = false)),
+        ), beforeInput = {
+            scope.launch(clock, CoroutineStart.UNDISPATCHED) {
+                state.animateTo(DrawerValue.Closed, tween(1_000))
+            }
+            frames(30)
+        }) {
+            frames(90)
+            assertTrue("an opening drag must not close from the old open anchor", state.isOpen)
+        }
+
+    @Test fun `a vertical shield decision does not become a tap`() =
+        withPointerLoop(DrawerValue.Open, shield = true, includeHost = true, events = listOf(
+            event(change(0L, 350f, 350f, previousPressed = false, y = 100f, previousY = 100f)),
+            event(change(16L, 350f, 350f, y = 160f, previousY = 100f)),
+            event(change(32L, 350f, 350f, pressed = false, y = 180f, previousY = 160f)),
+        )) {
+            frames(90)
+            assertTrue("a vertical swipe on the shield must leave the drawer open", state.isOpen)
+        }
+
+    @Test fun `a vertical decision stays with the child when later movement turns horizontal`() {
+        var childScroll = 0f
+        withPointerLoop(DrawerValue.Closed, shield = false, includeHost = true,
+            childOrientation = Orientation.Vertical, childDrag = { childScroll += it }, events = listOf(
+                event(change(0L, 100f, 100f, previousPressed = false, y = 100f, previousY = 100f)),
+                event(change(16L, 120f, 100f, y = 140f, previousY = 100f)),
+                event(change(32L, 180f, 120f, y = 160f, previousY = 140f)),
+                event(change(48L, 200f, 180f, pressed = false, y = 160f, previousY = 160f)),
+            )) {
+            assertEquals(0f, state.visualProgress.value, 0.0001f)
+            assertEquals(52f, childScroll, 0.0001f)
+        }
+    }
+
+    @Test fun `a horizontal child keeps priority over the drawer`() {
+        var childScroll = 0f
+        withPointerLoop(DrawerValue.Closed, shield = false, includeHost = true,
+            childOrientation = Orientation.Horizontal, childDrag = { childScroll += it }, events = listOf(
+                event(change(0L, 100f, 100f, previousPressed = false)),
+                event(change(16L, 140f, 100f)),
+                event(change(32L, 180f, 140f)),
+                event(change(48L, 180f, 180f, pressed = false)),
+            )) {
+            assertEquals(0f, state.visualProgress.value, 0.0001f)
+            assertEquals(72f, childScroll, 0.0001f)
+        }
+    }
+
+    @Test fun `a long press lets the child claim movement before the drawer`() {
+        var childScroll = 0f
+        withPointerLoop(DrawerValue.Closed, shield = false, includeHost = true,
+            childOrientation = Orientation.Vertical, childDrag = { childScroll += it }, events = listOf(
+                event(change(0L, 100f, 100f, previousPressed = false, y = 100f, previousY = 100f)),
+                event(change(600L, 140f, 100f, y = 120f, previousY = 100f)),
+                event(change(616L, 140f, 140f, pressed = false, y = 120f, previousY = 120f)),
+            )) {
+            assertEquals("long-press movement belongs to the child that consumes it", 0f,
+                state.visualProgress.value, 0.0001f)
+            assertEquals(12f, childScroll, 0.0001f)
+        }
+    }
+
+    @Test fun `a host down catches the spring and follows movement below slop`() {
+        var caught = 0f
+        withPointerLoop(DrawerValue.Open, shield = false, events = listOf(
+            event(change(0L, 100f, 100f, previousPressed = false)),
+            event(change(16L, 104f, 100f)),
+        ), beforeInput = {
+            startClosing()
+            caught = state.visualProgress.value
+        }) {
+            assertNotNull(state.gestureSession)
+            frames(12)
+            assertEquals(caught + 4f / 300f, state.visualProgress.value, 0.0001f)
+        }
+    }
+
+    @Test fun `a vertical decision resumes the interrupted motion on host and shield`() {
+        val spec = tween<Float>(1_000)
+        for (shield in listOf(false, true)) {
+            withPointerLoop(DrawerValue.Closed, shield = shield, includeHost = true, events = listOf(
+                event(change(0L, 350f, 350f, previousPressed = false, y = 100f, previousY = 100f)),
+                event(change(16L, 350f, 350f, y = 160f, previousY = 100f)),
+                event(change(32L, 350f, 350f, pressed = false, y = 180f, previousY = 160f)),
+            ), beforeInput = {
+                scope.launch(clock, CoroutineStart.UNDISPATCHED) {
+                    state.animateTo(DrawerValue.Open, spec)
+                }
+                frames(30)
+            }) {
+                assertTrue("vertical input must preserve the interrupted animation spec", state.motion?.spec === spec)
+                frames(90)
+                assertTrue("vertical input must not stop or reverse opening", state.isOpen)
+            }
+        }
+    }
+
     @Test fun `a visible drawer row remains clickable while the drawer is closing`() {
         var clicks = 0
         withPointerLoop(DrawerValue.Open, shield = false, includeHost = true,
@@ -191,7 +338,7 @@ class DrawerPointerLoopTest {
     private class Harness(
         val state: SuixingDrawerState,
         val scope: CoroutineScope,
-        private val clock: BroadcastFrameClock,
+        val clock: BroadcastFrameClock,
     ) {
         private var nanos = 0L
 
@@ -222,6 +369,8 @@ class DrawerPointerLoopTest {
         beforeInput: suspend Harness.() -> Unit = {},
         includeHost: Boolean = false,
         rowClick: (() -> Unit)? = null,
+        childOrientation: Orientation? = null,
+        childDrag: (Float) -> Unit = {},
         block: suspend Harness.() -> Unit,
     ) = runBlocking {
         withTimeout(5_000L) {
@@ -252,7 +401,22 @@ class DrawerPointerLoopTest {
                     ) {
                         SuixingDrawer(state, gesturesEnabled = true, drawerContent = {
                             if (rowClick != null) Box(drawerRowTapForTest(rowClick))
-                        }, content = {})
+                        }, content = {
+                            if (childOrientation != null) {
+                                val modifier = if (childOrientation == Orientation.Horizontal)
+                                    Modifier.drawerScrollPriority() else Modifier
+                                Box(modifier.pointerInput(childOrientation) {
+                                    when (childOrientation) {
+                                        Orientation.Horizontal -> detectHorizontalDragGestures { _, amount ->
+                                            childDrag(amount)
+                                        }
+                                        Orientation.Vertical -> detectVerticalDragGestures { _, amount ->
+                                            childDrag(amount)
+                                        }
+                                    }
+                                })
+                            }
+                        })
                     }
                 }
                 harness.beforeInput()
@@ -264,23 +428,28 @@ class DrawerPointerLoopTest {
                         (children.invoke(panel) as List<*>).single()!!
                     }
                     shield -> (children.invoke(host) as List<*>).last()!!
+                    childOrientation != null -> (children.invoke(host) as List<*>).last()!!
                     else -> host
                 }
-                val targets = if ((shield || rowClick != null) && includeHost) listOf(host, target)
+                val targets = if ((shield || rowClick != null || childOrientation != null) && includeHost)
+                    listOf(host, target)
                     else listOf(target)
-                val inputs = targets.map { node ->
+                val inputs = targets.flatMap { node ->
                     // Detached test nodes retain their real modifier until an Android owner attaches.
                     val modifier = nodeClass.getDeclaredField("pendingModifier")
                         .apply { isAccessible = true }.get(node) as Modifier
-                    val handler = modifier.foldIn<PointerInputEventHandler?>(null) { current, element ->
+                    val handlers = modifier.foldIn(mutableListOf<PointerInputEventHandler>()) { current, element ->
                         if (element.javaClass.simpleName == "SuspendPointerInputElement") {
-                            element.javaClass.getDeclaredMethod("getPointerInputEventHandler")
-                                .invoke(element) as PointerInputEventHandler
-                        } else current
-                    }!!
-                    DrawerPointerEvents().also { input ->
-                        pointerJobs += harness.scope.launch(clock, CoroutineStart.UNDISPATCHED) {
-                            with(handler) { input.invoke() }
+                            current.add(element.javaClass.getDeclaredMethod("getPointerInputEventHandler")
+                                .invoke(element) as PointerInputEventHandler)
+                        }
+                        current
+                    }
+                    handlers.map { handler ->
+                        DrawerPointerEvents().also { input ->
+                            pointerJobs += harness.scope.launch(clock, CoroutineStart.UNDISPATCHED) {
+                                with(handler) { input.invoke() }
+                            }
                         }
                     }
                 }
@@ -376,13 +545,15 @@ class DrawerPointerLoopTest {
             id: Long = 1L,
             pressed: Boolean = true,
             previousPressed: Boolean = true,
+            y: Float = 0f,
+            previousY: Float = 0f,
         ): PointerInputChange = PointerInputChange(
             id = PointerId(id),
             uptimeMillis = time,
-            position = Offset(x, 0f),
+            position = Offset(x, y),
             pressed = pressed,
             previousUptimeMillis = (time - 16L).coerceAtLeast(0L),
-            previousPosition = Offset(previousX, 0f),
+            previousPosition = Offset(previousX, previousY),
             previousPressed = previousPressed,
             isInitiallyConsumed = false,
         )
