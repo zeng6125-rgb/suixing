@@ -6,3 +6,6 @@
 *.xml  text eol=lf
 *.md   text eol=lf
 *.json text eol=lf
+
+# 随包的版权与许可说明按文档分类。
+app/src/main/assets/licenses/** linguist-documentation=true
