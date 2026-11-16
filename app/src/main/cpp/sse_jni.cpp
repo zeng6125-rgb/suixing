@@ -8,16 +8,17 @@
 #include <vector>
 
 extern "C" {
-struct SearchBuffer {
+struct SseBuffer {
     std::uint8_t* data;
     std::size_t len;
+    std::size_t capacity;
 };
 std::uint64_t sx_sse_create();
 void sx_sse_cancel(std::uint64_t handle);
 void sx_sse_release(std::uint64_t handle);
 int sx_sse_feed(std::uint64_t handle, const std::uint8_t* input, std::size_t length,
-                std::uint8_t mode, SearchBuffer* output);
-void sx_search_free(std::uint8_t* data, std::size_t len);
+                std::uint8_t mode, SseBuffer* output);
+void sx_sse_free(std::uint8_t* data, std::size_t len, std::size_t capacity);
 }
 
 namespace {
@@ -46,12 +47,12 @@ bool validHandle(JNIEnv* env, jlong handle) {
 
 class RustResponse {
 public:
-    SearchBuffer value{nullptr, 0};
+    SseBuffer value{nullptr, 0, 0};
     RustResponse() = default;
     RustResponse(const RustResponse&) = delete;
     RustResponse& operator=(const RustResponse&) = delete;
     ~RustResponse() {
-        if (value.data != nullptr) sx_search_free(value.data, value.len);
+        if (value.data != nullptr) sx_sse_free(value.data, value.len, value.capacity);
     }
 };
 
@@ -112,13 +113,18 @@ Java_com_suixing_agent_llm_NativeSseStreamJni_nativeFeed(
             throwIo(env, "Native SSE input range or mode is invalid.");
             return nullptr;
         }
-        std::vector<std::uint8_t> input(static_cast<std::size_t>(length));
+        // Only normalized UTF-8 lines can exceed the ordinary read buffer.
+        std::uint8_t readBuffer[kReadBytes];
+        std::vector<std::uint8_t> normalizedBuffer;
+        if (length > kReadBytes) normalizedBuffer.resize(static_cast<std::size_t>(length));
+        auto* input = length <= kReadBytes ? readBuffer : normalizedBuffer.data();
         if (length > 0) {
-            env->GetByteArrayRegion(bytes, offset, length, reinterpret_cast<jbyte*>(input.data()));
+            env->GetByteArrayRegion(bytes, offset, length, reinterpret_cast<jbyte*>(input));
             if (env->ExceptionCheck()) return nullptr;
         }
         RustResponse response;
-        const int status = sx_sse_feed(static_cast<std::uint64_t>(handle), input.data(), input.size(),
+        const int status = sx_sse_feed(static_cast<std::uint64_t>(handle), input,
+                                        static_cast<std::size_t>(length),
                                         static_cast<std::uint8_t>(mode), &response.value);
         if (status != 0) {
             throwStatus(env, status);

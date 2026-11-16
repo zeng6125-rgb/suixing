@@ -53,7 +53,7 @@ internal object NativeJsonTree {
                 6 -> {
                     val count = integer(input)
                     valid(count in 0..131_072 - nodes && count.toLong() * 5 <= input.remaining())
-                    val values = LinkedHashMap<String, JsonElement>(count)
+                    val values = LinkedHashMap<String, JsonElement>(count + (count + 2) / 3)
                     repeat(count) {
                         val key = string(input)
                         valid(!values.containsKey(key))

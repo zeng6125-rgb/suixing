@@ -1,5 +1,6 @@
 //! Portable terminal-action policy. Platform callbacks, localized text, statistics, events and
 //! Throwable identity never cross this boundary. The five action slots have a fixed execution order.
+//! Keep reason IDs and action slots in sync with app/src/main/java/com/suixing/agent/agent/NativeLoopPolicy.kt.
 
 use crate::{STATUS_OK, STATUS_PANIC, STATUS_REQUEST_ERROR};
 use std::panic::{AssertUnwindSafe, catch_unwind};

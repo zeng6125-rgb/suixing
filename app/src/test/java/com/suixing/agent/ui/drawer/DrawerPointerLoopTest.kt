@@ -120,6 +120,31 @@ class DrawerPointerLoopTest {
             assertEquals(DrawerValue.Open, if (state.isOpen) DrawerValue.Open else DrawerValue.Closed)
         }
 
+    @Test fun `a host release carries its final movement and velocity into the spring`() =
+        withPointerLoop(DrawerValue.Closed, shield = false, events = listOf(
+            event(change(0L, 100f, 100f, previousPressed = false)),
+            event(change(16L, 110f, 100f)),
+            event(change(32L, 140f, 110f, pressed = false)),
+        )) {
+            assertEquals("the release position must be applied before the first spring frame",
+                32f / 300f, state.visualProgress.value, 0.0001f)
+            frames(90)
+            assertTrue("the final accelerating movement must produce an opening fling", state.isOpen)
+        }
+
+    @Test fun `a shield release carries its final movement and velocity into the spring`() =
+        withPointerLoop(DrawerValue.Open, shield = true, events = listOf(
+            event(change(0L, 350f, 350f, previousPressed = false)),
+            event(change(16L, 340f, 350f)),
+            event(change(32L, 310f, 340f, pressed = false)),
+        )) {
+            assertEquals("the shield must retain the physical release position",
+                1f - 32f / 300f, state.visualProgress.value, 0.0001f)
+            frames(90)
+            assertEquals("the final accelerating movement must produce a closing fling",
+                0f, state.visualProgress.value, 0.0001f)
+        }
+
     @Test fun `a host drag held still before up has no fling velocity`() =
         withPointerLoop(DrawerValue.Closed, shield = false, events = listOf(
             event(change(0L, 100f, 100f, previousPressed = false)),

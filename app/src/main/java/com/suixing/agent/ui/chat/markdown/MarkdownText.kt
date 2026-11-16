@@ -944,7 +944,7 @@ internal fun rememberGrowingMarkdown(
     if (settled) SettledBlocks.get(text)?.let { return it }
     val source = androidx.compose.runtime.rememberUpdatedState(GrowingMarkdownSource(text, appendFrom, sourceId))
     val blocks = remember(live, settled, if (settled) text else null, sourceId) {
-        mutableStateOf(live.cachedBlocksFor(text).orEmpty(), referentialEqualityPolicy())
+        mutableStateOf(live.cachedPrefixBlocksFor(text).orEmpty(), referentialEqualityPolicy())
     }
     LaunchedEffect(live, blocks) {
         // One parser owns its mutable prefix. Cold settled rows use the same background path.
@@ -1002,6 +1002,7 @@ internal class LiveBlocks {
     @Volatile private var completed = CompletedMarkdownParse("", result)
     private var appendableTail: AppendableMarkdownTail? = null
     private var appendPrefix: List<MdBlock> = emptyList()
+    private val inlineStates = HashMap<String, InlineMarkdownState>()
 
     /**
      * 上一次的文本里出现过 `\r` 吗。
@@ -1014,6 +1015,20 @@ internal class LiveBlocks {
     private var sawCarriageReturn = false
 
     fun cachedBlocksFor(source: String): List<MdBlock>? = completed.let { if (source == it.source) it.blocks else null }
+
+    fun cachedPrefixBlocksFor(source: String): List<MdBlock>? = completed.let {
+        if (source.startsWith(it.source)) it.blocks else null
+    }
+
+    fun inlineStateFor(key: String, source: InlineMarkdownSource): InlineMarkdownState {
+        val previous = inlineStates[key]
+        if (previous != null && source.samePresentation(previous.source) &&
+            source.text.startsWith(previous.source.text)
+        ) return previous
+        return InlineMarkdownState(source).also { inlineStates[key] = it }
+    }
+
+    fun releaseInline() { inlineStates.clear() }
 
     @Synchronized
     fun blocksFor(
@@ -1483,11 +1498,22 @@ private fun preparedInlineMarkdown(source: InlineMarkdownSource): AnnotatedStrin
     ).scan(source.cursor, runs)
 }
 
+/** One displayed result per reading block, shared only during the live-to-stored handoff. */
+internal class InlineMarkdownState(var source: InlineMarkdownSource) {
+    val annotated = mutableStateOf(preparedInlineMarkdown(source), referentialEqualityPolicy())
+}
+
 @Composable
 internal fun rememberInlineMarkdown(requestedSource: InlineMarkdownSource): AnnotatedString {
     val source = androidx.compose.runtime.rememberUpdatedState(requestedSource)
-    val initial = remember { requestedSource to preparedInlineMarkdown(requestedSource) }
-    val annotated = remember { mutableStateOf(initial.second, referentialEqualityPolicy()) }
+    val retained = LocalRetainedLiveMarkdown.current
+    val readingKey = LocalReadingTextKey.current
+    val rendered = remember(readingKey) {
+        if (retained != null && readingKey != null) retained.inlineStateFor(readingKey, requestedSource)
+        else InlineMarkdownState(requestedSource)
+    }
+    val initial = remember(rendered) { rendered.source to rendered.annotated.value }
+    val annotated = rendered.annotated
     com.suixing.agent.ui.chat.InitialViewportContentReady(annotated.value != null)
     LaunchedEffect(annotated) {
         val literalSource = InlineLiteralSource()
@@ -1500,7 +1526,9 @@ internal fun rememberInlineMarkdown(requestedSource: InlineMarkdownSource): Anno
             }
         }
         snapshotFlow { source.value }.conflate().collect { requested ->
-            val alreadyPrepared = requested === preparedSource
+            val alreadyPrepared = preparedSource?.let {
+                requested.text == it.text && requested.samePresentation(it)
+            } == true
             preparedSource = null
             if (alreadyPrepared) return@collect
             val literal = withContext(Dispatchers.Default) { literalSource.accepts(requested.text) }
@@ -1531,7 +1559,10 @@ internal fun rememberInlineMarkdown(requestedSource: InlineMarkdownSource): Anno
                 ) current to prepared else null
             }
             // Prefix checks and annotation construction stay on the worker; Main only checks ownership.
-            if (completed != null && source.value === completed.first) annotated.value = completed.second
+            if (completed != null && source.value === completed.first) {
+                rendered.source = requested
+                annotated.value = completed.second
+            }
         }
     }
     return annotated.value ?: AnnotatedString("")

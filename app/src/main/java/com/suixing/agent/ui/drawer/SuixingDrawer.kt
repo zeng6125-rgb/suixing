@@ -428,6 +428,9 @@ internal fun SuixingDrawer(
                             val session = ownedSession ?: return@detectDragGestures
                             val generation = ownedGeneration
                                 ?: return@detectDragGestures
+                            dragAccumulator.dragBy(generation, up.position.x - up.previousPosition.x)?.let {
+                                state.applyGestureFrame(session, it)
+                            }
                             ownedSession = null
                             ownedGeneration = null
                             // **带速度判断**（用户：「手势很大程度都滑不动，得滑很久」）。
@@ -537,6 +540,14 @@ internal fun SuixingDrawer(
                                     val change = event.changes.firstOrNull { it.id == pointerId } ?: break
                                     tracker.trackDrawerPointer(change)
                                     if (change.changedToUpIgnoreConsumed()) {
+                                        val session = ownedSession
+                                        val generation = ownedGeneration
+                                        if (session != null && generation != null) {
+                                            dragAccumulator.dragBy(generation,
+                                                change.position.x - change.previousPosition.x)?.let {
+                                                state.applyGestureFrame(session, it)
+                                            }
+                                        }
                                         event.changes.forEach { it.consume() }
                                         val replacement = event.changes.firstOrNull { it.pressed }
                                         if (replacement != null) {
@@ -550,8 +561,6 @@ internal fun SuixingDrawer(
                                                 state.animateTo(DrawerValue.Closed, DRAWER_CLOSE_SPEC)
                                             }
                                         } else {
-                                            val session = ownedSession
-                                            val generation = ownedGeneration
                                             ownedSession = null
                                             ownedGeneration = null
                                             val releaseProgress = generation?.let {

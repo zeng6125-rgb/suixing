@@ -2,7 +2,7 @@
 //! error in later buffered bytes never discards a delta that the caller has already received.
 //! Network reads, protocol event handling and retries remain owned by Kotlin/OkHttp.
 
-use crate::{STATUS_CANCELLED, STATUS_OK, STATUS_PANIC, STATUS_REQUEST_ERROR, SearchBuffer};
+use crate::{STATUS_CANCELLED, STATUS_OK, STATUS_PANIC, STATUS_REQUEST_ERROR};
 use serde_json::Value;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -14,6 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 const MAGIC: u32 = 0x3153_5853;
+const HEADER_BYTES: usize = 20;
 const READ_BYTES: usize = 8192;
 const MAX_LINE_BYTES: usize = 3 * 1_048_576 + 16;
 const MAX_FRAME_UNITS: usize = 1_048_576;
@@ -27,6 +28,13 @@ const KIND_TREE: u32 = 1;
 const KIND_COMPATIBILITY: u32 = 2;
 const KIND_ERROR: u32 = 3;
 const KIND_NORMALIZE_LINE: u32 = 4;
+
+#[repr(C)]
+pub struct SseBuffer {
+    pub data: *mut u8,
+    pub len: usize,
+    pub capacity: usize,
+}
 
 #[derive(Default)]
 struct Registry {
@@ -113,24 +121,26 @@ pub extern "C" fn sx_sse_release(id: u64) {
 /// in the caller's current read buffer; there is no accumulating output queue or batching delay.
 ///
 /// # Safety
-/// `output` must point to writable aligned SearchBuffer storage. A non-empty input must contain
+/// `output` must point to writable aligned SseBuffer storage. A non-empty input must contain
 /// `length` readable immutable bytes for the duration of this synchronous call.
+/// Release a returned buffer exactly once with `sx_sse_free`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_sse_feed(
     id: u64,
     input: *const u8,
     length: usize,
     mode: u8,
-    output: *mut SearchBuffer,
+    output: *mut SseBuffer,
 ) -> i32 {
     if output.is_null() {
         return STATUS_REQUEST_ERROR;
     }
     // SAFETY: storage is writable by the ABI contract.
     unsafe {
-        output.write(SearchBuffer {
+        output.write(SseBuffer {
             data: ptr::null_mut(),
             len: 0,
+            capacity: 0,
         })
     };
     let bound = if mode == 2 {
@@ -154,13 +164,16 @@ pub unsafe extern "C" fn sx_sse_feed(
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let bytes = state.feed(bytes, mode, &stream.cancelled)?;
+        let mut bytes = state.feed(bytes, mode, &stream.cancelled)?;
         check_cancel(&stream.cancelled)?;
-        let owned = bytes.into_boxed_slice();
-        let len = owned.len();
-        let data = Box::into_raw(owned) as *mut u8;
+        let len = bytes.len();
+        let capacity = bytes.capacity();
+        let data = bytes.as_mut_ptr();
+        std::mem::forget(bytes);
         // SAFETY: the output storage is still valid for this call.
-        unsafe { output.write(SearchBuffer { data, len }) };
+        unsafe {
+            output.write(SseBuffer { data, len, capacity })
+        };
         Ok(())
     }));
     match result {
@@ -168,6 +181,19 @@ pub unsafe extern "C" fn sx_sse_feed(
         Ok(Err(status)) => status,
         Err(_) => STATUS_PANIC,
     }
+}
+
+/// Release an SSE response without shrinking its original allocation first.
+///
+/// # Safety
+/// All three values must be the unchanged result of `sx_sse_feed`, released exactly once.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_sse_free(data: *mut u8, len: usize, capacity: usize) {
+    if data.is_null() {
+        return;
+    }
+    // SAFETY: these are the original Vec pointer, initialized length and allocation capacity.
+    unsafe { drop(Vec::from_raw_parts(data, len, capacity)) };
 }
 
 fn check_cancel(cancelled: &AtomicBool) -> Result<(), i32> {
@@ -307,9 +333,11 @@ impl State {
             }
             Err(_) => {
                 self.normalizing = true;
+                let mut body = response_buffer(bytes.len());
+                body.extend_from_slice(&bytes);
                 Ok(Some(Event {
                     kind: KIND_NORMALIZE_LINE,
-                    body: bytes,
+                    body,
                 }))
             }
         }
@@ -361,6 +389,7 @@ impl State {
             return Ok(None);
         }
         let payload = std::mem::take(&mut self.pending);
+        let units = self.pending_units;
         self.pending_units = 0;
         self.frame = Frame::default();
         if let Some(tree) = decode_object(&payload, cancelled)? {
@@ -369,8 +398,8 @@ impl State {
                 body: tree,
             }))
         } else {
-            let mut body = Vec::with_capacity(4 + payload.len() * 2);
-            put_string(&mut body, &payload);
+            let mut body = response_buffer(4 + units * 2);
+            put_string(&mut body, &payload, units);
             Ok(Some(Event {
                 kind: KIND_COMPATIBILITY,
                 body,
@@ -384,9 +413,11 @@ impl State {
         self.pending.clear();
         self.pending_units = 0;
         self.frame = Frame::default();
+        let mut body = response_buffer(4);
+        body.extend_from_slice(&code.to_le_bytes());
         Event {
             kind: KIND_ERROR,
-            body: code.to_le_bytes().to_vec(),
+            body,
         }
     }
 }
@@ -397,27 +428,43 @@ fn kotlin_whitespace(ch: char) -> bool {
         '\u{205f}' | '\u{3000}')
 }
 
-fn response(consumed: usize, flags: u32, event: Option<Event>) -> Vec<u8> {
-    let event = event.unwrap_or(Event {
-        kind: KIND_NONE,
-        body: Vec::new(),
-    });
-    let mut output = Vec::with_capacity(20 + event.body.len());
-    for value in [
-        MAGIC,
-        consumed as u32,
-        flags,
-        event.kind,
-        event.body.len() as u32,
-    ] {
-        output.extend_from_slice(&value.to_le_bytes());
-    }
-    output.extend_from_slice(&event.body);
+fn response_buffer(body_bytes: usize) -> Vec<u8> {
+    let mut output = Vec::with_capacity(HEADER_BYTES + body_bytes);
+    output.resize(HEADER_BYTES, 0);
     output
 }
 
-fn put_string(output: &mut Vec<u8>, text: &str) {
-    output.extend_from_slice(&(text.encode_utf16().count() as u32).to_le_bytes());
+fn response(consumed: usize, flags: u32, event: Option<Event>) -> Vec<u8> {
+    let (kind, mut body) = match event {
+        Some(Event { kind, body }) => (kind, body),
+        None => (KIND_NONE, Vec::with_capacity(HEADER_BYTES)),
+    };
+    let body_bytes = if body.is_empty() {
+        0
+    } else {
+        body.len() - HEADER_BYTES
+    };
+    let header = [
+        MAGIC,
+        consumed as u32,
+        flags,
+        kind,
+        body_bytes as u32,
+    ];
+    if body.is_empty() {
+        for value in header {
+            body.extend_from_slice(&value.to_le_bytes());
+        }
+    } else {
+        for (index, value) in header.into_iter().enumerate() {
+            body[index * 4..index * 4 + 4].copy_from_slice(&value.to_le_bytes());
+        }
+    }
+    body
+}
+
+fn put_string(output: &mut Vec<u8>, text: &str, units: usize) {
+    output.extend_from_slice(&(units as u32).to_le_bytes());
     for unit in text.encode_utf16() {
         output.extend_from_slice(&unit.to_le_bytes());
     }
@@ -544,13 +591,22 @@ fn number_tokens<'a>(
 }
 
 pub(super) fn decode_object(payload: &str, cancelled: &AtomicBool) -> Result<Option<Vec<u8>>, i32> {
-    decode_value(payload, cancelled, true)
+    decode(payload, cancelled, true, true)
 }
 
 pub(super) fn decode_value(
     payload: &str,
     cancelled: &AtomicBool,
     object_only: bool,
+) -> Result<Option<Vec<u8>>, i32> {
+    decode(payload, cancelled, object_only, false)
+}
+
+fn decode(
+    payload: &str,
+    cancelled: &AtomicBool,
+    object_only: bool,
+    framed: bool,
 ) -> Result<Option<Vec<u8>>, i32> {
     let Some(tokens) = number_tokens(payload, cancelled)? else {
         return Ok(None);
@@ -563,7 +619,13 @@ pub(super) fn decode_value(
     }
     check_cancel(cancelled)?;
     let mut encoder = Encoder {
-        output: Vec::new(),
+        output: if framed {
+            // Start geometric growth at a power of two after reserving the wire header.
+            response_buffer(HEADER_BYTES.next_power_of_two() - HEADER_BYTES)
+        } else {
+            Vec::new()
+        },
+        max_bytes: MAX_TREE_BYTES + if framed { HEADER_BYTES } else { 0 },
         tokens: tokens.into_iter(),
         nodes: 0,
         cancelled,
@@ -576,6 +638,7 @@ pub(super) fn decode_value(
 
 struct Encoder<'a> {
     output: Vec<u8>,
+    max_bytes: usize,
     tokens: std::vec::IntoIter<&'a str>,
     nodes: usize,
     cancelled: &'a AtomicBool,
@@ -585,7 +648,7 @@ impl Encoder<'_> {
     fn value(&mut self, value: &Value, depth: usize) -> Result<bool, i32> {
         check_cancel(self.cancelled)?;
         self.nodes += 1;
-        if depth > MAX_DEPTH || self.nodes > MAX_NODES || self.output.len() >= MAX_TREE_BYTES {
+        if depth > MAX_DEPTH || self.nodes > MAX_NODES || self.output.len() >= self.max_bytes {
             return Ok(false);
         }
         match value {
@@ -628,14 +691,15 @@ impl Encoder<'_> {
                 }
             }
         }
-        Ok(self.output.len() <= MAX_TREE_BYTES)
+        Ok(self.output.len() <= self.max_bytes)
     }
 
     fn string(&mut self, text: &str) -> Result<bool, i32> {
         let units = text.encode_utf16().count();
-        if self.output.len() + 4 + units * 2 > MAX_TREE_BYTES {
+        if self.output.len() + 4 + units * 2 > self.max_bytes {
             return Ok(false);
         }
+        self.output.reserve(4 + units * 2);
         self.output.extend_from_slice(&(units as u32).to_le_bytes());
         for (index, unit) in text.encode_utf16().enumerate() {
             if index % 1024 == 0 {

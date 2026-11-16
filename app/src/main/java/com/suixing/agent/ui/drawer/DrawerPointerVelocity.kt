@@ -21,7 +21,7 @@ internal class DrawerPointerVelocity {
                 tracker.addDataPoint(change.previousUptimeMillis, 0f)
             }
         }
-        if (!change.pressed) {
+        if (!change.pressed && change.position.x == change.previousPosition.x) {
             if (change.uptimeMillis - lastMotionTime > 40L) tracker.resetTracking()
             return
         }

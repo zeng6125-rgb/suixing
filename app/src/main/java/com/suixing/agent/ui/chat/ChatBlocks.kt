@@ -320,7 +320,10 @@ internal class ReasoningViewport {
     fun growingMarkdown(): com.suixing.agent.ui.chat.markdown.LiveBlocks =
         liveMarkdown ?: com.suixing.agent.ui.chat.markdown.LiveBlocks().also { liveMarkdown = it }
     fun retainedMarkdown(): com.suixing.agent.ui.chat.markdown.LiveBlocks? = liveMarkdown
-    fun releaseMarkdown() { liveMarkdown = null }
+    fun releaseMarkdown() {
+        liveMarkdown?.releaseInline()
+        liveMarkdown = null
+    }
     val listState by lazy { LazyListState() }
     val scrollState by lazy { ScrollState(0) }
     var follow by mutableStateOf(true)

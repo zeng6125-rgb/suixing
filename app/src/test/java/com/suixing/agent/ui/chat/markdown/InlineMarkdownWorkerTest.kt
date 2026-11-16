@@ -3,6 +3,7 @@ package com.suixing.agent.ui.chat.markdown
 import androidx.compose.runtime.AbstractApplier
 import androidx.compose.runtime.BroadcastFrameClock
 import androidx.compose.runtime.Composition
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.Recomposer
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.key
@@ -10,6 +11,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.snapshots.Snapshot
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import com.suixing.agent.ui.chat.LocalReadingTextKey
 import io.mockk.every
 import io.mockk.mockkObject
 import io.mockk.unmockkObject
@@ -27,9 +29,54 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.yield
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertSame
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class InlineMarkdownWorkerTest {
+    @Test fun completedInlineTextSurvivesReplacingTheLiveCompositionOwner() = runBlocking {
+        withTimeout(10_000) {
+            mockkObject(NativeMarkdown)
+            every { NativeMarkdown.inlineRuns(any()) } returns null
+            val harness = Harness(this, InlineMarkdownSource("**completed** response"), retainParser = true)
+            try {
+                harness.start()
+                harness.await { harness.output.text == "completed response" }
+                val displayed = harness.output
+                harness.publications.clear()
+                harness.owner.value++
+                harness.frames()
+                assertSame("completion must reuse the displayed spans on its first composition", displayed, harness.publications.first())
+                assertTrue("completion must not publish empty inline text", harness.publications.none { it.text.isEmpty() })
+            } finally {
+                harness.close()
+                unmockkObject(NativeMarkdown)
+            }
+        }
+    }
+
+    @Test fun aFinalTailKeepsItsRenderedInlinePrefixWhileTheNewOwnerParses() = runBlocking {
+        withTimeout(10_000) {
+            mockkObject(NativeMarkdown)
+            every { NativeMarkdown.inlineRuns(any()) } returns null
+            val harness = Harness(this, InlineMarkdownSource("**completed** response"), retainParser = true)
+            try {
+                harness.start()
+                harness.await { harness.output.text == "completed response" }
+                val displayed = harness.output
+                harness.publications.clear()
+                harness.source.value = harness.source.value.copy(text = "**completed** response final tail")
+                harness.owner.value++
+                harness.await { harness.output.text == "completed response final tail" }
+                assertSame("the last rendered prefix must survive the completion handoff", displayed, harness.publications.first())
+                assertTrue("the final tail must replace its prefix without a blank publication", harness.publications.none { it.text.isEmpty() })
+            } finally {
+                harness.close()
+                unmockkObject(NativeMarkdown)
+            }
+        }
+    }
+
     @Test fun preparedInlineIsVisibleOnTheFirstComposition() = runBlocking {
         withTimeout(10_000) {
             mockkObject(NativeMarkdown)
@@ -168,7 +215,7 @@ class InlineMarkdownWorkerTest {
                 }
                 null
             }
-            val harness = Harness(this, InlineMarkdownSource("**old blocked**"))
+            val harness = Harness(this, InlineMarkdownSource("**old blocked**"), retainParser = true)
             try {
                 harness.start()
                 harness.await { started.isCompleted }
@@ -186,9 +233,11 @@ class InlineMarkdownWorkerTest {
         }
     }
 
-    private class Harness(scope: CoroutineScope, initial: InlineMarkdownSource) {
+    private class Harness(scope: CoroutineScope, initial: InlineMarkdownSource, private val retainParser: Boolean = false) {
         val source = mutableStateOf(initial)
         val owner = mutableStateOf(0)
+        val publications = mutableListOf<AnnotatedString>()
+        private val parser = LiveBlocks()
         var output = AnnotatedString("")
             private set
         var firstOutput: AnnotatedString? = null
@@ -209,11 +258,17 @@ class InlineMarkdownWorkerTest {
 
         fun start() {
             composition.setContent {
-                key(owner.value) {
-                    val prepared = rememberInlineMarkdown(source.value)
-                    SideEffect {
-                        if (firstOutput == null) firstOutput = prepared
-                        output = prepared
+                CompositionLocalProvider(
+                    LocalRetainedLiveMarkdown provides if (retainParser) parser else null,
+                    LocalReadingTextKey provides if (retainParser) "run:text:0:block:0" else null,
+                ) {
+                    key(owner.value) {
+                        val prepared = rememberInlineMarkdown(source.value)
+                        SideEffect {
+                            if (firstOutput == null) firstOutput = prepared
+                            output = prepared
+                            publications += prepared
+                        }
                     }
                 }
             }

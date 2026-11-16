@@ -58,8 +58,64 @@ impl Encoder {
     pub(super) fn ascii(&mut self, byte: u8) -> Result<(), i32> {
         self.emit(&[byte], 1)
     }
+    fn ascii_prefix(&mut self, units: &[u16], escaping: bool) -> Result<usize, i32> {
+        let plain_ascii = |unit: u16| {
+            unit < 128 && (!escaping || (unit >= 32 && unit != 34 && unit != 92))
+        };
+        let mut index = 0;
+        while index < units.len() && plain_ascii(units[index]) {
+            // Bound scans by the next write so cancellation keeps its original chunk boundary.
+            let limit = if self.callback.is_some() {
+                if self.buffer.len() == CHUNK {
+                    self.flush()?;
+                }
+                (index + CHUNK - self.buffer.len()).min(units.len())
+            } else {
+                units.len()
+            };
+            let start = index;
+            index += 1;
+            while index < limit && plain_ascii(units[index]) {
+                index += 1;
+            }
+            let run = &units[start..index];
+            self.bytes = self
+                .bytes
+                .checked_add(run.len() as u64)
+                .ok_or(STATUS_REQUEST_ERROR)?;
+            self.chars = self
+                .chars
+                .checked_add(run.len() as u64)
+                .ok_or(STATUS_REQUEST_ERROR)?;
+            if self.callback.is_some() {
+                self.buffer.extend(run.iter().map(|&unit| unit as u8));
+            }
+        }
+        Ok(index)
+    }
     /// Fragments escape without quotes; raw literals neither escape nor quote.
     pub(super) fn string(
+        &mut self,
+        units: &[u16],
+        quoted: bool,
+        escaping: bool,
+    ) -> Result<(), i32> {
+        if !units.first().is_some_and(|&unit| {
+            unit < 128 && (!escaping || (unit >= 32 && unit != 34 && unit != 92))
+        }) {
+            return self.scalar_string(units, quoted, escaping);
+        }
+        if quoted {
+            self.ascii(b'"')?;
+        }
+        let prefix = self.ascii_prefix(units, escaping)?;
+        self.scalar_string(&units[prefix..], false, escaping)?;
+        if quoted {
+            self.ascii(b'"')?;
+        }
+        Ok(())
+    }
+    fn scalar_string(
         &mut self,
         units: &[u16],
         quoted: bool,

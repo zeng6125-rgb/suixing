@@ -6,6 +6,7 @@ import androidx.compose.runtime.Composition
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.Recomposer
 import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.snapshots.Snapshot
 import kotlinx.coroutines.CoroutineScope
@@ -21,6 +22,28 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class GrowingMarkdownPreparationTest {
+    @Test fun settlingWithANewTailKeepsTheDisplayedPrefixDuringRemount() = runBlocking {
+        withTimeout(5_000) {
+            val prefix = "intro\n\n**ongoing** response"
+            val complete = "$prefix final tail"
+            val harness = Harness(this, prefix)
+            try {
+                harness.start()
+                harness.await(parseMarkdown(prefix))
+                val displayed = harness.output
+                harness.publications.clear()
+                harness.text.value = complete
+                harness.settled.value = true
+                harness.version.value = -1
+                harness.sourceId.value = 0
+                harness.owner.value++
+                harness.await(parseMarkdown(complete))
+                assertSame("the stored row must initially retain the displayed prefix", displayed, harness.publications.first())
+                assertTrue("completion must not publish an empty document", harness.publications.none { it.isEmpty() })
+            } finally { harness.close() }
+        }
+    }
+
     @Test fun coldSettledTextParsesAfterCompositionAndReusesTheCompletedResultOnRemount() = runBlocking {
         withTimeout(5_000) {
             val text = "cold settled heading\n\n```kt\n" + "val cold = 7\n".repeat(100) + "```\n\ncomplete"
@@ -109,6 +132,8 @@ class GrowingMarkdownPreparationTest {
         val sourceId = mutableStateOf(1)
         val settled = mutableStateOf(false)
         val retainParser = mutableStateOf(true)
+        val owner = mutableStateOf(0)
+        val publications = mutableListOf<List<MdBlock>>()
         var output: List<MdBlock> = emptyList()
             private set
         private val parser = LiveBlocks()
@@ -123,8 +148,13 @@ class GrowingMarkdownPreparationTest {
         fun start() {
             composition.setContent {
                 CompositionLocalProvider(LocalRetainedLiveMarkdown provides if (retainParser.value) parser else null) {
-                    val parsed = rememberGrowingMarkdown(text.value, settled.value, version.value, sourceId.value)
-                    SideEffect { output = parsed }
+                    key(owner.value) {
+                        val parsed = rememberGrowingMarkdown(text.value, settled.value, version.value, sourceId.value)
+                        SideEffect {
+                            output = parsed
+                            publications += parsed
+                        }
+                    }
                 }
             }
         }

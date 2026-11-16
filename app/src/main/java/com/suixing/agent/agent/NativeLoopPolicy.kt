@@ -3,6 +3,8 @@ package com.suixing.agent.agent
 import com.suixing.agent.core.NativeCore
 import java.io.IOException
 
+// Keep reason IDs, action slots and kotlinPlan in sync with app/src/main/rust/suixing-search/src/loop_policy.rs.
+
 internal object NativeLoopPolicyJni {
     external fun nativePlan(reason: Int, retries: Int): IntArray
 }

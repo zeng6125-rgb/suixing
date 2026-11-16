@@ -51,12 +51,20 @@ internal class JsonStreamingBody(
     private val context: CoroutineContext = EmptyCoroutineContext,
 ) : RequestBody() {
     // Containers are copied; immutable Strings and primitive identities (image bindings) are shared.
-    private val document: JsonElement = snapshotDocument(document)
-    private val strings: WireStringParts = strings.snapshot()
+    private var document: JsonElement? = snapshotDocument(document)
+    private var strings: WireStringParts? = strings.snapshot()
     private data class Size(val bytes: Long, val chars: Long) {
         operator fun plus(other: Size) = Size(Math.addExact(bytes, other.bytes), Math.addExact(chars, other.chars))
     }
-    private val native: NativeJsonDocument? by lazy { NativeJsonDocument.prepare(document, strings, context) }
+    private val native: NativeJsonDocument? by lazy {
+        NativeJsonDocument.prepare(document, strings, context).also {
+            if (it != null) {
+                // The native protocol and String pool retain everything needed for repeatable uploads.
+                this.document = null
+                this.strings = null
+            }
+        }
+    }
     private val size: Size by lazy {
         native?.let { Size(it.byteLength, it.characterLength) } ?: measure(document)
     }
@@ -79,7 +87,7 @@ internal class JsonStreamingBody(
             val raw = value.toString()
             return Size(raw.toByteArray(Charsets.UTF_8).size.toLong(), raw.length.toLong())
         }
-        val parts = strings.get(value) ?: return stringSize(value.content)
+        val parts = strings!!.get(value) ?: return stringSize(value.content)
         var result = Size(2, 2)
         for (part in parts) {
             val measured = stringSize(part)
@@ -126,7 +134,7 @@ internal class JsonStreamingBody(
             when (item) {
                 is JsonPrimitive -> {
                     if (!item.isString) sink.writeUtf8(item.toString()) else {
-                        val parts = strings.get(item)
+                        val parts = strings!!.get(item)
                         if (parts == null) string(item.content) else {
                             sink.writeByte('"'.code)
                             for (part in parts) string(part, false)
@@ -156,7 +164,7 @@ internal class JsonStreamingBody(
                 }
             }
         }
-        value(document)
+        value(document!!)
     }
     private fun snapshotDocument(value: JsonElement): JsonElement {
         context.ensureIoActive()
@@ -164,7 +172,7 @@ internal class JsonStreamingBody(
             is JsonPrimitive -> value
             is JsonArray -> JsonArray(java.util.Collections.unmodifiableList(value.map { snapshotDocument(it) }))
             is JsonObject -> JsonObject(java.util.Collections.unmodifiableMap(
-                value.entries.associateTo(LinkedHashMap()) { (key, child) -> key to snapshotDocument(child) }))
+                value.entries.associateTo(LinkedHashMap(value.size + (value.size + 2) / 3)) { (key, child) -> key to snapshotDocument(child) }))
         }
     }
     /** The existing opt-in diagnostic path materializes only a bounded preview. */
