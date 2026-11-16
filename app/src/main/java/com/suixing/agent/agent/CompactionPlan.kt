@@ -51,7 +51,7 @@ internal fun planCompaction(
     val fresh = covered.subList(resumeAt + 1, covered.size)
     val from = reusable?.from ?: 0
     return CompactionPlan(
-        transcript = buildString {
+        transcript = NativeWireText.compaction(fresh, previous?.summary) ?: buildString {
             if (previous != null) append("system: [上下文摘要] ").append(previous.summary).append('\n')
             append(fresh.joinToString("\n") { renderForCompaction(it) })
         },

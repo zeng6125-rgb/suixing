@@ -14,8 +14,8 @@ android {
         minSdk = 26
         targetSdk = 37
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        versionCode = 732
-        versionName = "0.9.4"
+        versionCode = 733
+        versionName = "0.9.5"
         resourceConfigurations += listOf("zh", "en")
     }
 
@@ -108,12 +108,14 @@ android {
     testOptions {
         unitTests.isReturnDefaultValues = true
     }
+    testBuildType = "release"
 }
 
 dependencies {
     // #61: device-only PTY tests; CI without an emulator still compiles the app.
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
     androidTestImplementation("androidx.test:runner:1.6.2")
+    androidTestCompileOnly("com.google.errorprone:error_prone_annotations:2.36.0")
     implementation("androidx.core:core-ktx:1.19.1")
     implementation("androidx.appcompat:appcompat:1.8.0")
     implementation("androidx.activity:activity-compose:1.13.0")

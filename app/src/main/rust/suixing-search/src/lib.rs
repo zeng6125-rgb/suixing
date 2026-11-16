@@ -662,6 +662,7 @@ fn emit(
 
 // Feature modules share the parent buffer/cancellation ABI; JNI is a thin byte bridge.
 mod core_ops;
+mod chat_log;
 mod drawer_order;
 mod edit_ops;
 mod file_find;
@@ -676,6 +677,7 @@ mod request_budget;
 mod skill_catalog;
 mod sse_stream;
 mod text_read;
+mod transcript_plan;
 mod usage_aggregation;
 mod usage_projection;
 mod wire_text;

@@ -29,7 +29,8 @@ import java.util.Stack;
  * html - document for konsole - accessible!</li>
  * </ul>
  */
-public final class TerminalEmulator {
+public final class TerminalEmulator implements AutoCloseable {
+    private NativeTerminalCore nativeCore;
 
     /** Log unknown or unimplemented escape sequences received from the shell process. */
     private static final boolean LOG_ESCAPE_SEQUENCES = false;
@@ -327,6 +328,17 @@ public final class TerminalEmulator {
 
     public TerminalEmulator(TerminalOutput session, int columns, int rows, int cellWidthPixels, int cellHeightPixels, Integer transcriptRows, TerminalSessionClient client) {
         mSession = session;
+        if (NativeTerminalCore.AVAILABLE) {
+            mClient = client;
+            setCursorStyle();
+            final int history = getTerminalTranscriptRows(transcriptRows);
+            nativeCore = new NativeTerminalCore(columns, rows, cellWidthPixels, cellHeightPixels, history, mCursorStyle);
+            mMainBuffer = new TerminalBuffer(columns, history, rows, nativeCore, false);
+            mAltBuffer = new TerminalBuffer(columns, rows, rows, nativeCore, true);
+            mScreen = mMainBuffer;
+            nativeCore.step(this, 9, null, 0, 0, 0, 0, 0);
+            return;
+        }
         mScreen = mMainBuffer = new TerminalBuffer(columns, getTerminalTranscriptRows(transcriptRows), rows);
         mAltBuffer = new TerminalBuffer(columns, rows, rows);
         mClient = client;
@@ -384,6 +396,7 @@ public final class TerminalEmulator {
     }
 
     public void resize(int columns, int rows, int cellWidthPixels, int cellHeightPixels) {
+        if (nativeCore != null) { nativeCore.step(this, 1, null, 0, columns, rows, cellWidthPixels, cellHeightPixels); return; }
         this.mCellWidthPixels = cellWidthPixels;
         this.mCellHeightPixels = cellHeightPixels;
 
@@ -445,6 +458,7 @@ public final class TerminalEmulator {
             mCursorStyle = DEFAULT_TERMINAL_CURSOR_STYLE;
         else
             mCursorStyle = cursorStyle;
+        if (nativeCore != null) nativeCore.step(this, 7, null, 0, mCursorStyle, 0, 0, 0);
     }
 
     public boolean isReverseVideo() {
@@ -498,6 +512,7 @@ public final class TerminalEmulator {
      * @param length the number of bytes in the array to process
      */
     public void append(byte[] buffer, int length) {
+        if (nativeCore != null) { nativeCore.step(this, 0, buffer, length, 0, 0, 0, 0); return; }
         for (int i = 0; i < length; i++)
             processByte(buffer[i]);
     }
@@ -568,6 +583,7 @@ public final class TerminalEmulator {
     }
 
     public void processCodePoint(int b) {
+        if (nativeCore != null) { nativeCore.step(this, 4, null, 0, b, 0, 0, 0); return; }
         // The Application Program-Control (APC) string might be arbitrary non-printable characters, so handle that early.
         if (mEscapeState == ESC_APC) {
             doApc(b);
@@ -1184,6 +1200,7 @@ public final class TerminalEmulator {
     }
 
     public void doDecSetOrReset(boolean setting, int externalBit) {
+        if (nativeCore != null) { nativeCore.step(this, 5, null, 0, setting ? 1 : 0, externalBit, 0, 0); return; }
         int internalBit = mapDecSetBitToInternalBit(externalBit);
         if (internalBit != -1) {
             setDecsetinternalBit(internalBit, setting);
@@ -2515,11 +2532,13 @@ public final class TerminalEmulator {
     }
 
     public void clearScrollCounter() {
+        if (nativeCore != null) { nativeCore.step(this, 6, null, 0, 0, 0, 0, 0); return; }
         mScrollCounter = 0;
     }
 
     /** Suixing toolbar action: erase visible cells/history while preserving input modes. */
     public void clearScreenAndHistory() {
+        if (nativeCore != null) { nativeCore.step(this, 2, null, 0, 0, 0, 0, 0); return; }
         mScreen.blockSet(0, 0, mColumns, mRows, ' ', getStyle());
         for (int row = 0; row < mRows; row++) mScreen.clearLineWrap(row);
         mScreen.clearTranscript();
@@ -2529,6 +2548,7 @@ public final class TerminalEmulator {
 
     /** Reset terminal state so user can interact with it regardless of present state. */
     public void reset() {
+        if (nativeCore != null) { setCursorStyle(); nativeCore.step(this, 3, null, 0, 0, 0, 0, 0); return; }
         setCursorStyle();
         mArgIndex = 0;
         mContinueSequence = false;
@@ -2600,6 +2620,39 @@ public final class TerminalEmulator {
         int mSavedDecFlags;
         boolean mUseLineDrawingG0, mUseLineDrawingG1, mUseLineDrawingUsesG0 = true;
     }
+
+    public void prepareRows(int topRow) { if (nativeCore != null) mScreen.prepareNativeRows(topRow, mRows); }
+
+    void applyNativeState(java.nio.ByteBuffer input) {
+        mRows = input.getInt(); mColumns = input.getInt(); mCursorRow = input.getInt(); mCursorCol = input.getInt();
+        mCursorStyle = input.getInt(); mCurrentDecSetFlags = input.getInt(); mScrollCounter = input.getInt();
+        mCellWidthPixels = input.getInt(); mCellHeightPixels = input.getInt(); boolean alternate = input.getInt() != 0;
+        mMainBuffer.configureNative(input.getInt(), input.getInt(), input.getInt(), input.getInt());
+        mAltBuffer.configureNative(input.getInt(), input.getInt(), input.getInt(), input.getInt());
+        mScreen = alternate ? mAltBuffer : mMainBuffer;
+        for (int i=0; i<mColors.mCurrentColors.length; i++) mColors.mCurrentColors[i] = input.getInt();
+        int events = input.getInt();
+        for (int i=0; i<events; i++) {
+            int kind = input.getInt(); String text = nativeString(input); String previous = nativeString(input);
+            switch (kind) {
+                case 1: mSession.write(text); break;
+                case 2: mSession.onBell(); break;
+                case 3: mSession.onColorsChanged(); break;
+                case 4: mTitle = text; mSession.titleChanged(previous, text); break;
+                case 5: Logger.logError(mClient, LOG_TAG, text); break;
+                case 6: if (mClient != null) mClient.onTerminalCursorStateChange("1".equals(text)); break;
+                case 7: Logger.logWarn(mClient, LOG_TAG, text); break;
+            }
+        }
+    }
+    private static String nativeString(java.nio.ByteBuffer input) {
+        int size = input.getInt();
+        if (size < 0) return null;
+        char[] chars = new char[size]; input.asCharBuffer().get(chars); input.position(input.position() + size*2);
+        return new String(chars);
+    }
+    @Override public void close() { if (nativeCore != null) nativeCore.close(); }
+    long[] nativeMemory() { return nativeCore == null ? null : nativeCore.memory(); }
 
     @Override
     public String toString() {

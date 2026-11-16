@@ -142,8 +142,10 @@ internal class TerminalSessionManager(
         check(_entries.value.none { it.info.id == id && it.info.phase == "running" }) {
             "请先停止该终端会话，再移除记录"
         }
+        val removed = _entries.value.filter { it.info.id == id }
         _entries.value = _entries.value.filterNot { it.info.id == id }
         saveLocked()
+        removed.forEach { it.session?.display?.emulator?.close() }
     }
 
     suspend fun removeLinux(distro: LinuxDistro) = mutex.withLock {

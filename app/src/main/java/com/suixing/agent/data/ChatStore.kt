@@ -214,7 +214,7 @@ internal class ChatStore(private val root: File) {
     }
 
     /** One message and the byte offset of the line it was read from. */
-    private data class Entry(val message: StoredMessage, val offset: Long)
+    internal data class Entry(val message: StoredMessage, val offset: Long)
 
     /**
      * A slice of the log: `[startOffset, endOffset)` of the generation the meta names.
@@ -639,11 +639,13 @@ internal class ChatStore(private val root: File) {
             val prefix = readEntries(file, name, from, parsedFrom)
             if (prefix.isNotEmpty()) entries = prefix + entries
             parsedFrom = from
-            val starts = entries.indices.filter { isTurnStart(entries[it].message) }
-            val cut = when {
-                atStart && starts.size <= turns -> 0
-                starts.size >= turns -> starts[starts.size - turns]
-                else -> -1
+            val cut = NativeChatLog.cut(entries, turns, atStart) ?: run {
+                val starts = entries.indices.filter { isTurnStart(entries[it].message) }
+                when {
+                    atStart && starts.size <= turns -> 0
+                    starts.size >= turns -> starts[starts.size - turns]
+                    else -> -1
+                }
             }
             if (cut >= 0) {
                 val first = entries[cut].offset
@@ -704,6 +706,7 @@ internal class ChatStore(private val root: File) {
         val needle = "{\"id\":\"$messageId\"".toByteArray(Charsets.UTF_8)
         val limit = meta.logBytes
         RandomAccessFile(log, "r").use { raf ->
+            NativeChatLog.locate(raf, 0, limit, needle)?.let { return it.takeIf { offset -> offset >= 0 } }
             // **从尾部往前倒扫**（issue #38 第 2 项）：needle 几乎总是**最近**的一条
             // （`readWire` 找的是最后一个 checkpoint 那条，而 checkpoint 由压缩生成、位于末尾附近），
             // 从 0 正扫要读完整份日志（32MB 会话 = 每轮发送扫 32MB）。
@@ -860,6 +863,7 @@ internal class ChatStore(private val root: File) {
     }
 
     private fun startOfNextLine(raf: RandomAccessFile, from: Long, end: Long): Long {
+            NativeChatLog.nextLine(raf, from, end, SKIP_PROBE)?.let { return it }
             raf.seek(from)
             val probe = ByteArray(minOf(SKIP_PROBE.toLong(), end - from).toInt())
             raf.readFully(probe)
@@ -881,6 +885,7 @@ internal class ChatStore(private val root: File) {
         }
         val span = end - from
         require(span <= Int.MAX_VALUE) { "window of $span bytes is too large to read at once" }
+        NativeChatLog.read(file, name, from, end, chatJson)?.let { return it }
         val bytes = ByteArray(span.toInt())
         file.seek(from)
         file.readFully(bytes)

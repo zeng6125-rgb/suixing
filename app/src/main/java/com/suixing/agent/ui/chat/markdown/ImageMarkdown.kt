@@ -93,6 +93,7 @@ internal fun base64PayloadOf(url: String): String? {
 internal fun splitImageSegments(text: String, streaming: Boolean = false): List<MessageSegment> {
     if (text.isEmpty()) return emptyList()
     if (!text.contains("![")) return listOf(MessageSegment.Text(text))
+    NativeMarkdown.imageSegments(text, streaming)?.let { return it }
 
     val out = mutableListOf<MessageSegment>()
     val plain = StringBuilder()

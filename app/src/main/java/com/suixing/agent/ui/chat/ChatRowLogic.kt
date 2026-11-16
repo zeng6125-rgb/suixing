@@ -118,6 +118,16 @@ internal fun groupRows(
     /** 当前流式 run：参与分支选择，内容由 live 行展示。见 [Transcript.chosenFrom]. */
     pendingRun: String? = null,
 ): List<ChatRow> {
+    return NativeTranscript.rows(messages, activeRuns, running, pendingRun)
+        ?: groupRowsJvm(messages, activeRuns, running, pendingRun)
+}
+
+internal fun groupRowsJvm(
+    messages: List<StoredMessage>,
+    activeRuns: Map<String, String>,
+    running: Boolean,
+    pendingRun: String? = null,
+): List<ChatRow> {
     val turnOf = Transcript.turnOf(messages)
     val runs = Transcript.runsByTurn(messages, turnOf)
     // `turnOf` 是 O(条数) 的扫描，下面几处都要它 —— 算一次传下去（原来被重复算了 4 次）。
@@ -375,6 +385,7 @@ internal data class TurnPage(
  * single turn is read as one: a page with nothing in it is not a page.
  */
 internal fun turnPage(messages: List<StoredMessage>, want: Int): TurnPage {
+    NativeTranscript.page(messages, want)?.let { return it }
     // **一趟扫描 + 环形缓冲**（原先是 `messages.indices.filter{}`：为取最后几个起点，
     // 给整份 transcript 建了一个 Int 列表）。ring 只留最后 cap 个起点下标；
     // 下面取的 `first` 必然 ≥ 总数-cap，所以一定落在 ring 里，取模即得，逐值等价。

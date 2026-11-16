@@ -11,6 +11,12 @@ import java.util.Arrays;
  * The text in the row is stored in a char[] array, {@link #mText}, for quick access during rendering.
  */
 public final class TerminalRow {
+    void readNative(java.nio.ByteBuffer input) {
+        int used = input.getInt(); mLineWrap = input.getInt() != 0; mHasNonOneWidthOrSurrogateChars = input.getInt() != 0;
+        if (mText.length < used) mText = new char[used];
+        input.asCharBuffer().get(mText, 0, used); input.position(input.position() + used*2); mSpaceUsed = (short) used;
+        input.asLongBuffer().get(mStyle); input.position(input.position() + mStyle.length*8);
+    }
 
     private static final float SPARE_CAPACITY_FACTOR = 1.5f;
 

@@ -126,6 +126,28 @@ internal object NativeWireText {
         return result
     }
 
+    fun compaction(sources: List<StoredMessage>, previous: String?): String? {
+        if (!NativeCore.available || sources.size > MAX_SUMMARY_MESSAGES) return null
+        val builder = Builder(3, sources.size)
+        if (!builder.nullable(previous)) return null
+        var calls = 0L
+        for (message in sources) {
+            calls += message.toolCalls.size
+            if (calls > MAX_CALLS || !builder.string(message.role) || !builder.string(message.text) ||
+                !builder.integer(if (message.imageCount > 0) 1 else 0) || !builder.integer(message.toolCalls.size)) return null
+            for (call in message.toolCalls) {
+                if (!builder.string(call.name) || !builder.string(call.arguments)) return null
+            }
+            if (!builder.nullable(message.toolOutput)) return null
+        }
+        val bytes = call(builder.finish(), null) ?: return null
+        val input = Reader(bytes, null)
+        input.valid(input.integer() == MAGIC && input.integer() == 3 && input.integer() == sources.size)
+        val result = input.string()
+        input.valid(!input.buffer.hasRemaining())
+        return result
+    }
+
     private fun call(built: Built, checkpoint: (() -> Unit)?): ByteArray? {
         checkpoint?.invoke()
         val response = try { NativeWireTextJni.nativeBuild(built.protocol, NativeWireStringPool(built.strings, checkpoint), built.strings.size) }

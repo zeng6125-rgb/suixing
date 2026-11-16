@@ -13,11 +13,14 @@ internal object NativeMarkdownJni {
     external fun nativeCancel(handle: Long)
     external fun nativeRelease(handle: Long)
     external fun nativeParse(handle: Long, request: ByteArray): ByteArray
+    external fun nativeRuntime(op: Int, source: String, from: Int, parameter: Int, flag: Boolean): ByteArray?
 }
 
 internal data class NativeInlineRun(val text: String, val style: Int, val link: String?)
+internal data class NativeMarkdownTail(val blocks: List<MdBlock>, val stableEnd: Int, val stableCount: Int, val continuation: AppendableMarkdownTail?)
+internal data class NativeTableAppend(val lastLine: Int, val completed: List<List<String>>, val partial: List<String>?)
 
-/** Only settled cold documents enter JNI. Streaming tails retain the existing incremental parser. */
+/** Shared cold and streaming parsers; Kotlin retains presentation objects and completed prefixes. */
 internal object NativeMarkdown {
     const val BATCH_SIZE = 16
     private const val MAGIC = 0x314D5853
@@ -29,6 +32,63 @@ internal object NativeMarkdown {
         try { System.loadLibrary("suixing_search"); true }
         catch (_: UnsatisfiedLinkError) { false }
         catch (_: SecurityException) { false }
+    }
+    val runtimeAvailable: Boolean get() = available
+    private fun runtime(op: Int, source: String, from: Int = 0, parameter: Int = 0, flag: Boolean = false): Reader? {
+        if (!available) return null
+        val bytes = NativeMarkdownJni.nativeRuntime(op, source, from, parameter, flag) ?: return null
+        return Reader(ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN))
+    }
+    fun tail(source: String, from: Int): NativeMarkdownTail? {
+        val reader = runtime(1, source, from) ?: return null
+        val stable = reader.integer(); val count = reader.integer(); val blocks = reader.blocks(0)
+        val continuation = when (reader.integer()) {
+            1 -> AppendableMarkdownTail.Paragraph(from + reader.integer(), reader.string())
+            2 -> {
+                val body = from + reader.integer(); val last = from + reader.integer(); val bodyLine = reader.integer() != 0
+                AppendableMarkdownTail.Code((blocks.last() as MdBlock.Code).language, body, last, bodyLine)
+            }
+            3 -> {
+                val last = from + reader.integer(); val partial = reader.integer() != 0; val table = blocks.last() as MdBlock.Table
+                AppendableMarkdownTail.Table(table.header, if (partial) table.rows.dropLast(1) else table.rows, last, if (partial) table.rows.last() else null)
+            }
+            else -> null
+        }
+        return NativeMarkdownTail(blocks, stable, count, continuation)
+    }
+    fun parseInline(source: String): List<NativeInlineRun>? {
+        val reader = runtime(2, source) ?: return null
+        return List(reader.count()) { NativeInlineRun(reader.string(), reader.integer(), reader.string().takeIf { it.isNotEmpty() }) }
+    }
+    fun imageSegments(source: String, streaming: Boolean): List<MessageSegment>? {
+        val reader = runtime(3, source, flag = streaming) ?: return null
+        val result = ArrayList<MessageSegment>(); var plain = 0
+        repeat(reader.count()) {
+            val start = reader.integer(); val end = reader.integer(); val alt = reader.integer(); val altLength = reader.integer(); val url = reader.integer(); val urlLength = reader.integer()
+            if (plain < start) result += MessageSegment.Text(source.substring(plain, start))
+            result += MessageSegment.Image(source.substring(alt, alt + altLength), source.substring(url, url + urlLength)); plain = end
+        }
+        if (plain < source.length) result += MessageSegment.Text(source.substring(plain))
+        return result
+    }
+    fun paragraphContinues(source: String, previous: Int): Boolean = runtime(4, source, previous) != null
+    fun codeAppend(source: String, from: Int, previous: Int, bodyLine: Boolean): IntArray? {
+        val scanFrom = if (bodyLine) previous else from
+        val reader = runtime(5, source, scanFrom, previous - scanFrom, bodyLine) ?: return null
+        val relative = reader.integer(); val nextBody = reader.integer()
+        return intArrayOf(if (bodyLine && relative == 0) from else scanFrom + relative, nextBody)
+    }
+    fun tableAppend(source: String, from: Int, columns: Int, previousLength: Int, previousCells: List<String>?): NativeTableAppend? {
+        val reader = runtime(6, source, from, columns) ?: return null
+        val last = from + reader.integer()
+        val previousRowUnchanged = from + reader.integer() == previousLength && previousCells != null
+        val completed = List(reader.count()) { index ->
+            val count = reader.count()
+            if (index == 0 && previousRowUnchanged) { repeat(count) { reader.skipString() }; requireNotNull(previousCells) }
+            else List(count) { reader.string() }
+        }
+        val partial = if (reader.integer() == 0) null else List(reader.count()) { reader.string() }
+        return NativeTableAppend(last, completed, partial)
     }
 
     private data class InlineEntry(val runs: List<NativeInlineRun>, val weight: Long)
@@ -147,8 +207,9 @@ internal object NativeMarkdown {
             valid(size >= 0 && size <= input.remaining())
             val bytes = ByteArray(size)
             input.get(bytes)
-            return bytes.toString(Charsets.UTF_8).also { valid(it.toByteArray(Charsets.UTF_8).contentEquals(bytes)) }
+            return bytes.toString(Charsets.UTF_8)
         }
+        fun skipString() { val size = integer(); input.position(input.position() + size) }
         fun blocks(depth: Int): List<MdBlock> { valid(depth <= 8); return List(count()) { block(depth) } }
         private fun block(depth: Int): MdBlock {
             nodes++

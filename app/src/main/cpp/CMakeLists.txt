@@ -1,11 +1,11 @@
 cmake_minimum_required(VERSION 3.18.1)
 project(suixing_terminal LANGUAGES CXX)
 
-add_library(suixing_terminal SHARED terminal_rust_jni.cpp)
+add_library(suixing_terminal SHARED terminal_rust_jni.cpp terminal_core_jni.cpp)
 target_compile_features(suixing_terminal PRIVATE cxx_std_17)
-target_compile_options(suixing_terminal PRIVATE -Wall -Wextra -Werror)
+target_compile_options(suixing_terminal PRIVATE -Wall -Wextra -Werror -fwrapv)
 
-# The two thin JNI libraries share one locked Rust archive, built once per ABI.
+# The JNI libraries share one locked Rust archive, built once per ABI.
 set(SX_RUST_TOOLCHAIN "1.98.0")
 get_filename_component(SX_RUST_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../rust/suixing-search" ABSOLUTE)
 if(ANDROID_ABI STREQUAL "arm64-v8a")
@@ -92,7 +92,7 @@ add_library(suixing_search SHARED
     search_jni.cpp file_find_jni.cpp usage_jni.cpp sse_jni.cpp markdown_jni.cpp
     text_read_jni.cpp core_jni.cpp memory_prompt_jni.cpp request_budget_jni.cpp
     loop_policy_jni.cpp json_document_jni.cpp edit_ops_jni.cpp usage_aggregation_jni.cpp
-    wire_text_jni.cpp skill_catalog_jni.cpp drawer_order_jni.cpp)
+    wire_text_jni.cpp skill_catalog_jni.cpp drawer_order_jni.cpp runtime_jni.cpp)
 target_compile_features(suixing_search PRIVATE cxx_std_17)
 target_compile_options(suixing_search PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(suixing_search PRIVATE suixing_search_rust android log ${CMAKE_DL_LIBS} m)

@@ -59,10 +59,12 @@ struct Summary {
     text: u32,
     image: bool,
     calls: Vec<(u32, u32)>,
+    output: u32,
 }
 enum Request {
     Replay(Vec<Replay>),
     Summary(Vec<Summary>),
+    Compaction(u32, Vec<Summary>),
 }
 impl Request {
     /// Validate the complete metadata stream before invoking the String resolver.
@@ -106,11 +108,12 @@ impl Request {
                 }
                 Self::Replay(records)
             }
-            2 => {
+            2 | 3 => {
                 if count > MAX_SUMMARY {
                     return Err(COMPATIBILITY);
                 }
                 let mut records = Vec::new();
+                let previous = if mode == 3 { input.nullable(pool)? } else { NONE };
                 records.try_reserve(count).map_err(|_| COMPATIBILITY)?;
                 let mut total_calls = 0usize;
                 for _ in 0..count {
@@ -135,9 +138,10 @@ impl Request {
                         text,
                         image: image != 0,
                         calls,
+                        output: if mode == 3 { input.nullable(pool)? } else { NONE },
                     });
                 }
-                Self::Summary(records)
+                if mode == 3 { Self::Compaction(previous, records) } else { Self::Summary(records) }
             }
             _ => return Err(STATUS_REQUEST_ERROR),
         };
@@ -357,8 +361,13 @@ fn replay(records: &[Replay], resolve: Resolve, context: *mut c_void) -> Result<
     output.patch(12, rows)?;
     Ok(output.bytes)
 }
-fn summary(records: &[Summary], resolve: Resolve, context: *mut c_void) -> Result<Vec<u8>, i32> {
-    let mut output = Output::new(2, records.len())?;
+fn summary(records: &[Summary], resolve: Resolve, context: *mut c_void, previous: u32, mode: u32) -> Result<Vec<u8>, i32> {
+    let mut output = Output::new(mode, records.len())?;
+    if previous != NONE {
+        output.literal("system: [上下文摘要] ")?;
+        string(&mut output, resolve, context, previous)?;
+        output.literal("\n")?;
+    }
     for (index, record) in records.iter().enumerate() {
         if index > 0 {
             output.literal("\n")?;
@@ -373,12 +382,30 @@ fn summary(records: &[Summary], resolve: Resolve, context: *mut c_void) -> Resul
             string(&mut output, resolve, context, arguments)?;
             output.literal("]")?;
         }
+        if record.output != NONE {
+            let mut leaf = TrimmedOutput { output: &mut output };
+            let status = unsafe { resolve(context, record.output, consume_tool_output, (&mut leaf as *mut TrimmedOutput<'_>).cast()) };
+            if status != STATUS_OK { return Err(if status < 0 { CALLBACK_FAILED } else { status }); }
+        }
         if record.image {
             output.literal("\n  （含截图，已省略）")?;
         }
     }
     output.end_text(12)?;
     Ok(output.bytes)
+}
+
+struct TrimmedOutput<'a> { output: &'a mut Output }
+unsafe extern "C" fn consume_tool_output(context: *mut c_void, units: *const u16, len: usize) -> i32 {
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let output = &mut unsafe { &mut *context.cast::<TrimmedOutput<'_>>() }.output;
+        if len == 0 { return Ok(()); }
+        output.literal("\n  [工具结果] ")?;
+        output.units(unsafe { slice::from_raw_parts(units, len.min(2000)) })?;
+        if len > 2000 { output.literal(&format!(" …（共 {len} 字符）"))?; }
+        Ok::<(), i32>(())
+    }));
+    match result { Ok(Ok(())) => STATUS_OK, Ok(Err(status)) => status, Err(_) => STATUS_PANIC }
 }
 
 /// # Safety
@@ -414,7 +441,8 @@ pub unsafe extern "C" fn sx_wire_text(
         let request = Request::parse(bytes, pool)?;
         let result = match request {
             Request::Replay(records) => replay(&records, resolve.unwrap(), context)?,
-            Request::Summary(records) => summary(&records, resolve.unwrap(), context)?,
+            Request::Summary(records) => summary(&records, resolve.unwrap(), context, NONE, 2)?,
+            Request::Compaction(previous, records) => summary(&records, resolve.unwrap(), context, previous, 3)?,
         };
         let owned = result.into_boxed_slice();
         let len = owned.len();

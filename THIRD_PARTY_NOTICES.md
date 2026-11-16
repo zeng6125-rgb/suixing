@@ -103,11 +103,11 @@ GPL 要求分发二进制时提供对应源码的获取途径。上面的上游�
 
 ## 终端仿真与视口
 
-- 组件：Termux `terminal-emulator`、`terminal-view` 的部分 Java 源码及选区资源，版本 v0.118.3。
+- 组件：Termux `terminal-emulator`、`terminal-view` 的部分 Java 源码、终端核心的 C++ 移植及选区资源，版本 v0.118.3。
 - 固定源码： https://github.com/termux/termux-app/tree/5b657c6adf4304e5198951ce815fe0205dcac29c
 - 上游根许可明确将 `terminal-emulator`、`terminal-view` 列为 Apache-2.0 例外，其余 Termux app 的 GPL 许可不套用到这两个模块： https://github.com/termux/termux-app/blob/5b657c6adf4304e5198951ce815fe0205dcac29c/LICENSE.md
 - 源文件原有版权与 Apache-2.0 头保留；包括 Jack Palevich 及贡献者的 Android Terminal Emulator 代码。许可和来源在 `assets/licenses/termux-terminal/`。
-- 本项目的修改：保留本项目 PTY、进程与会话生命周期，使用自有 `TerminalSession` 适配器；调整资源包路径；禁用终端输出触发的 OSC 52 剪贴板读写；增加保留输入模式的清屏/历史入口；将视口与输入桥接到现有页面。未导入 Termux app、原 JNI 或其进程管理实现。
+- 本项目的修改：保留本项目 PTY、进程与会话生命周期，使用自有 `TerminalSession` 适配器；调整资源包路径；禁用终端输出触发的 OSC 52 剪贴板读写；增加保留输入模式的清屏/历史入口；将 VT/ANSI 状态机、Unicode 15 字符宽度表和屏幕缓冲移植至 `app/src/main/cpp/terminal/`，使用统一行样式和可见行缓存；平台字符分类与现有绘制、视口及输入保留 Java。未导入 Termux app、原 JNI 或其进程管理实现。
 
 ## PRoot、talloc 与 Android shared memory
 

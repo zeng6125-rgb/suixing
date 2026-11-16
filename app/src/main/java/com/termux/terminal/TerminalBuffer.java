@@ -12,6 +12,11 @@ import java.util.Arrays;
  * See {@link #externalToInternalRow(int)} for how to map from logical screen rows to array indices.
  */
 public final class TerminalBuffer {
+    private NativeTerminalCore nativeOwner;
+    private boolean nativeAlternate;
+    private long preparedRevision = -1;
+    private int preparedFrom;
+    private int[] cachedNativeRows = new int[0];
 
     TerminalRow[] mLines;
     /** The length of {@link #mLines}. */
@@ -40,6 +45,32 @@ public final class TerminalBuffer {
         blockSet(0, 0, columns, screenRows, ' ', TextStyle.NORMAL);
     }
 
+    TerminalBuffer(int columns, int totalRows, int screenRows, NativeTerminalCore owner, boolean alternate) {
+        mColumns = columns; mTotalRows = totalRows; mScreenRows = screenRows;
+        mLines = new TerminalRow[totalRows]; nativeOwner = owner; nativeAlternate = alternate;
+    }
+    void configureNative(int columns, int rows, int total, int history) {
+        if (columns != mColumns || total != mTotalRows) {
+            mLines = new TerminalRow[total]; cachedNativeRows = new int[0]; preparedRevision = -1;
+        }
+        mColumns = columns; mScreenRows = rows; mTotalRows = total; mActiveTranscriptRows = history; mScreenFirstRow = 0;
+    }
+    void prepareNativeRows(int from, int count) {
+        from = Math.max(from, -mActiveTranscriptRows); count = Math.min(count, mScreenRows-from);
+        if (preparedRevision == nativeOwner.revision && preparedFrom == from && cachedNativeRows.length == count) return;
+        byte[] bytes = nativeOwner.rows(nativeAlternate, from, count); if (bytes == null) return;
+        TerminalRow[] reusable = new TerminalRow[cachedNativeRows.length];
+        for (int i=0; i<cachedNativeRows.length; i++) { reusable[i] = mLines[cachedNativeRows[i]]; mLines[cachedNativeRows[i]] = null; }
+        java.nio.ByteBuffer input = java.nio.ByteBuffer.wrap(bytes).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+        int[] indices = new int[input.getInt()];
+        for (int i=0; i<indices.length; i++) {
+            int external = input.getInt(); int index = externalToInternalRow(external);
+            TerminalRow row = i < reusable.length && reusable[i] != null ? reusable[i] : new TerminalRow(mColumns, TextStyle.NORMAL);
+            row.readNative(input); mLines[index] = row; indices[i] = index;
+        }
+        cachedNativeRows = indices; preparedRevision = nativeOwner.revision; preparedFrom = from;
+    }
+
     public String getTranscriptText() {
         return getSelectedText(0, -getActiveTranscriptRows(), mColumns, mScreenRows).trim();
     }
@@ -61,6 +92,10 @@ public final class TerminalBuffer {
     }
 
     public String getSelectedText(int selX1, int selY1, int selX2, int selY2, boolean joinBackLines, boolean joinFullLines) {
+        if (nativeOwner != null) {
+            String result = nativeOwner.selected(nativeAlternate, selX1, selY1, selX2, selY2, joinBackLines, joinFullLines);
+            if (result != null) return result;
+        }
         final StringBuilder builder = new StringBuilder();
         final int columns = mColumns;
 
@@ -109,6 +144,7 @@ public final class TerminalBuffer {
     }
 
     public String getWordAtLocation(int x, int y) {
+        if (nativeOwner != null) { String result = nativeOwner.word(nativeAlternate, x, y); if (result != null) return result; }
         // Set y1 and y2 to the lines where the wrapped line starts and ends.
         // I.e. if a line that is wrapped to 3 lines starts at line 4, and this
         // is called with y=5, then y1 would be set to 4 and y2 would be set to 6.

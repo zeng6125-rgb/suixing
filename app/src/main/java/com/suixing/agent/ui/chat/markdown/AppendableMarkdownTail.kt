@@ -6,6 +6,12 @@ internal sealed interface AppendableMarkdownTail {
 
     class Paragraph(private val lastLineStart: Int, private val completedLines: String) : AppendableMarkdownTail {
         override fun append(source: String, previousLength: Int, checkpoint: (() -> Unit)?): MdBlock? {
+            if (NativeMarkdown.runtimeAvailable) {
+                checkpoint?.invoke()
+                if (!NativeMarkdown.paragraphContinues(source, previousLength)) return null
+                val last = source.substring(lastLineStart).trim()
+                return MdBlock.Paragraph(if (completedLines.isEmpty()) last else completedLines + last)
+            }
             // A newline can turn the preceding pipe-containing line into a table header,
             // or introduce a new block. Let the full parser resolve that boundary.
             // A new pipe may also let a preceding table absorb this formerly plain
@@ -23,6 +29,12 @@ internal sealed interface AppendableMarkdownTail {
         private var lastLineIsBody: Boolean,
     ) : AppendableMarkdownTail {
         override fun append(source: String, previousLength: Int, checkpoint: (() -> Unit)?): MdBlock? {
+            if (NativeMarkdown.runtimeAvailable) {
+                checkpoint?.invoke()
+                val next = NativeMarkdown.codeAppend(source, lastLineStart, previousLength, lastLineIsBody) ?: return null
+                lastLineStart = next[0]; lastLineIsBody = next[1] != 0
+                return MdBlock.Code(language, source.substring(bodyStart))
+            }
             // A line already containing a non-backtick cannot become a closing fence
             // by appending. Only newly introduced lines or a pending fence need checking.
             var start = lastLineStart
@@ -57,6 +69,13 @@ internal sealed interface AppendableMarkdownTail {
         private val completedRows = ArrayList(completedRows)
 
         override fun append(source: String, previousLength: Int, checkpoint: (() -> Unit)?): MdBlock? {
+            if (NativeMarkdown.runtimeAvailable) {
+                checkpoint?.invoke()
+                val next = NativeMarkdown.tableAppend(source, lastLineStart, header.size, previousLength, partialCells) ?: return null
+                completedRows.addAll(next.completed)
+                lastLineStart = next.lastLine; partialCells = next.partial
+                return MdBlock.Table(header, CompletedTableRows(completedRows, completedRows.size, partialCells))
+            }
             var start = lastLineStart
             var additions: ArrayList<List<String>>? = null
             while (true) {

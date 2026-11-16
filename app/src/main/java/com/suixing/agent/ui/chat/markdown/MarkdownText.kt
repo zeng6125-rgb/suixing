@@ -491,7 +491,8 @@ internal fun scanInlineMarkdown(
     searchState: InlineSearchState? = null,
     appendOnly: Boolean = false,
 ): AnnotatedString {
-    searchState?.update(text, appendOnly)
+    val prepared = NativeMarkdown.inlineRuns(text) ?: NativeMarkdown.parseInline(text)
+    if (prepared == null) searchState?.update(text, appendOnly)
     return InlineScanner(
         text = text,
         codeBackground = codeBackground,
@@ -502,7 +503,7 @@ internal fun scanInlineMarkdown(
         onPathClick = onPathClick,
         codeFontSize = codeFontSize,
         searchState = searchState,
-    ).scan(appendCaret)
+    ).scan(appendCaret, prepared)
 }
 
 /** Pure entry for checking that scanned text and annotations survive the final caret append. */
@@ -1103,7 +1104,12 @@ internal class LiveBlocks {
         if (stableEnd == normalized.length) return prefixBlocks
         var completed = 0
         var completedBlocks = 0
-        val parsed = parseMarkdownBlocks(
+        val native = NativeMarkdown.tail(normalized, stableEnd)
+        val parsed = if (native != null) {
+            completed = native.stableEnd; completedBlocks = native.stableCount
+            appendableTail = native.continuation
+            native.blocks
+        } else parseMarkdownBlocks(
             normalized, checkpoint, stableEnd,
             onAppendableTail = { appendableTail = it }, sourceIsNormalized = true,
         ) { offset, count ->

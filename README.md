@@ -14,7 +14,7 @@
 - 支持技能（Skill）：把写好的操作手册放进手机，模型需要时自己读
 - 支持插件（Plugin）：安装一个 zip 就能带来新工具、新的上下文注入与新的执行闸门
 - 目标与斜杠指令：输入 `/goal 一句话目标`，助手会在当前会话持续推进并记录进度，直到确认完成、遇到卡点或被停止。`/goal` 查看，`/goal resume` 继续，`/goal clear` 清除。输入 `/` 可找其他工具，直接调用仍受审批档与助手禁用表约束。
-- 当前源码版本：**0.9.4**（`versionCode` 732）
+- 当前源码版本：**0.9.5**（`versionCode` 733）
 
 ## 界面与设计
 
@@ -259,23 +259,26 @@ rustup target add --toolchain 1.98.0 aarch64-linux-android armv7-linux-androidea
 cargo +1.98.0 fetch --locked --manifest-path app/src/main/rust/suixing-search/Cargo.toml
 ```
 
-Rust crate 保留目录名 `app/src/main/rust/suixing-search`，承载下列核心模块；第三方依赖的确切版本与校验由 `Cargo.lock` 锁定，许可证见[第三方声明](THIRD_PARTY_NOTICES.md)。CMake 为四种 ABI 构建同一份 Rust 静态归档，再链接到 `libsuixing_search.so` 和 `libsuixing_terminal.so`；C++ 保留 JNI 参数、字节与异常桥接，Rust 中间产物留在构建目录。
+Rust crate 保留目录名 `app/src/main/rust/suixing-search`，承载下列核心模块；第三方依赖的确切版本与校验由 `Cargo.lock` 锁定，许可证见[第三方声明](THIRD_PARTY_NOTICES.md)。CMake 为四种 ABI 构建同一份 Rust 静态归档，再链接到 `libsuixing_search.so` 和 `libsuixing_terminal.so`；C++ 承担 JNI 桥接和 Termux 终端仿真核心，Rust 中间产物留在构建目录。
 
-| 入口 | Rust 执行范围 | Kotlin / Android 边界与兼容处理 |
+| 入口 | Rust / C++ 执行范围 | Kotlin / Android 边界与兼容处理 |
 |---|---|---|
 | `grep_files` | 普通文本的批量字面搜索；支持区分大小写，以及查询和文件均为 ASCII 时的忽略大小写 | 正则、Unicode 忽略大小写、无效 UTF-8、读取条件变化与不可无损表示的输入交回 Kotlin；权限、候选遍历和输出格式由 Kotlin 持有 |
 | `find_files` | 深度优先目录遍历、访问数 / 深度 / 命中数 / 时间预算与 ASCII 名称、glob 匹配 | Unicode 和特殊 glob 谓词回调 Kotlin；无法表示的系统文件名或过大响应使用 Kotlin 后备；权限、根路径解析与结果格式保留 |
 | 用量刷新 | 从确定 generation 的只读 FD 读取已提交 JSONL 区间，仅投影角色、时间、模型与 token，并返回消息数和字节水位 | 不兼容 schema / Unicode 或超预算的完整切片使用同 FD 的 Kotlin 解码；日期、缓存、删除前归档、写入、日志提交与恢复继续由 Kotlin 管理 |
 | SSE（OpenAI / Anthropic / Responses） | 增量处理 SSE 行、事件边界、结束标记及 JSON 节点 | 不支持的事件 payload 交回 Kotlin，库不可用时在读流前选择 Kotlin；已发送事件不重放，网络请求、取消与 `StreamTurn` 保留原生命周期 |
-| 历史 Markdown | 批量冷解析 block AST 与行内文本、样式和链接目标扫描 | 已有缓存、解析 owner 和流式尾部增量解析保留；不支持或超预算的文档回 Kotlin；Compose 布局、字体、注解与点击回调继续在 Kotlin |
+| Markdown | Rust 批量冷解析与流式尾块解析、行内文本/样式/链接扫描、图文切段；代码续接只检查新增字符，图片返回 UTF-16 范围 | Kotlin 持有已完成块、表格行身份与展示字符串；不兼容文档使用原解析器；Compose 布局、字体、注解与点击回调保留 |
+| 会话 JSONL | Rust 在已提交 FD 区间分块扫描、批量解码 JSON 树、查找消息 ID 与轮次切窗 | Kotlin serializer 保留字段默认值和类型语义；原扫描探测范围、提交边界与损坏记录报错保留；元数据、追加/换代和恢复由 Kotlin 管理 |
+| 转录分组与分页 | Rust 选择回答分支、分配工具与插话归属、生成气泡分组和分页索引 | 正文、图片与原消息引用留在 Kotlin；时间标签、展示对象、阅读位置与 Compose 状态由 Kotlin 持有 |
 | 交互式 PTY | Android PTY 创建、FD 读写与 poll、窗口尺寸、进程组信号、等待退出和关闭 | JNI 转换参数、字节及错误；终端会话、前后台服务、页面与权限保留 Kotlin，加载或系统调用失败按终端错误路径处理 |
+| 终端 VT/ANSI | C++ 字节解码、控制序列、主/备用屏、滚屏缓冲、尺寸重排与行样式存储；统一样式行保留一个值 | 平台 Unicode 分类、键盘协议和回调保留 Java；现有 Canvas 绘制只缓存可见行，移除会话记录时释放原生缓冲 |
 | `read_file` / `edit_file` | 有界文本读取、行裁剪与 UTF-16 revision；精确匹配、非重叠替换及结果大小检查 | 读取保持同一个已打开 FD；Unicode 不兼容读取回同 FD 后备；权限、乐观 revision 检查、原用户文件写入与文件活动记录由 Kotlin 执行 |
 | 共享 JSON 解码 | 对象、数组和原始值的受限原生 JSON 树解析，接入会话、设置、用量、插件和其它存储读取 | 原 Kotlin serializer / Json 配置仍决定字段默认值、枚举、未知字段与类型；不兼容语法、Unicode 或超预算时使用原解析器 |
 | JSON 文档编码 | 整份文档的结构遍历、字符串转义、UTF-8 长度与有界分块输出；HTTP 与 compact JSON 字节存储共用 | Kotlin 构建类型化 JsonElement 与字符串引用池；Base64 通过引用分段使用。网络、IO 异常及原子提交留在 Kotlin；prettyPrint 和 DataStore 字符串保留原格式 |
 | 上下文与退出规则 | Token 字符估算、历史预算裁剪、工具截图预算、重试与运行终态动作选择 | Kotlin 缓存核对完整估算输入，保留消息模型、错误原对象、事件 / 统计 / 状态回调顺序与协程所有权 |
 | 记忆提示词 | UTF-16 键排序、前 40 条选择、每条 400 单位裁剪和提示文本构建 | 不可变快照缓存与磁盘内容摘要由 Kotlin 管理；原子写成功才更新缓存，字符串不经过有损 UTF-8 往返 |
 | 用量聚合 | 增量 day/model/dailyModel 合并、全局 totals/coverage/deletedCoverage、窗口汇总排序、会话连续 run 统计 | 日期、source/generation 与 byte 水位、归档和事务提交留在 Kotlin；保留 known/unreported、负值及 JVM 整数规则 |
-| 上下文组装 | 按批次生成历史重放描述、摘要正文与工具说明 | 保留原消息/图片引用；普通正文按引用复用，仅包装文本生成 UTF-16；完整准备后再追加 wire 与来源 span |
+| 上下文组装 | 按批次生成历史重放描述、摘要正文、工具说明和上下文压缩专用文本 | 保留原消息/图片引用；工具摘要输出沿用 2000 个 UTF-16 单位截取和原文案；压缩切点、checkpoint 与提交由 Kotlin 管理 |
 | Skill 文档与目录 | frontmatter 范围与 name/description、固定单行清洗、整批 catalog 文本 | 文件发现/排序、安装、enabled/origin、路径与执行校验保留；敏感 Regex/Unicode 空白和超预算整操作回 Kotlin |
 | 列表分区与顺序 | 大批次置顶/普通分区、稳定时间顺序和顺序表过滤，返回原 source 索引 | UI 与原对象留 Kotlin；小批次先走原路径，自定义 Set 的会员语义保留；不改变原视觉、重复 ID 与手动顺序规则 |
 
