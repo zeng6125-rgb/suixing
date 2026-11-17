@@ -52,6 +52,9 @@ jobs:
             i686-linux-android x86_64-linux-android
           cargo +1.100.0 fetch --locked --manifest-path app/src/main/rust/suixing-search/Cargo.toml
 
+      - name: Rust terminal tests
+        run: cargo +1.100.0 test --release --locked --offline --manifest-path app/src/main/rust/suixing-search/Cargo.toml terminal::tests
+
       - name: Unit tests
         run: ./gradlew :app:testReleaseUnitTest --no-daemon --stacktrace
 

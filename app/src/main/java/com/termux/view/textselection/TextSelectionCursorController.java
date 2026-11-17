@@ -7,7 +7,6 @@ import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
 import android.graphics.Rect;
-import android.text.TextUtils;
 import android.view.ActionMode;
 import android.view.InputDevice;
 import android.view.Menu;
@@ -18,7 +17,6 @@ import android.view.View;
 import androidx.annotation.Nullable;
 
 import com.termux.terminal.TerminalBuffer;
-import com.termux.terminal.WcWidth;
 import com.suixing.agent.R;
 import com.termux.view.TerminalView;
 
@@ -303,34 +301,7 @@ public class TextSelectionCursorController implements CursorController {
     }
 
     private int getValidCurX(TerminalBuffer screen, int cy, int cx) {
-        String line = screen.getSelectedText(0, cy, cx, cy);
-        if (!TextUtils.isEmpty(line)) {
-            int col = 0;
-            for (int i = 0, len = line.length(); i < len; i++) {
-                char ch1 = line.charAt(i);
-                if (ch1 == 0) {
-                    break;
-                }
-
-                int wc;
-                if (Character.isHighSurrogate(ch1) && i + 1 < len) {
-                    char ch2 = line.charAt(++i);
-                    wc = WcWidth.width(Character.toCodePoint(ch1, ch2));
-                } else {
-                    wc = WcWidth.width(ch1);
-                }
-
-                final int cend = col + wc;
-                if (cx > col && cx < cend) {
-                    return cend;
-                }
-                if (cend == col) {
-                    return col;
-                }
-                col = cend;
-            }
-        }
-        return cx;
+        return screen.validCursorX(cx, cy);
     }
 
     public void decrementYTextSelectionCursors(int decrement) {

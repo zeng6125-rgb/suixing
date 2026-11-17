@@ -58,6 +58,55 @@ import kotlin.coroutines.suspendCoroutine
 
 /** Run the drawer's actual pointerInput handlers with finite events, without Android windows. */
 class DrawerPointerLoopTest {
+    @Test fun `a slow continuing drag still opens after horizontal content reaches its start`() {
+        var childOffset = 32f
+        withPointerLoop(DrawerValue.Closed, shield = false, includeHost = true,
+            childOrientation = Orientation.Horizontal,
+            childCanScroll = { delta -> delta < 0f || childOffset > 0f },
+            childDrag = { delta -> childOffset = (childOffset - delta).coerceAtLeast(0f) }, events = listOf(
+                event(change(0L, 100f, 100f, previousPressed = false)),
+                event(change(16L, 140f, 100f)),
+                event(change(640L, 240f, 140f)),
+                event(change(704L, 340f, 240f)),
+            )) {
+            assertEquals(0f, childOffset, 0.0001f)
+            assertEquals("scrolling must not turn into a long-press owner mid-drag",
+                200f / 300f, state.visualProgress.value, 0.0001f)
+        }
+    }
+
+    @Test fun `a continuing drag opens the drawer after horizontal content reaches its start`() {
+        var childOffset = 32f
+        withPointerLoop(DrawerValue.Closed, shield = false, includeHost = true,
+            childOrientation = Orientation.Horizontal,
+            childCanScroll = { delta -> delta < 0f || childOffset > 0f },
+            childDrag = { delta -> childOffset = (childOffset - delta).coerceAtLeast(0f) }, events = listOf(
+                event(change(0L, 100f, 100f, previousPressed = false)),
+                event(change(16L, 140f, 100f)),
+                event(change(32L, 240f, 140f)),
+                event(change(48L, 340f, 240f)),
+            )) {
+            assertEquals(0f, childOffset, 0.0001f)
+            assertEquals("the remaining drag at the scroll boundary must reach the drawer",
+                200f / 300f, state.visualProgress.value, 0.0001f)
+        }
+    }
+
+    @Test fun `a slight vertical start does not discard the later dominant horizontal drag`() {
+        var childScroll = 0f
+        withPointerLoop(DrawerValue.Closed, shield = false, includeHost = true,
+            childOrientation = Orientation.Vertical, childDrag = { childScroll += it }, events = listOf(
+                event(change(0L, 100f, 100f, y = 100f, previousY = 100f, previousPressed = false)),
+                event(change(16L, 104f, 100f, y = 112f, previousY = 100f)),
+                event(change(32L, 204f, 104f, y = 113f, previousY = 112f)),
+                event(change(48L, 304f, 204f, y = 114f, previousY = 113f)),
+            )) {
+            assertTrue("initial vertical scrolling must still be delivered", childScroll > 0f)
+            assertEquals("later horizontal movement must be able to open the drawer",
+                200f / 300f, state.visualProgress.value, 0.0001f)
+        }
+    }
+
     @Test fun `a cancelled close at zero lets the next deliberate swipe open`() =
         withPointerLoop(DrawerValue.Open, shield = false, events = listOf(
             event(change(0L, 100f, 100f, previousPressed = false)),

@@ -12,7 +12,6 @@ import com.termux.terminal.TerminalBuffer;
 import com.termux.terminal.TerminalEmulator;
 import com.termux.terminal.TerminalRow;
 import com.termux.terminal.TextStyle;
-import com.termux.terminal.WcWidth;
 
 /**
  * Renderer of a {@link TerminalEmulator} into a {@link Canvas}.
@@ -102,7 +101,7 @@ public final class TerminalRenderer {
                 final boolean charIsHighsurrogate = Character.isHighSurrogate(charAtIndex);
                 final int charsForCodePoint = charIsHighsurrogate ? 2 : 1;
                 final int codePoint = charIsHighsurrogate ? Character.toCodePoint(charAtIndex, line[currentCharIndex + 1]) : charAtIndex;
-                final int codePointWcWidth = WcWidth.width(codePoint);
+                final int codePointWcWidth = lineObject.widthAt(currentCharIndex);
                 final boolean insideCursor = (cursorX == column || (codePointWcWidth == 2 && cursorX == column + 1));
                 final boolean insideSelection = column >= selx1 && column <= selx2;
                 final long style = lineObject.getStyle(column);
@@ -141,7 +140,7 @@ public final class TerminalRenderer {
                 measuredWidthForRun += measuredCodePointWidth;
                 column += codePointWcWidth;
                 currentCharIndex += charsForCodePoint;
-                while (currentCharIndex < charsUsedInLine && WcWidth.width(line, currentCharIndex) <= 0) {
+                while (currentCharIndex < charsUsedInLine && lineObject.widthAt(currentCharIndex) <= 0) {
                     // Eat combining chars so that they are treated as part of the last non-combining code point,
                     // instead of e.g. being considered inside the cursor in the next run.
                     currentCharIndex += Character.isHighSurrogate(line[currentCharIndex]) ? 2 : 1;

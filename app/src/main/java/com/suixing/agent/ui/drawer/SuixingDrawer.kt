@@ -451,7 +451,7 @@ internal fun SuixingDrawer(
                         while (true) {
                             val event = awaitPointerEvent(PointerEventPass.Initial)
                             val change = event.changes.firstOrNull { it.id == pointerId } ?: break
-                            val childFirst = !isDrag &&
+                            val childFirst = !isDrag && !childOwnsGesture &&
                                 change.uptimeMillis - down.uptimeMillis >= viewConfiguration.longPressTimeoutMillis
                             if (childFirst) {
                                 // Long-press selection may already own movement in a descendant.
@@ -466,22 +466,43 @@ internal fun SuixingDrawer(
                             horizontal += dx
                             vertical += change.position.y - change.previousPosition.y
                             if (!isDrag && maxOf(abs(horizontal), abs(vertical)) > viewConfiguration.touchSlop) {
-                                if (abs(vertical) >= abs(horizontal)) {
-                                    childOwnsGesture = true
-                                    break
-                                }
-                                if (state.priorityPointerId == down.id &&
-                                    state.priorityCanScroll?.invoke(horizontal) == true
+                                if (abs(vertical) >= abs(horizontal) &&
+                                    abs(vertical) > viewConfiguration.touchSlop * 2f
                                 ) {
                                     childOwnsGesture = true
                                     break
                                 }
-                                isDrag = true
-                                if (ownedSession == null) {
-                                    appliedHorizontal = if (horizontal > 0f) viewConfiguration.touchSlop
-                                        else -viewConfiguration.touchSlop
-                                    ownedSession = state.beginGesture()
-                                    ownedGeneration = dragAccumulator.begin(state.visualProgress.value, panelPx)
+                                val childCanScroll = state.priorityPointerId == down.id &&
+                                    state.priorityCanScroll?.invoke(dx) == true
+                                if (abs(vertical) >= abs(horizontal) || childCanScroll ||
+                                    (childOwnsGesture && dx == 0f)
+                                ) {
+                                    childOwnsGesture = true
+                                } else {
+                                    val takingOverChild = childOwnsGesture
+                                    childOwnsGesture = false
+                                    isDrag = true
+                                    if (ownedSession == null) {
+                                        appliedHorizontal = if (takingOverChild) horizontal - dx
+                                            else if (horizontal > 0f) viewConfiguration.touchSlop
+                                            else -viewConfiguration.touchSlop
+                                        ownedSession = state.beginGesture()
+                                        ownedGeneration = dragAccumulator.begin(state.visualProgress.value, panelPx)
+                                    }
+                                }
+                            }
+                            if (childOwnsGesture && !isDrag) {
+                                val session = ownedSession
+                                val generation = ownedGeneration
+                                ownedSession = null
+                                ownedGeneration = null
+                                if (session != null && generation != null) {
+                                    val release = dragAccumulator.finish(generation)
+                                    val stillOwned = state.finishGesture(session)
+                                    if (release != null && stillOwned && interruptedMotion != null) {
+                                        settle(session, interruptedMotion.target, interruptedVelocity * panelPx,
+                                            release, interruptedMotion.spec)
+                                    }
                                 }
                             }
                             val session = ownedSession
@@ -516,7 +537,6 @@ internal fun SuixingDrawer(
                                 awaitPointerEvent(PointerEventPass.Final)
                                 if (change.isConsumed) {
                                     childOwnsGesture = true
-                                    break
                                 }
                             }
                         }

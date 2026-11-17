@@ -677,6 +677,7 @@ mod request_budget;
 mod skill_catalog;
 mod sse_stream;
 mod text_read;
+mod terminal;
 mod transcript_plan;
 mod usage_aggregation;
 mod usage_projection;

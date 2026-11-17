@@ -14,7 +14,7 @@
 - 支持技能（Skill）：把写好的操作手册放进手机，模型需要时自己读
 - 支持插件（Plugin）：安装一个 zip 就能带来新工具、新的上下文注入与新的执行闸门
 - 目标与斜杠指令：输入 `/goal 一句话目标`，助手会在当前会话持续推进并记录进度，直到确认完成、遇到卡点或被停止。`/goal` 查看，`/goal resume` 继续，`/goal clear` 清除。输入 `/` 可找其他工具，直接调用仍受审批档与助手禁用表约束。
-- 当前源码版本：**0.9.6**（`versionCode` 734）
+- 当前源码版本：**0.9.7**（`versionCode` 735）
 
 ## 界面与设计
 
@@ -259,9 +259,9 @@ rustup target add --toolchain 1.100.0 aarch64-linux-android armv7-linux-androide
 cargo +1.100.0 fetch --locked --manifest-path app/src/main/rust/suixing-search/Cargo.toml
 ```
 
-Rust crate 保留目录名 `app/src/main/rust/suixing-search`，承载下列核心模块；第三方依赖的确切版本与校验由 `Cargo.lock` 锁定，许可证见[第三方声明](THIRD_PARTY_NOTICES.md)。CMake 为四种 ABI 构建同一份 Rust 静态归档，再链接到 `libsuixing_search.so` 和 `libsuixing_terminal.so`；C++ 承担 JNI 桥接和 Termux 终端仿真核心，Rust 中间产物留在构建目录。
+Rust crate 保留目录名 `app/src/main/rust/suixing-search`，承载下列核心模块；第三方依赖的确切版本与校验由 `Cargo.lock` 锁定，许可证见[第三方声明](THIRD_PARTY_NOTICES.md)。CMake 为四种 ABI 构建同一份 Rust 静态归档，再链接到 `libsuixing_search.so` 和 `libsuixing_terminal.so`；计算与终端仿真核心使用 Rust，C++ 承担 JNI 桥接，Rust 中间产物留在构建目录。
 
-| 入口 | Rust / C++ 执行范围 | Kotlin / Android 边界与兼容处理 |
+| 入口 | Rust 执行范围 | Kotlin / Android 边界与兼容处理 |
 |---|---|---|
 | `grep_files` | 普通文本的批量字面搜索；支持区分大小写，以及查询和文件均为 ASCII 时的忽略大小写 | 正则、Unicode 忽略大小写、无效 UTF-8、读取条件变化与不可无损表示的输入交回 Kotlin；权限、候选遍历和输出格式由 Kotlin 持有 |
 | `find_files` | 深度优先目录遍历、访问数 / 深度 / 命中数 / 时间预算与 ASCII 名称、glob 匹配 | Unicode 和特殊 glob 谓词回调 Kotlin；无法表示的系统文件名或过大响应使用 Kotlin 后备；权限、根路径解析与结果格式保留 |
@@ -271,7 +271,7 @@ Rust crate 保留目录名 `app/src/main/rust/suixing-search`，承载下列核�
 | 会话 JSONL | Rust 在已提交 FD 区间分块扫描、批量解码 JSON 树、查找消息 ID 与轮次切窗 | Kotlin serializer 保留字段默认值和类型语义；原扫描探测范围、提交边界与损坏记录报错保留；元数据、追加/换代和恢复由 Kotlin 管理 |
 | 转录分组与分页 | Rust 选择回答分支、分配工具与插话归属、生成气泡分组和分页索引 | 正文、图片与原消息引用留在 Kotlin；时间标签、展示对象、阅读位置与 Compose 状态由 Kotlin 持有 |
 | 交互式 PTY | Android PTY 创建、FD 读写与 poll、窗口尺寸、进程组信号、等待退出和关闭 | JNI 转换参数、字节及错误；终端会话、前后台服务、页面与权限保留 Kotlin，加载或系统调用失败按终端错误路径处理 |
-| 终端 VT/ANSI | C++ 字节解码、控制序列、主/备用屏、滚屏缓冲、尺寸重排与行样式存储；统一样式行保留一个值 | 平台 Unicode 分类、键盘协议和回调保留 Java；现有 Canvas 绘制只缓存可见行，移除会话记录时释放原生缓冲 |
+| 终端 VT/ANSI | Rust 字节解码、控制序列、主/备用屏、滚屏缓冲、尺寸重排、选词、字符宽度、粘贴与鼠标协议；统一样式行保留一个值 | 平台 Unicode 分类、键盘适配和回调保留 Java；Canvas 使用批量可见行及宽度缓存，移除会话记录时释放原生缓冲 |
 | `read_file` / `edit_file` | 有界文本读取、行裁剪与 UTF-16 revision；精确匹配、非重叠替换及结果大小检查 | 读取保持同一个已打开 FD；Unicode 不兼容读取回同 FD 后备；权限、乐观 revision 检查、原用户文件写入与文件活动记录由 Kotlin 执行 |
 | 共享 JSON 解码 | 对象、数组和原始值的受限原生 JSON 树解析，接入会话、设置、用量、插件和其它存储读取 | 原 Kotlin serializer / Json 配置仍决定字段默认值、枚举、未知字段与类型；不兼容语法、Unicode 或超预算时使用原解析器 |
 | JSON 文档编码 | 整份文档的结构遍历、字符串转义、UTF-8 长度与有界分块输出；HTTP 与 compact JSON 字节存储共用 | Kotlin 构建类型化 JsonElement 与字符串引用池；Base64 通过引用分段使用。网络、IO 异常及原子提交留在 Kotlin；prettyPrint 和 DataStore 字符串保留原格式 |
