@@ -661,12 +661,15 @@ internal fun Composer(
             // 多附件一排：每张 chip 可单独删（onRemoveAttachment 报下标），横向可滚 —— 不限张数时
             // 一排装不下也不能把 composer 撑高。
             if (attachments.isNotEmpty()) {
+                val attachmentScroll = rememberScrollState()
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(start = STEER_QUEUE_INSET)
-                        .drawerScrollPriority()
-                        .horizontalScroll(rememberScrollState()),
+                        .drawerScrollPriority { delta ->
+                            if (delta < 0f) attachmentScroll.canScrollForward else attachmentScroll.canScrollBackward
+                        }
+                        .horizontalScroll(attachmentScroll),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     attachments.forEachIndexed { index, item ->

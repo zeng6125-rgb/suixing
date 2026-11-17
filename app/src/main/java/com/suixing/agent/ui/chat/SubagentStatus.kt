@@ -3,6 +3,7 @@ package com.suixing.agent.ui.chat
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -34,8 +35,11 @@ internal fun SubagentInlineQueue(chatId: String, runId: String, running: Boolean
         SubagentRecords.summaries(chatId).map { subagentQueueFor(it, runId, running) }.distinctUntilChanged()
     }.collectAsStateWithLifecycle(initialValue = emptyList())
     if (queue.isEmpty()) return
+    val queueScroll = rememberLazyListState()
     Column(Modifier.fillMaxWidth().padding(horizontal = STEER_QUEUE_INSET)) {
-        LazyRow(modifier = Modifier.drawerScrollPriority(),
+        LazyRow(state = queueScroll, modifier = Modifier.drawerScrollPriority { delta ->
+            if (delta < 0f) queueScroll.canScrollForward else queueScroll.canScrollBackward
+        },
             horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
             items(queue, key = { it.id }, contentType = { "subagent-queue" }) { task ->
                 Surface(onClick = { onSelect(task.id) }, shape = RoundedCornerShape(14.dp),

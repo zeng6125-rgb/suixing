@@ -58,6 +58,77 @@ import kotlin.coroutines.suspendCoroutine
 
 /** Run the drawer's actual pointerInput handlers with finite events, without Android windows. */
 class DrawerPointerLoopTest {
+    @Test fun `a cancelled close at zero lets the next deliberate swipe open`() =
+        withPointerLoop(DrawerValue.Open, shield = false, events = listOf(
+            event(change(0L, 100f, 100f, previousPressed = false)),
+            event(change(64L, 140f, 100f)),
+            event(change(128L, 180f, 140f)),
+            event(change(192L, 220f, 180f)),
+            event(change(288L, 220f, 220f, pressed = false)),
+        ), beforeInput = {
+            val gesture = state.beginGesture()
+            state.applyGestureFrame(gesture, 0f)
+            state.cancelGesture(gesture)
+        }) {
+            frames(90)
+            assertTrue("the visible closed endpoint must allow the next swipe to open", state.isOpen)
+            assertEquals(1f, state.visualProgress.value, 0.0001f)
+        }
+
+    @Test fun `a cancelled opening at one lets the next deliberate swipe close`() =
+        withPointerLoop(DrawerValue.Closed, shield = true, includeHost = true, events = listOf(
+            event(change(0L, 350f, 350f, previousPressed = false)),
+            event(change(64L, 310f, 350f)),
+            event(change(128L, 270f, 310f)),
+            event(change(192L, 230f, 270f)),
+            event(change(288L, 230f, 230f, pressed = false)),
+        ), beforeInput = {
+            val gesture = state.beginGesture()
+            state.applyGestureFrame(gesture, 1f)
+            state.cancelGesture(gesture)
+        }) {
+            frames(90)
+            assertEquals("the visible open endpoint must allow the next swipe to close",
+                0f, state.visualProgress.value, 0.0001f)
+        }
+
+    @Test fun `a horizontal scroller at its start keeps an inward drag`() {
+        var childScroll = 0f
+        withPointerLoop(DrawerValue.Closed, shield = false, includeHost = true,
+            childOrientation = Orientation.Horizontal, childCanScroll = { it < 0f },
+            childDrag = { childScroll += it }, events = listOf(
+                event(change(0L, 180f, 180f, previousPressed = false)),
+                event(change(16L, 140f, 180f)),
+                event(change(32L, 100f, 140f)),
+                event(change(48L, 100f, 100f, pressed = false)),
+            )) {
+            assertEquals(0f, state.visualProgress.value, 0.0001f)
+            assertEquals(-72f, childScroll, 0.0001f)
+        }
+    }
+
+    @Test fun `a code block without horizontal overflow lets the drawer move`() =
+        withPointerLoop(DrawerValue.Closed, shield = false, includeHost = true,
+            childOrientation = Orientation.Horizontal, childCanScroll = { false }, events = listOf(
+                event(change(0L, 100f, 100f, previousPressed = false)),
+                event(change(16L, 140f, 100f)),
+                event(change(32L, 180f, 140f)),
+            )) {
+            assertEquals("a non-scrolling code block must not trap the horizontal drag",
+                72f / 300f, state.visualProgress.value, 0.0001f)
+        }
+
+    @Test fun `a horizontal scroller at its start yields an outward drag to the drawer`() =
+        withPointerLoop(DrawerValue.Closed, shield = false, includeHost = true,
+            childOrientation = Orientation.Horizontal, childCanScroll = { it < 0f }, events = listOf(
+                event(change(0L, 100f, 100f, previousPressed = false)),
+                event(change(16L, 140f, 100f)),
+                event(change(32L, 180f, 140f)),
+            )) {
+            assertEquals("pulling past the content's start must reach the drawer",
+                72f / 300f, state.visualProgress.value, 0.0001f)
+        }
+
     @Test fun `a horizontal decision wins a diagonal move before the vertical child`() {
         var childScroll = 0f
         withPointerLoop(DrawerValue.Closed, shield = false, includeHost = true,
@@ -370,6 +441,7 @@ class DrawerPointerLoopTest {
         includeHost: Boolean = false,
         rowClick: (() -> Unit)? = null,
         childOrientation: Orientation? = null,
+        childCanScroll: (Float) -> Boolean = { true },
         childDrag: (Float) -> Unit = {},
         block: suspend Harness.() -> Unit,
     ) = runBlocking {
@@ -404,7 +476,7 @@ class DrawerPointerLoopTest {
                         }, content = {
                             if (childOrientation != null) {
                                 val modifier = if (childOrientation == Orientation.Horizontal)
-                                    Modifier.drawerScrollPriority() else Modifier
+                                    Modifier.drawerScrollPriority(childCanScroll) else Modifier
                                 Box(modifier.pointerInput(childOrientation) {
                                     when (childOrientation) {
                                         Orientation.Horizontal -> detectHorizontalDragGestures { _, amount ->

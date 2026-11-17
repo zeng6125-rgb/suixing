@@ -46,11 +46,11 @@ jobs:
         run: |
           set -euo pipefail
           command -v rustup >/dev/null 2>&1 || { echo "rustup is required on the Android runner." >&2; exit 1; }
-          rustup toolchain install 1.98.0 --profile minimal
-          rustup target add --toolchain 1.98.0 \
+          rustup toolchain install 1.100.0 --profile minimal
+          rustup target add --toolchain 1.100.0 \
             aarch64-linux-android armv7-linux-androideabi \
             i686-linux-android x86_64-linux-android
-          cargo +1.98.0 fetch --locked --manifest-path app/src/main/rust/suixing-search/Cargo.toml
+          cargo +1.100.0 fetch --locked --manifest-path app/src/main/rust/suixing-search/Cargo.toml
 
       - name: Unit tests
         run: ./gradlew :app:testReleaseUnitTest --no-daemon --stacktrace

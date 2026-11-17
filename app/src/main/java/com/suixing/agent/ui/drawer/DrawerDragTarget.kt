@@ -14,7 +14,7 @@ internal fun drawerDragTarget(
         abs(velocityPx) > 800f -> velocityPx > 0f
         startProgress > 0f && startProgress < 1f ->
             if (progress == startProgress) progress >= 0.5f else progress > startProgress
-        wasOpen -> progress >= 0.75f
+        startProgress == 1f -> progress >= 0.75f
         else -> progress > 0.25f
     }
     return if (open) DrawerValue.Open else DrawerValue.Closed

@@ -71,9 +71,9 @@ GPL 要求分发二进制时提供对应源码的获取途径。上面的上游�
 
 本项目的 Rust crate 位于 `app/src/main/rust/suixing-search`，源码依本仓库 MIT 许可发布，承载文件内容搜索、目录查找、文本读取与编辑、已提交 JSONL 用量只读投影、共享 JSON 解码与文档编码、上下文预算与运行规则、用量聚合、历史重放与摘要组装、Skill 文档与列表顺序、记忆提示词、历史 Markdown 冷解析及 Android PTY。CMake 为每种 ABI 构建一个 Rust 静态归档，链接到 `libsuixing_search.so` 与 `libsuixing_terminal.so`；C++ 提供 JNI 参数、字节和异常桥接。
 
-两个 JNI 库使用固定 Rust 1.98.0 的标准库。Rust 标准库默认许可为 `Apache-2.0 OR MIT`，版权归 Rust Project Developers 及各原作者。固定上游源码为 https://github.com/rust-lang/rust/tree/1.98.0/library 。
+两个 JNI 库使用固定 Rust 1.100.0 的标准库。Rust 标准库默认许可为 `Apache-2.0 OR MIT`，版权归 Rust Project Developers 及各原作者。固定上游源码为 https://github.com/rust-lang/rust/tree/1.100.0/library 。
 
-原工具链中的标准库专用 `COPYRIGHT-library.html` 与相邻 12 份许可正文已原样保留在 `app/src/main/assets/licenses/rust-1.98.0/`，随 APK 提供作者归属、Unicode 数据及相关第三方声明。该上游清单包含跨平台和构建时条目，并不表示其中每个组件都链接进 Android 原生库；它也不以构建工具 Cargo 或整套编译器的许可清单代替运行库声明。
+原工具链中的标准库专用 `COPYRIGHT-library.html` 与相邻 12 份许可正文已原样保留在 `app/src/main/assets/licenses/rust-1.100.0/`，随 APK 提供作者归属、Unicode 数据及相关第三方声明。该上游清单包含跨平台和构建时条目，并不表示其中每个组件都链接进 Android 原生库；它也不以构建工具 Cargo 或整套编译器的许可清单代替运行库声明。
 
 ## 锁定的 Rust crate 依赖
 

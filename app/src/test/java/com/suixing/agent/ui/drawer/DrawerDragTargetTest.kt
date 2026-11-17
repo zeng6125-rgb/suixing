@@ -5,6 +5,14 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 
 class DrawerDragTargetTest {
+    @Test fun `a closed visual endpoint opens even when the settled anchor was open`() {
+        assertEquals(DrawerValue.Open, drawerDragTarget(true, 0.4f, 0f, startProgress = 0f))
+    }
+
+    @Test fun `an open visual endpoint closes even when the settled anchor was closed`() {
+        assertEquals(DrawerValue.Closed, drawerDragTarget(false, 0.6f, 0f, startProgress = 1f))
+    }
+
     @Test fun `an open drawer closes after a deliberate slow swipe past a quarter of its width`() {
         assertEquals(DrawerValue.Closed, drawerDragTarget(true, 0.6f, 0f))
         assertEquals(DrawerValue.Closed, drawerDragTarget(true, 0.6f, -400f))

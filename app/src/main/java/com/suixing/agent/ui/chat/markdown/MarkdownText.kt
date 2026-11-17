@@ -1854,7 +1854,11 @@ private fun CodeBlock(block: MdBlock.Code, palette: MarkdownPalette, cursor: Boo
                 annotated = remember(block.code, cursor) { codeBlockAnnotatedText(block.code, cursor) },
                 caretColor = palette.linkColor,
                 cursor = cursor,
-                modifier = Modifier.drawerScrollPriority().horizontalScroll(rememberScrollState()),
+                modifier = rememberScrollState().let { scroll ->
+                    Modifier.drawerScrollPriority { delta ->
+                        if (delta < 0f) scroll.canScrollForward else scroll.canScrollBackward
+                    }.horizontalScroll(scroll)
+                },
                 // bodySmall is already 13sp monospace-sized; only the leading differs,
                 // and it is scaled off the font size so 字号 still applies.
                 style = MaterialTheme.typography.bodySmall.copy(

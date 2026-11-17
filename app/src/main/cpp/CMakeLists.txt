@@ -6,7 +6,7 @@ target_compile_features(suixing_terminal PRIVATE cxx_std_17)
 target_compile_options(suixing_terminal PRIVATE -Wall -Wextra -Werror -fwrapv)
 
 # The JNI libraries share one locked Rust archive, built once per ABI.
-set(SX_RUST_TOOLCHAIN "1.98.0")
+set(SX_RUST_TOOLCHAIN "1.100.0")
 get_filename_component(SX_RUST_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../rust/suixing-search" ABSOLUTE)
 if(ANDROID_ABI STREQUAL "arm64-v8a")
     set(SX_RUST_TARGET "aarch64-linux-android")

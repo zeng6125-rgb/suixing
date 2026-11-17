@@ -14,7 +14,7 @@
 - 支持技能（Skill）：把写好的操作手册放进手机，模型需要时自己读
 - 支持插件（Plugin）：安装一个 zip 就能带来新工具、新的上下文注入与新的执行闸门
 - 目标与斜杠指令：输入 `/goal 一句话目标`，助手会在当前会话持续推进并记录进度，直到确认完成、遇到卡点或被停止。`/goal` 查看，`/goal resume` 继续，`/goal clear` 清除。输入 `/` 可找其他工具，直接调用仍受审批档与助手禁用表约束。
-- 当前源码版本：**0.9.5**（`versionCode` 733）
+- 当前源码版本：**0.9.6**（`versionCode` 734）
 
 ## 界面与设计
 
@@ -250,13 +250,13 @@ description: 打开某 App 完成签到，用户说「签到」时使用
 
 需要 **JDK 17** 与 Android SDK（`platforms;android-37`，以及与它配套的 build-tools 37.x）。SDK 路径写在 `local.properties` 的 `sdk.dir`（该文件不入库）。
 
-原生构建固定 **NDK 28.2.13676358**、**CMake 3.22.1** 和 **Rust 1.98.0**。先独立准备工具链与锁定依赖缓存；CMake 会检查目标是否已安装，Cargo 在 Android 构建中使用 `--release --locked --offline`，不会自动下载 Rust 或依赖：
+原生构建固定 **NDK 28.2.13676358**、**CMake 3.22.1** 和 **Rust 1.100.0**。先独立准备工具链与锁定依赖缓存；CMake 会检查目标是否已安装，Cargo 在 Android 构建中使用 `--release --locked --offline`，不会自动下载 Rust 或依赖：
 
 ```bash
 sdkmanager "ndk;28.2.13676358" "cmake;3.22.1"
-rustup toolchain install 1.98.0 --profile minimal
-rustup target add --toolchain 1.98.0 aarch64-linux-android armv7-linux-androideabi x86_64-linux-android i686-linux-android
-cargo +1.98.0 fetch --locked --manifest-path app/src/main/rust/suixing-search/Cargo.toml
+rustup toolchain install 1.100.0 --profile minimal
+rustup target add --toolchain 1.100.0 aarch64-linux-android armv7-linux-androideabi x86_64-linux-android i686-linux-android
+cargo +1.100.0 fetch --locked --manifest-path app/src/main/rust/suixing-search/Cargo.toml
 ```
 
 Rust crate 保留目录名 `app/src/main/rust/suixing-search`，承载下列核心模块；第三方依赖的确切版本与校验由 `Cargo.lock` 锁定，许可证见[第三方声明](THIRD_PARTY_NOTICES.md)。CMake 为四种 ABI 构建同一份 Rust 静态归档，再链接到 `libsuixing_search.so` 和 `libsuixing_terminal.so`；C++ 承担 JNI 桥接和 Termux 终端仿真核心，Rust 中间产物留在构建目录。

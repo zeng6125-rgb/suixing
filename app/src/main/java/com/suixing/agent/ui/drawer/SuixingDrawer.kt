@@ -25,6 +25,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.structuralEqualityPolicy
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Modifier
@@ -149,6 +150,7 @@ internal class SuixingDrawerState(initialValue: DrawerValue) {
     internal var motion: DrawerMotion? = null
         private set
     internal var priorityPointerId: PointerId? = null
+    internal var priorityCanScroll: ((Float) -> Boolean)? = null
 
     /** Navigation observes ownership changes, not pointer positions. */
     internal var gestureSession by mutableStateOf<DrawerGestureSession?>(null)
@@ -314,18 +316,23 @@ internal class SuixingDrawerState(initialValue: DrawerValue) {
 
 private val LocalDrawerGestureState = staticCompositionLocalOf<SuixingDrawerState?> { null }
 
-/** Existing horizontal scrollers keep gestures that start inside their bounds. */
+/** Horizontal content keeps a drag only when it can scroll in the finger's direction. */
 @Composable
-internal fun Modifier.drawerScrollPriority(): Modifier {
+internal fun Modifier.drawerScrollPriority(canScroll: (Float) -> Boolean): Modifier {
     val state = LocalDrawerGestureState.current ?: return this
+    val canScrollNow by rememberUpdatedState(canScroll)
     return pointerInput(state) {
         awaitEachGesture {
             val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
             state.priorityPointerId = down.id
+            state.priorityCanScroll = { delta -> canScrollNow(delta) }
             try {
                 while (currentEvent.changes.any { it.pressed }) awaitPointerEvent(PointerEventPass.Final)
             } finally {
-                if (state.priorityPointerId == down.id) state.priorityPointerId = null
+                if (state.priorityPointerId == down.id) {
+                    state.priorityPointerId = null
+                    state.priorityCanScroll = null
+                }
             }
         }
     }
@@ -423,7 +430,8 @@ internal fun SuixingDrawer(
                     val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
                     // Let descendants register their DOWN before choosing the gesture owner.
                     awaitPointerEvent(PointerEventPass.Main)
-                    if (state.priorityPointerId == down.id) return@awaitEachGesture
+                    if (state.priorityPointerId == down.id && state.priorityCanScroll == null)
+                        return@awaitEachGesture
                     val interruptedMotion = state.motion
                     val interruptedVelocity = state.progress.velocity
                     var dismissKeyboardOnOpen = !state.homeShieldActive
@@ -459,6 +467,12 @@ internal fun SuixingDrawer(
                             vertical += change.position.y - change.previousPosition.y
                             if (!isDrag && maxOf(abs(horizontal), abs(vertical)) > viewConfiguration.touchSlop) {
                                 if (abs(vertical) >= abs(horizontal)) {
+                                    childOwnsGesture = true
+                                    break
+                                }
+                                if (state.priorityPointerId == down.id &&
+                                    state.priorityCanScroll?.invoke(horizontal) == true
+                                ) {
                                     childOwnsGesture = true
                                     break
                                 }
@@ -581,6 +595,7 @@ internal fun SuixingDrawer(
                             val down = awaitFirstDown(requireUnconsumed = false)
                             down.consume()
                             state.priorityPointerId = down.id
+                            state.priorityCanScroll = null
                             val tracker = DrawerPointerVelocity()
                             tracker.trackDrawerPointer(down)
                             var pointerId = down.id
@@ -677,7 +692,10 @@ internal fun SuixingDrawer(
                                 val generation = ownedGeneration
                                 ownedSession = null
                                 ownedGeneration = null
-                                if (state.priorityPointerId == down.id) state.priorityPointerId = null
+                                if (state.priorityPointerId == down.id) {
+                                    state.priorityPointerId = null
+                                    state.priorityCanScroll = null
+                                }
                                 cancelOwnedDrawerDrag(state, dragAccumulator, session, generation)
                             }
                         }
