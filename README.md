@@ -418,7 +418,7 @@ GLM、OpenAI 兼容（自填地址）、本机 Ollama、Kimi、千问、硅基�
 ## 贡献者
 
 - [zeng6125-rgb](https://github.com/zeng6125-rgb)：项目维护与开发。
-- Codex：代码实现、问题修复与性能优化协作。
+- [Codex](https://github.com/apps/chatgpt-codex-connector)：代码实现、问题修复与性能优化协作。
 
 提交贡献记录见 [GitHub Contributors](https://github.com/zeng6125-rgb/suixing/graphs/contributors)。
 
