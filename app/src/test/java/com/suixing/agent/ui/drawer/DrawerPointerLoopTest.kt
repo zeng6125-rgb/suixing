@@ -58,6 +58,34 @@ import kotlin.coroutines.suspendCoroutine
 
 /** Run the drawer's actual pointerInput handlers with finite events, without Android windows. */
 class DrawerPointerLoopTest {
+    @Test
+    fun `the first horizontal segment follows the finger when the drawer takes ownership`() =
+        withPointerLoop(DrawerValue.Closed, shield = false, events = listOf(
+            event(change(0L, 100f, 100f, previousPressed = false)),
+            event(change(16L, 140f, 100f)),
+        )) {
+            assertEquals(
+                "taking ownership must not leave the touch-slop distance behind the finger",
+                40f * DRAWER_INPUT_GAIN / 300f,
+                state.visualProgress.value,
+                0.0001f,
+            )
+        }
+
+    @Test
+    fun `a deliberate drag uses the responsive input gain`() =
+        withPointerLoop(DrawerValue.Closed, shield = false, events = listOf(
+            event(change(0L, 100f, 100f, previousPressed = false)),
+            event(change(16L, 300f, 100f)),
+        )) {
+            assertEquals(
+                "the panel should cover 20 percent more distance than the finger",
+                240f / 300f,
+                state.visualProgress.value,
+                0.0001f,
+            )
+        }
+
     @Test fun `a slow continuing drag still opens after horizontal content reaches its start`() {
         var childOffset = 32f
         withPointerLoop(DrawerValue.Closed, shield = false, includeHost = true,
@@ -71,7 +99,7 @@ class DrawerPointerLoopTest {
             )) {
             assertEquals(0f, childOffset, 0.0001f)
             assertEquals("scrolling must not turn into a long-press owner mid-drag",
-                200f / 300f, state.visualProgress.value, 0.0001f)
+                200f * DRAWER_INPUT_GAIN / 300f, state.visualProgress.value, 0.0001f)
         }
     }
 
@@ -88,7 +116,7 @@ class DrawerPointerLoopTest {
             )) {
             assertEquals(0f, childOffset, 0.0001f)
             assertEquals("the remaining drag at the scroll boundary must reach the drawer",
-                200f / 300f, state.visualProgress.value, 0.0001f)
+                200f * DRAWER_INPUT_GAIN / 300f, state.visualProgress.value, 0.0001f)
         }
     }
 
@@ -103,7 +131,7 @@ class DrawerPointerLoopTest {
             )) {
             assertTrue("initial vertical scrolling must still be delivered", childScroll > 0f)
             assertEquals("later horizontal movement must be able to open the drawer",
-                200f / 300f, state.visualProgress.value, 0.0001f)
+                200f * DRAWER_INPUT_GAIN / 300f, state.visualProgress.value, 0.0001f)
         }
     }
 
@@ -164,7 +192,7 @@ class DrawerPointerLoopTest {
                 event(change(32L, 180f, 140f)),
             )) {
             assertEquals("a non-scrolling code block must not trap the horizontal drag",
-                72f / 300f, state.visualProgress.value, 0.0001f)
+                80f * DRAWER_INPUT_GAIN / 300f, state.visualProgress.value, 0.0001f)
         }
 
     @Test fun `a horizontal scroller at its start yields an outward drag to the drawer`() =
@@ -175,7 +203,7 @@ class DrawerPointerLoopTest {
                 event(change(32L, 180f, 140f)),
             )) {
             assertEquals("pulling past the content's start must reach the drawer",
-                72f / 300f, state.visualProgress.value, 0.0001f)
+                80f * DRAWER_INPUT_GAIN / 300f, state.visualProgress.value, 0.0001f)
         }
 
     @Test fun `a horizontal decision wins a diagonal move before the vertical child`() {
@@ -186,7 +214,8 @@ class DrawerPointerLoopTest {
                 event(change(16L, 140f, 100f, y = 120f, previousY = 100f)),
                 event(change(32L, 180f, 140f, pressed = false, y = 130f, previousY = 120f)),
             )) {
-            assertEquals("a mainly horizontal move must reach the drawer", 72f / 300f,
+            assertEquals("a mainly horizontal move must reach the drawer",
+                80f * DRAWER_INPUT_GAIN / 300f,
                 state.visualProgress.value, 0.0001f)
             assertEquals("the vertical child must not steal this drag", 0f, childScroll, 0.0001f)
         }
@@ -198,7 +227,8 @@ class DrawerPointerLoopTest {
             event(change(16L, 105f, 100f)),
             event(change(32L, 140f, 105f, pressed = false)),
         )) {
-            assertEquals("UP may be the first event to cross horizontal touch slop", 32f / 300f,
+            assertEquals("UP may be the first event to cross horizontal touch slop",
+                40f * DRAWER_INPUT_GAIN / 300f,
                 state.visualProgress.value, 0.0001f)
         }
 
@@ -296,7 +326,7 @@ class DrawerPointerLoopTest {
         }) {
             assertNotNull(state.gestureSession)
             frames(12)
-            assertEquals(caught + 4f / 300f, state.visualProgress.value, 0.0001f)
+            assertEquals(caught + 4f * DRAWER_INPUT_GAIN / 300f, state.visualProgress.value, 0.0001f)
         }
     }
 
@@ -354,7 +384,7 @@ class DrawerPointerLoopTest {
         }) {
             assertNotNull(state.gestureSession)
             frames(12)
-            assertEquals(caught + 4f / 300f, state.visualProgress.value, 0.0001f)
+            assertEquals(caught + 4f * DRAWER_INPUT_GAIN / 300f, state.visualProgress.value, 0.0001f)
         }
     }
 
@@ -374,7 +404,7 @@ class DrawerPointerLoopTest {
             event(change(32L, 140f, 120f)),
         )) {
             assertEquals("both moves must be visible without advancing the frame clock",
-                0.1066667f, state.visualProgress.value, 0.0001f)
+                40f * DRAWER_INPUT_GAIN / 300f, state.visualProgress.value, 0.0001f)
         }
 
     @Test fun `a short host fling includes the down sample`() =
@@ -394,7 +424,7 @@ class DrawerPointerLoopTest {
             event(change(32L, 140f, 110f, pressed = false)),
         )) {
             assertEquals("the release position must be applied before the first spring frame",
-                32f / 300f, state.visualProgress.value, 0.0001f)
+                40f * DRAWER_INPUT_GAIN / 300f, state.visualProgress.value, 0.0001f)
             frames(90)
             assertTrue("the final accelerating movement must produce an opening fling", state.isOpen)
         }
@@ -406,7 +436,7 @@ class DrawerPointerLoopTest {
             event(change(32L, 310f, 340f, pressed = false)),
         )) {
             assertEquals("the shield must retain the physical release position",
-                1f - 32f / 300f, state.visualProgress.value, 0.0001f)
+                1f - 40f * DRAWER_INPUT_GAIN / 300f, state.visualProgress.value, 0.0001f)
             frames(90)
             assertEquals("the final accelerating movement must produce a closing fling",
                 0f, state.visualProgress.value, 0.0001f)
@@ -452,7 +482,7 @@ class DrawerPointerLoopTest {
         )) {
             assertNotNull("the remaining finger still owns the drag", state.gestureSession)
             assertEquals("only finger motion, not the distance between fingers, moves the drawer",
-                0.8933333f, state.visualProgress.value, 0.0001f)
+                1f - 40f * DRAWER_INPUT_GAIN / 300f, state.visualProgress.value, 0.0001f)
         }
 
     private class Harness(

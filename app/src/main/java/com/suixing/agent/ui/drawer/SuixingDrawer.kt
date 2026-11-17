@@ -5,6 +5,7 @@ import androidx.compose.animation.core.AnimationSpec
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.systemGestureExclusion
 import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerId
@@ -30,6 +31,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.FrameRateCategory
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.preferredFrameRate
 import com.suixing.agent.ui.components.LocalDrawerBusy
 import androidx.compose.ui.graphics.graphicsLayer
@@ -316,6 +318,10 @@ internal class SuixingDrawerState(initialValue: DrawerValue) {
 
 private val LocalDrawerGestureState = staticCompositionLocalOf<SuixingDrawerState?> { null }
 
+/** Keep the 300dp sheet while shortening the physical travel needed to move it. */
+internal const val DRAWER_INPUT_GAIN = 1.2f
+private const val DRAWER_EDGE_EXCLUSION_DP = 32f
+
 /** Horizontal content keeps a drag only when it can scroll in the finger's direction. */
 @Composable
 internal fun Modifier.drawerScrollPriority(canScroll: (Float) -> Boolean): Modifier {
@@ -390,6 +396,7 @@ internal fun SuixingDrawer(
     content: @Composable () -> Unit,
 ) {
     val panelPx = with(LocalDensity.current) { DRAWER_SHEET_WIDTH.dp.toPx() }
+    val edgeExclusionPx = with(LocalDensity.current) { DRAWER_EDGE_EXCLUSION_DP.dp.toPx() }
     val focusManager = LocalFocusManager.current
     val keyboardController = LocalSoftwareKeyboardController.current
     val conversationSwitch = LocalDrawerBusy.current
@@ -397,6 +404,13 @@ internal fun SuixingDrawer(
     // Accumulate physical deltas independently of the release animation.
     val dragAccumulator = remember(state) { DrawerDragAccumulator() }
     val scope = rememberCoroutineScope()
+    val drawerEdgeGestureExclusion = if (gesturesEnabled && !state.homeShieldActive) {
+        Modifier.systemGestureExclusion { coordinates ->
+            Rect(0f, 0f, edgeExclusionPx, coordinates.size.height.toFloat())
+        }
+    } else {
+        Modifier
+    }
     // **松手回弹用 spring 并吃进手指速度**（用户：「手势的收起动画好像有点违和」）。
     // tween 不认初速度 ⇒ 快划松手时动画会从 0 速度重新起步，看着像"顿一下再走"。
     // spring 带 initialVelocity 才能与手指的甩动连续。
@@ -423,6 +437,7 @@ internal fun SuixingDrawer(
     Box(
         modifier = Modifier
             .fillMaxSize()
+            .then(drawerEdgeGestureExclusion)
             .pointerInput(state, gesturesEnabled, panelPx) {
                 if (!gesturesEnabled) return@pointerInput
                 val tracker = DrawerPointerVelocity()
@@ -484,8 +499,7 @@ internal fun SuixingDrawer(
                                     isDrag = true
                                     if (ownedSession == null) {
                                         appliedHorizontal = if (takingOverChild) horizontal - dx
-                                            else if (horizontal > 0f) viewConfiguration.touchSlop
-                                            else -viewConfiguration.touchSlop
+                                            else 0f
                                         ownedSession = state.beginGesture()
                                         ownedGeneration = dragAccumulator.begin(state.visualProgress.value, panelPx)
                                     }
@@ -508,7 +522,10 @@ internal fun SuixingDrawer(
                             val session = ownedSession
                             val generation = ownedGeneration
                             if (session != null && generation != null) {
-                                dragAccumulator.dragBy(generation, horizontal - appliedHorizontal)?.let {
+                                dragAccumulator.dragBy(
+                                    generation,
+                                    (horizontal - appliedHorizontal) * DRAWER_INPUT_GAIN,
+                                )?.let {
                                     state.applyGestureFrame(session, it)
                                 }
                                 appliedHorizontal = horizontal
@@ -552,7 +569,7 @@ internal fun SuixingDrawer(
                                     val v = tracker.calculateVelocity().x
                                     settle(session,
                                         drawerDragTarget(state.isOpen, release.progress, v, release.startProgress),
-                                        v, release, DRAWER_SPEC)
+                                        v * DRAWER_INPUT_GAIN, release, DRAWER_SPEC)
                                 } else if (interruptedMotion != null) {
                                     settle(session, interruptedMotion.target, interruptedVelocity * panelPx,
                                         release, interruptedMotion.spec)
@@ -644,8 +661,7 @@ internal fun SuixingDrawer(
                                         isVertical = abs(vertical) >= abs(horizontal)
                                         isDrag = !isVertical
                                         if (isDrag && ownedSession == null) {
-                                            appliedHorizontal = if (horizontal > 0f) viewConfiguration.touchSlop
-                                                else -viewConfiguration.touchSlop
+                                            appliedHorizontal = 0f
                                             ownedSession = state.beginGesture()
                                             ownedGeneration = dragAccumulator.begin(state.visualProgress.value, panelPx)
                                         } else if (isVertical) {
@@ -666,7 +682,10 @@ internal fun SuixingDrawer(
                                     val session = ownedSession
                                     val generation = ownedGeneration
                                     if (session != null && generation != null) {
-                                        dragAccumulator.dragBy(generation, horizontal - appliedHorizontal)?.let {
+                                        dragAccumulator.dragBy(
+                                            generation,
+                                            (horizontal - appliedHorizontal) * DRAWER_INPUT_GAIN,
+                                        )?.let {
                                             state.applyGestureFrame(session, it)
                                         }
                                         appliedHorizontal = horizontal
@@ -698,7 +717,7 @@ internal fun SuixingDrawer(
                                                     session,
                                                     drawerDragTarget(state.isOpen, releaseProgress.progress, v,
                                                         releaseProgress.startProgress),
-                                                    v,
+                                                    v * DRAWER_INPUT_GAIN,
                                                     releaseProgress,
                                                     DRAWER_SPEC,
                                                 )
