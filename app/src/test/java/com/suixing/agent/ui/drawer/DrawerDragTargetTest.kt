@@ -13,7 +13,7 @@ class DrawerDragTargetTest {
         assertEquals(DrawerValue.Closed, drawerDragTarget(false, 0.6f, 0f, startProgress = 1f))
     }
 
-    @Test fun `an open drawer closes after a deliberate slow swipe past a quarter of its width`() {
+    @Test fun `an open drawer closes after a deliberate slow swipe past 15% of its width`() {
         assertEquals(DrawerValue.Closed, drawerDragTarget(true, 0.6f, 0f))
         assertEquals(DrawerValue.Closed, drawerDragTarget(true, 0.6f, -400f))
     }
@@ -29,9 +29,9 @@ class DrawerDragTargetTest {
 
     @Test fun `small swipes and exact threshold retain the current anchor`() {
         assertEquals(DrawerValue.Open, drawerDragTarget(true, 0.9f, 0f))
-        assertEquals(DrawerValue.Open, drawerDragTarget(true, 0.75f, 0f))
+        assertEquals(DrawerValue.Open, drawerDragTarget(true, 0.85f, 0f))
         assertEquals(DrawerValue.Closed, drawerDragTarget(false, 0.1f, 0f))
-        assertEquals(DrawerValue.Closed, drawerDragTarget(false, 0.25f, 0f))
+        assertEquals(DrawerValue.Closed, drawerDragTarget(false, 0.15f, 0f))
     }
 
     @Test fun `a fast swipe keeps priority over distance and the old anchor`() {
