@@ -273,6 +273,28 @@ class DrawerPointerLoopTest {
             assertTrue("a vertical swipe on the shield must leave the drawer open", state.isOpen)
         }
 
+    @Test fun `a diagonal start can turn into a slow drawer opening`() =
+        withPointerLoop(DrawerValue.Closed, shield = false, events = listOf(
+            event(change(0L, 100f, 100f, previousPressed = false)),
+            event(change(60L, 116f, 100f, y = 18f)),
+            event(change(220L, 200f, 116f, y = 20f, previousY = 18f)),
+            event(change(320L, 200f, 200f, pressed = false, y = 20f, previousY = 20f)),
+        )) {
+            frames(90)
+            assertTrue(state.isOpen)
+        }
+
+    @Test fun `a diagonal start can turn into a slow drawer closing`() =
+        withPointerLoop(DrawerValue.Open, shield = true, includeHost = true, events = listOf(
+            event(change(0L, 350f, 350f, previousPressed = false)),
+            event(change(60L, 334f, 350f, y = 18f)),
+            event(change(220L, 250f, 334f, y = 20f, previousY = 18f)),
+            event(change(320L, 250f, 250f, pressed = false, y = 20f, previousY = 20f)),
+        )) {
+            frames(90)
+            assertEquals(0f, state.visualProgress.value, 0.0001f)
+        }
+
     @Test fun `a vertical decision stays with the child when later movement turns horizontal`() {
         var childScroll = 0f
         withPointerLoop(DrawerValue.Closed, shield = false, includeHost = true,

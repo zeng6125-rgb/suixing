@@ -3,6 +3,7 @@ package com.suixing.agent.ui.drawer
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.AnimationSpec
 import androidx.compose.animation.core.spring
+import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.systemGestureExclusion
@@ -322,6 +323,18 @@ private val LocalDrawerGestureState = staticCompositionLocalOf<SuixingDrawerStat
 internal const val DRAWER_INPUT_GAIN = 1.2f
 private const val DRAWER_EDGE_EXCLUSION_DP = 32f
 
+/** Wait for a clear lead when the first movements are nearly diagonal. */
+private fun drawerDragAxis(horizontal: Float, vertical: Float, slop: Float): Orientation? {
+    val x = abs(horizontal)
+    val y = abs(vertical)
+    val lead = slop / 2f
+    return when {
+        x > maxOf(slop, y + lead) -> Orientation.Horizontal
+        y > maxOf(slop * 2f, x + lead) -> Orientation.Vertical
+        else -> null
+    }
+}
+
 /** Horizontal content keeps a drag only when it can scroll in the finger's direction. */
 @Composable
 internal fun Modifier.drawerScrollPriority(canScroll: (Float) -> Boolean): Modifier {
@@ -480,28 +493,25 @@ internal fun SuixingDrawer(
                             val dx = change.position.x - change.previousPosition.x
                             horizontal += dx
                             vertical += change.position.y - change.previousPosition.y
-                            if (!isDrag && maxOf(abs(horizontal), abs(vertical)) > viewConfiguration.touchSlop) {
-                                if (abs(vertical) >= abs(horizontal) &&
-                                    abs(vertical) > viewConfiguration.touchSlop * 2f
-                                ) {
+                            if (!isDrag) {
+                                val axis = drawerDragAxis(horizontal, vertical, viewConfiguration.touchSlop)
+                                if (axis == Orientation.Vertical) {
                                     childOwnsGesture = true
                                     break
                                 }
-                                val childCanScroll = state.priorityPointerId == down.id &&
-                                    state.priorityCanScroll?.invoke(dx) == true
-                                if (abs(vertical) >= abs(horizontal) || childCanScroll ||
-                                    (childOwnsGesture && dx == 0f)
-                                ) {
-                                    childOwnsGesture = true
-                                } else {
-                                    val takingOverChild = childOwnsGesture
-                                    childOwnsGesture = false
-                                    isDrag = true
-                                    if (ownedSession == null) {
-                                        appliedHorizontal = if (takingOverChild) horizontal - dx
-                                            else 0f
-                                        ownedSession = state.beginGesture()
-                                        ownedGeneration = dragAccumulator.begin(state.visualProgress.value, panelPx)
+                                if (axis == Orientation.Horizontal) {
+                                    val childCanScroll = state.priorityPointerId == down.id &&
+                                        state.priorityCanScroll?.invoke(dx) == true
+                                    if (childCanScroll) {
+                                        childOwnsGesture = true
+                                    } else if (!childOwnsGesture || dx != 0f) {
+                                        if (ownedSession == null) {
+                                            if (childOwnsGesture) appliedHorizontal = horizontal - dx
+                                            ownedSession = state.beginGesture()
+                                            ownedGeneration = dragAccumulator.begin(state.visualProgress.value, panelPx)
+                                        }
+                                        childOwnsGesture = false
+                                        isDrag = true
                                     }
                                 }
                             }
@@ -640,6 +650,7 @@ internal fun SuixingDrawer(
                             var vertical = 0f
                             var isDrag = false
                             var isVertical = false
+                            var movedPastSlop = false
                             var appliedHorizontal = 0f
                             val interruptedMotion = state.motion
                             val interruptedVelocity = state.progress.velocity
@@ -655,13 +666,16 @@ internal fun SuixingDrawer(
                                     horizontal += change.position.x - change.previousPosition.x
                                     vertical += change.position.y - change.previousPosition.y
                                     event.changes.forEach { it.consume() }
-                                    if (!isDrag && !isVertical &&
-                                        maxOf(abs(horizontal), abs(vertical)) > viewConfiguration.touchSlop
-                                    ) {
-                                        isVertical = abs(vertical) >= abs(horizontal)
-                                        isDrag = !isVertical
+                                    if (!isDrag && !isVertical) {
+                                        val slop = viewConfiguration.touchSlop
+                                        movedPastSlop = movedPastSlop || maxOf(abs(horizontal), abs(vertical)) > slop
+                                        val axis = drawerDragAxis(horizontal, vertical, slop)
+                                        isDrag = axis == Orientation.Horizontal
+                                        // An undecided swipe that ends past slop is not a shield tap.
+                                        isVertical = axis == Orientation.Vertical ||
+                                            (movedPastSlop && !isDrag && !change.pressed &&
+                                                event.changes.none { it.pressed })
                                         if (isDrag && ownedSession == null) {
-                                            appliedHorizontal = 0f
                                             ownedSession = state.beginGesture()
                                             ownedGeneration = dragAccumulator.begin(state.visualProgress.value, panelPx)
                                         } else if (isVertical) {
