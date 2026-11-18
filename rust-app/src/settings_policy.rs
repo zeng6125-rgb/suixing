@@ -104,7 +104,7 @@ impl Default for BehaviorSettings {
             console_height_dp: 0,
             font_scale: 1,
             bubble_width: 1,
-            assistant_card: true,
+            assistant_card: false,
             flat_padding: 0,
             corner_scale: 1,
             show_timestamps: true,

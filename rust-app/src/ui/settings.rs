@@ -88,6 +88,12 @@ impl SettingsView {
 }
 
 impl RustApplication {
+    pub(super) fn open_chat_permissions(&mut self) {
+        if self.state.page == Page::Settings && !self.onboarding_blocks_navigation() {
+            self.settings_view.section = Section::Capability;
+        }
+    }
+
     pub(super) fn settings_first_loaded(
         &mut self,
         settings: &Settings,

@@ -153,8 +153,9 @@ impl RustApplication {
             self.last_opened_child = None;
             return;
         }
-        if self.drawer_open {
+        if self.drawer_open || self.drawer_motion.active() {
             self.drawer_open = false;
+            self.drawer_motion.cancel();
             return;
         }
         if self.settings_back() {

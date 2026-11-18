@@ -83,7 +83,6 @@ fn android_main(app: winit::platform::android::activity::AndroidApp) {
         "JAgent",
         options,
         Box::new(move |cc| {
-            platform::install_system_fonts(&cc.egui_ctx);
             let bridge = controller::spawn(data.clone(), cc.egui_ctx.clone())?;
             Ok(Box::new(
                 ui::RustApplication::new(cc, data.clone())

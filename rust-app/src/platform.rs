@@ -81,27 +81,59 @@ fn dispatch_receiver(request: android::ReceiverRequest) -> Result<(), String> {
 
 /// Use installed Android fonts; no font downloads or bundled third-party artwork are required.
 pub fn install_system_fonts(context: &egui::Context) {
-    for path in [
+    let mut fonts = egui::FontDefinitions::default();
+    if let Some(bytes) = [
         "/system/fonts/NotoSansCJK-Regular.ttc",
         "/system/fonts/NotoSansSC-Regular.otf",
         "/system/fonts/DroidSansFallback.ttf",
-    ] {
-        let Ok(bytes) = std::fs::read(path) else {
-            continue;
-        };
-        let mut fonts = egui::FontDefinitions::default();
+    ]
+    .iter()
+    .find_map(|path| std::fs::read(path).ok())
+    {
         fonts.font_data.insert(
             "android-cjk".into(),
             Arc::new(egui::FontData::from_owned(bytes)),
         );
-        for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
-            fonts
-                .families
-                .entry(family)
-                .or_default()
-                .insert(0, "android-cjk".into());
-        }
-        context.set_fonts(fonts);
-        break;
+        fonts
+            .families
+            .entry(egui::FontFamily::Proportional)
+            .or_default()
+            .insert(0, "android-cjk".into());
+        fonts
+            .families
+            .entry(egui::FontFamily::Monospace)
+            .or_default()
+            .push("android-cjk".into());
     }
+    let mut serif = Vec::new();
+    for (name, paths) in [
+        (
+            "android-serif",
+            &[
+                "/system/fonts/NotoSerif-Regular.ttf",
+                "/system/fonts/NotoSerif-Regular.otf",
+            ][..],
+        ),
+        (
+            "android-serif-cjk",
+            &[
+                "/system/fonts/NotoSerifCJK-Regular.ttc",
+                "/system/fonts/NotoSerifSC-Regular.otf",
+            ][..],
+        ),
+    ] {
+        if let Some(bytes) = paths.iter().find_map(|path| std::fs::read(path).ok()) {
+            fonts
+                .font_data
+                .insert(name.into(), Arc::new(egui::FontData::from_owned(bytes)));
+            serif.push(name.to_owned());
+        }
+    }
+    if let Some(fallback) = fonts.families.get(&egui::FontFamily::Proportional) {
+        serif.extend(fallback.iter().cloned());
+    }
+    fonts
+        .families
+        .insert(egui::FontFamily::Name("chat-serif".into()), serif);
+    context.set_fonts(fonts);
 }

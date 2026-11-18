@@ -156,7 +156,65 @@ impl RustApplication {
         }
     }
 
+    /// Compose's caption for the current conversation's model: the bare model id.
+    pub(super) fn conversation_model_caption(&self) -> String {
+        let conversation = self.state.selected_conversation.as_ref().and_then(|id| {
+            self.state
+                .conversations
+                .iter()
+                .find(|conversation| &conversation.id == id)
+        });
+        let model = conversation
+            .and_then(|conversation| conversation.model.clone())
+            .unwrap_or_else(|| {
+                let provider = self.state.settings.active_provider_id.clone();
+                provider
+                    .as_ref()
+                    .and_then(|id| {
+                        self.state
+                            .settings
+                            .providers
+                            .iter()
+                            .find(|provider| &provider.id == id)
+                    })
+                    .map(|provider| provider.selected_model.clone())
+                    .unwrap_or_else(|| self.state.settings.model.clone())
+            });
+        let caption = model.rsplit('/').next().unwrap_or(&model).to_owned();
+        if caption.is_empty() {
+            "选择会话模型".to_owned()
+        } else {
+            caption
+        }
+    }
+
+    /** Whether the conversation may switch its model right now. */
+    pub(super) fn conversation_model_editable(&self) -> bool {
+        self.state.loaded
+            && !self.state.running
+            && !self.state.conversation_pending
+            && !self.state.settings_pending
+            && self.settings_draft == self.state.settings
+            && self.model_choice_pending.is_none()
+    }
+
+    /// The model picker's menu; Compose shows the same list in its generation sheet.
+    pub(super) fn conversation_model_menu(&mut self, ui: &mut egui::Ui) {
+        self.conversation_model_items(ui);
+    }
+
+    /// The desktop composer keeps the dropdown form of the same list.
     pub(super) fn conversation_model(&mut self, ui: &mut egui::Ui) {
+        let caption = self.conversation_model_caption();
+        let editable = self.conversation_model_editable();
+        ui.add_enabled_ui(editable, |ui| {
+            egui::ComboBox::from_id_salt("conversation_model")
+                .selected_text(caption)
+                .show_ui(ui, |ui| self.conversation_model_items(ui));
+        });
+    }
+
+    fn conversation_model_items(&mut self, ui: &mut egui::Ui) {
         let conversation = self.state.selected_conversation.as_ref().and_then(|id| {
             self.state
                 .conversations
@@ -186,59 +244,31 @@ impl RustApplication {
                 (provider, model)
             });
         let mut choice = current.clone();
-        let editable = self.state.loaded
-            && !self.state.running
-            && !self.state.conversation_pending
-            && !self.state.settings_pending
-            && self.settings_draft == self.state.settings
-            && self.model_choice_pending.is_none();
-        let label = current
-            .0
-            .as_ref()
-            .and_then(|id| {
-                self.state
-                    .settings
-                    .providers
-                    .iter()
-                    .find(|provider| &provider.id == id)
-            })
-            .map(|provider| format!("{} · {}", provider.name, provider.display_model(&current.1)))
-            .unwrap_or_else(|| current.1.clone());
-        ui.add_enabled_ui(editable, |ui| {
-            egui::ComboBox::from_id_salt("conversation_model")
-                .selected_text(if label.is_empty() {
-                    "选择会话模型"
-                } else {
-                    &label
-                })
-                .show_ui(ui, |ui| {
-                    for model in self
-                        .state
-                        .settings
-                        .enabled_models
-                        .as_deref()
-                        .unwrap_or(&self.state.settings.models)
-                    {
-                        ui.selectable_value(
-                            &mut choice,
-                            (None, model.clone()),
-                            format!("默认连接 · {model}"),
-                        );
-                    }
-                    for provider in &self.state.settings.providers {
-                        if !provider.enabled_models().is_empty() {
-                            ui.label(RichText::new(&provider.name).strong());
-                        }
-                        for model in provider.enabled_models() {
-                            ui.selectable_value(
-                                &mut choice,
-                                (Some(provider.id.clone()), model.clone()),
-                                provider.display_model(model),
-                            );
-                        }
-                    }
-                });
-        });
+        for model in self
+            .state
+            .settings
+            .enabled_models
+            .as_deref()
+            .unwrap_or(&self.state.settings.models)
+        {
+            ui.selectable_value(
+                &mut choice,
+                (None, model.clone()),
+                format!("默认连接 · {model}"),
+            );
+        }
+        for provider in &self.state.settings.providers {
+            if !provider.enabled_models().is_empty() {
+                ui.label(RichText::new(&provider.name).strong());
+            }
+            for model in provider.enabled_models() {
+                ui.selectable_value(
+                    &mut choice,
+                    (Some(provider.id.clone()), model.clone()),
+                    provider.display_model(model),
+                );
+            }
+        }
         if choice != current {
             let request_id = unique_id();
             if self.dispatch(Action::SetConversationModel {

@@ -88,6 +88,7 @@ val compileRustLibraries = tasks.register<RustAndroidCompile>("compileRustLibrar
     inputs.files(
         rootProject.file("THIRD_PARTY_NOTICES.md"),
         rootProject.file("app/src/main/res/drawable-xxxhdpi/brand_mark_round.png"),
+        file("src/ui/chat-icons.png"),
     )
     val outputLibraries = targets.mapValues { (_, pair) ->
         rustOutput.map { it.file("${pair.first}/release/libsuixing_rust_app.so") }

@@ -1,5 +1,6 @@
 //! Native chat presentation over bounded immutable display pages.
 //! Drawing emits intents; it performs no file reads, network requests or bitmap decode.
+use super::mobile_chat::{Icon, Icons, Skin, transcript_action};
 use super::{
     history::{HistoryViews, ImagePixels, SourceView, WindowApplied},
     markdown::MarkdownRenderer,
@@ -691,13 +692,14 @@ impl HistoryRenderer {
         );
         Ok(vec![HistoryIntent::Window(request)])
     }
-    pub fn show(
+    pub(super) fn show(
         &mut self,
         ui: &mut egui::Ui,
         views: &mut HistoryViews,
         source: &ViewSource,
         running: bool,
         editable: bool,
+        chrome: Option<(Skin, &Icons)>,
     ) -> Vec<HistoryIntent> {
         let mut intents = Vec::new();
         let interrupt = self.sources.get(source).is_some_and(|state| {
@@ -821,6 +823,11 @@ impl HistoryRenderer {
         let mut body_layouts = Vec::new();
         let mut drawn_offset = 0.0;
         let tail_turn = view.rows.back().and_then(|row| row.turn_id.as_deref());
+        let mobile_regenerate = chrome.is_some()
+            && view.after.is_none()
+            && view.rows.back().is_some_and(|row| {
+                row.role == "assistant" && row.complete && row.tool_calls.is_empty()
+            });
         let output = scroll.show_viewport(ui, |ui, viewport| {
             drawn_offset = viewport.min.y;
             if let Some(cursor) = &view.before {
@@ -865,19 +872,24 @@ impl HistoryRenderer {
                         .turn_id
                         .as_ref()
                         .and_then(|turn| view.candidates.get(turn));
-                    if first_turn {
-                        if let Some(candidate) = navigation {
-                            self.candidates(
-                                ui,
-                                view,
-                                candidate,
-                                tail_turn == Some(candidate.turn_id.as_str())
-                                    && view.after.is_none(),
-                                editable && !running,
-                                &mut intents,
-                            );
-                        }
+                    let move_regenerate = latest && mobile_regenerate;
+                    if first_turn
+                        && let Some(candidate) = navigation
+                        && (!move_regenerate || candidate.total > 1)
+                    {
+                        self.candidates(
+                            ui,
+                            view,
+                            candidate,
+                            latest && !move_regenerate,
+                            editable && !running,
+                            chrome,
+                            &mut intents,
+                        );
                     }
+                    let regenerate = navigation.filter(|_| {
+                        move_regenerate && view.rows.back().is_some_and(|last| last.id == row.id)
+                    });
                     self.row(
                         ui,
                         view,
@@ -885,6 +897,8 @@ impl HistoryRenderer {
                         &mut state,
                         running,
                         editable,
+                        chrome,
+                        regenerate,
                         &mut asks,
                         &mut intents,
                         &mut body_layouts,
@@ -1238,6 +1252,7 @@ impl HistoryRenderer {
         navigation: &CandidateNavigation,
         latest: bool,
         editable: bool,
+        chrome: Option<(Skin, &Icons)>,
         intents: &mut Vec<HistoryIntent>,
     ) {
         let Some(stamp) = &view.stamp else {
@@ -1293,11 +1308,7 @@ impl HistoryRenderer {
                     });
                 }
             }
-            if latest
-                && ui
-                    .add_enabled(editable, egui::Button::new("重新回答").small())
-                    .clicked()
-            {
+            if latest && transcript_action(ui, chrome, Icon::Regenerate, "重新回答", editable) {
                 intents.push(HistoryIntent::Regenerate {
                     source: view.source.clone(),
                     stamp: stamp.clone(),
@@ -1314,6 +1325,8 @@ impl HistoryRenderer {
         state: &mut LayoutState,
         running: bool,
         editable: bool,
+        chrome: Option<(Skin, &Icons)>,
+        regenerate: Option<&CandidateNavigation>,
         asks: &mut Vec<Ask>,
         intents: &mut Vec<HistoryIntent>,
         layouts: &mut Vec<BodyLayout>,
@@ -1321,324 +1334,458 @@ impl HistoryRenderer {
         let row_top = ui.cursor().min.y;
         state.current_row = row.id.clone();
         ui.push_id((&view.source, &row.id), |ui| {
-            let fill = if row.role == "user" {
-                ui.visuals().faint_bg_color
+            let mobile_user = chrome.is_some() && row.role == "user";
+            let layout = if mobile_user {
+                egui::Layout::top_down(egui::Align::Max)
             } else {
-                ui.visuals().panel_fill
+                *ui.layout()
             };
-            let flat = row.role == "assistant" && !self.behavior.assistant_card;
-            let width = ui.available_width() * self.behavior.bubble_fraction();
-            let corner = match self.behavior.corner_scale {
-                0 => 6,
-                2 => 15,
-                _ => 10,
-            };
-            egui::Frame::NONE
-                .fill(if flat {
-                    egui::Color32::TRANSPARENT
-                } else {
-                    fill
-                })
-                .corner_radius(if flat { 0 } else { corner })
-                .inner_margin(if flat {
-                    self.behavior.flat_padding_dp() as i8
-                } else {
-                    12
-                })
-                .show(ui, |ui| {
-                    ui.set_max_width(width);
-                    ui.set_min_width(width);
-                    let role = match row.role.as_str() {
-                        "user" => {
-                            if row.steer {
-                                "你的补充"
-                            } else {
-                                "你"
-                            }
-                        }
-                        "assistant" => self
-                            .assistant_faces
-                            .get(&view.source)
-                            .map(|face| face.name.as_str())
-                            .filter(|name| !name.is_empty())
-                            .unwrap_or("助手"),
-                        "system" => "系统",
-                        "tool" => "工具",
-                        other => other,
-                    };
-                    ui.horizontal_wrapped(|ui| {
-                        if row.role == "assistant" {
-                            if let Some(face) = self.assistant_faces.get(&view.source) {
-                                face.draw(ui, 24.0);
-                            }
-                        }
-                        ui.label(RichText::new(role).small().strong());
-                        if row.info.failed_model_attempt {
-                            ui.label(
-                                RichText::new("失败尝试 · 部分内容已保留")
-                                    .small()
-                                    .color(ui.visuals().error_fg_color),
-                            );
-                        }
-                        if self.behavior.show_timestamps && row.info.timestamp > 0 {
-                            ui.label(
-                                RichText::new(row.info.timestamp_label.clone().unwrap_or_else(
-                                    || format!("{}（Unix 毫秒）", row.info.timestamp),
-                                ))
-                                .small()
-                                .weak(),
-                            );
-                        }
-                        if let Some(name) = &row.tool_name {
-                            ui.label(RichText::new(name).small().weak());
-                        }
-                        if let Some(ok) = row.info.tool_ok {
-                            ui.label(RichText::new(if ok { "已完成" } else { "执行失败" }).small());
-                        }
+            if let Some((skin, _)) = chrome {
+                ui.spacing_mut().item_spacing.y = 5.0;
+                ui.style_mut()
+                    .text_styles
+                    .insert(egui::TextStyle::Body, skin.font(15.0));
+                if mobile_user
+                    && self.behavior.show_timestamps
+                    && let Some(timestamp) = &row.info.timestamp_label
+                {
+                    ui.vertical_centered(|ui| {
+                        ui.label(
+                            RichText::new(timestamp)
+                                .font(skin.font(12.0))
+                                .color(skin.ink),
+                        )
                     });
-                    if let Some(note) = &row.info.trace_note {
-                        egui::CollapsingHeader::new("执行说明")
-                            .id_salt("trace")
-                            .default_open(false)
-                            .open(restore_open(state, note))
-                            .show(ui, |ui| {
-                                self.body(ui, view, note, None, state, false, false, asks, layouts);
-                            });
-                    }
-                    for call in &row.tool_calls {
-                        egui::CollapsingHeader::new(format!("工具：{}", call.name))
-                            .id_salt(("call", &call.id, self.behavior.expand_tools))
-                            .default_open(self.behavior.expand_tools)
-                            .open(restore_open(state, &call.arguments))
-                            .show(ui, |ui| {
-                                self.body(
-                                    ui,
-                                    view,
-                                    &call.arguments,
-                                    None,
-                                    state,
-                                    false,
-                                    true,
-                                    asks,
-                                    layouts,
-                                );
-                            });
-                    }
-                    if self.behavior.show_reasoning && row.thinking.bytes > 0 {
-                        let streaming = running && !row.complete && !row.info.failed_model_attempt;
-                        let default_open = streaming || self.behavior.expand_reasoning;
-                        let open = restore_open(state, &row.thinking).or_else(|| {
-                            (!state.reasoning_manual.contains(&row.id)).then_some(default_open)
-                        });
-                        let response = egui::CollapsingHeader::new("思考过程")
-                            .id_salt("thinking")
-                            .default_open(default_open)
-                            .open(open)
-                            .show(ui, |ui| {
-                                egui::ScrollArea::vertical()
-                                    .id_salt(("reasoning-body", &body_source_key(&row.thinking)))
-                                    .max_height(self.behavior.reasoning_height_dp() as f32)
-                                    .stick_to_bottom(
-                                        self.behavior.follow_reasoning
-                                            && running
-                                            && !row.complete
-                                            && !row.info.failed_model_attempt,
-                                    )
-                                    .show(ui, |ui| {
-                                        self.body(
-                                            ui,
-                                            view,
-                                            &row.thinking,
-                                            None,
-                                            state,
-                                            running
-                                                && !row.complete
-                                                && !row.info.failed_model_attempt,
-                                            false,
-                                            asks,
-                                            layouts,
-                                        );
+                }
+            }
+            ui.with_layout(layout, |ui| {
+                let fill = if row.role == "user" {
+                    chrome.map_or(ui.visuals().faint_bg_color, |(skin, _)| skin.user_bubble)
+                } else {
+                    ui.visuals().panel_fill
+                };
+                let flat = row.role == "assistant" && !self.behavior.assistant_card;
+                let width = if let Some((skin, _)) = chrome.filter(|_| mobile_user) {
+                    let max = (ui.available_width() - 32.0).clamp(0.0, 268.0);
+                    row.preview
+                        .as_ref()
+                        .filter(|preview| preview.text.len() < 240 && row.images.is_empty())
+                        .map_or(max, |preview| {
+                            ui.painter()
+                                .layout_no_wrap(preview.text.clone(), skin.font(15.0), skin.text)
+                                .size()
+                                .x
+                                .clamp(1.0, max.max(1.0))
+                        })
+                } else {
+                    ui.available_width() * self.behavior.bubble_fraction()
+                };
+                let corner = match self.behavior.corner_scale {
+                    0 => 6,
+                    2 => 15,
+                    _ => 10,
+                };
+                egui::Frame::NONE
+                    .fill(if flat {
+                        egui::Color32::TRANSPARENT
+                    } else {
+                        fill
+                    })
+                    .corner_radius(if flat {
+                        0
+                    } else if mobile_user {
+                        24
+                    } else {
+                        corner
+                    })
+                    .inner_margin(if flat {
+                        egui::Margin::same(self.behavior.flat_padding_dp() as i8)
+                    } else if mobile_user {
+                        egui::Margin::symmetric(16, 12)
+                    } else {
+                        egui::Margin::same(12)
+                    })
+                    .show(ui, |ui| {
+                        ui.set_max_width(width);
+                        ui.set_min_width(width);
+                        let role = match row.role.as_str() {
+                            "user" => {
+                                if row.steer {
+                                    "你的补充"
+                                } else {
+                                    "你"
+                                }
+                            }
+                            "assistant" => self
+                                .assistant_faces
+                                .get(&view.source)
+                                .map(|face| face.name.as_str())
+                                .filter(|name| !name.is_empty())
+                                .unwrap_or("助手"),
+                            "system" => "系统",
+                            "tool" => "工具",
+                            other => other,
+                        };
+                        if !mobile_user
+                            || row.steer
+                            || row.info.failed_model_attempt
+                            || row.tool_name.is_some()
+                            || row.info.tool_ok.is_some()
+                        {
+                            ui.horizontal_wrapped(|ui| {
+                                if row.role == "assistant" {
+                                    if let Some(face) = self.assistant_faces.get(&view.source) {
+                                        face.draw(ui, if chrome.is_some() { 28.0 } else { 24.0 });
+                                    }
+                                }
+                                if !mobile_user || row.steer {
+                                    let label = RichText::new(role);
+                                    ui.label(if let Some((skin, _)) = chrome {
+                                        label.font(skin.font(15.0)).color(skin.ink)
+                                    } else {
+                                        label.small().strong()
                                     });
+                                }
+                                if row.info.failed_model_attempt {
+                                    ui.label(
+                                        RichText::new("失败尝试 · 部分内容已保留")
+                                            .small()
+                                            .color(ui.visuals().error_fg_color),
+                                    );
+                                }
+                                if chrome.is_none()
+                                    && self.behavior.show_timestamps
+                                    && row.info.timestamp > 0
+                                {
+                                    ui.label(
+                                        RichText::new(
+                                            row.info.timestamp_label.clone().unwrap_or_else(|| {
+                                                format!("{}（Unix 毫秒）", row.info.timestamp)
+                                            }),
+                                        )
+                                        .small()
+                                        .weak(),
+                                    );
+                                }
+                                if let Some(name) = &row.tool_name {
+                                    ui.label(RichText::new(name).small().weak());
+                                }
+                                if let Some(ok) = row.info.tool_ok {
+                                    ui.label(
+                                        RichText::new(if ok {
+                                            "已完成"
+                                        } else {
+                                            "执行失败"
+                                        })
+                                        .small(),
+                                    );
+                                }
                             });
-                        if response.header_response.clicked() {
-                            state.reasoning_manual.insert(row.id.clone());
                         }
-                    }
-                    if row.role == "tool" {
-                        if let Some(arguments) = &row.tool_arguments {
-                            egui::CollapsingHeader::new("调用参数")
-                                .id_salt(("tool-args", self.behavior.expand_tools))
-                                .default_open(self.behavior.expand_tools)
-                                .open(restore_open(state, arguments))
+                        if let Some(note) = &row.info.trace_note {
+                            egui::CollapsingHeader::new("执行说明")
+                                .id_salt("trace")
+                                .default_open(false)
+                                .open(restore_open(state, note))
                                 .show(ui, |ui| {
                                     self.body(
-                                        ui, view, arguments, None, state, false, true, asks,
+                                        ui, view, note, None, state, false, false, chrome, asks,
                                         layouts,
                                     );
                                 });
                         }
-                        let output = row.tool_output.as_ref().unwrap_or(&row.text);
-                        if output.bytes > 0 {
-                            egui::CollapsingHeader::new("工具结果")
-                                .id_salt(("tool-output", self.behavior.expand_tools))
+                        for call in &row.tool_calls {
+                            egui::CollapsingHeader::new(format!("工具：{}", call.name))
+                                .id_salt(("call", &call.id, self.behavior.expand_tools))
                                 .default_open(self.behavior.expand_tools)
-                                .open(restore_open(state, output))
+                                .open(restore_open(state, &call.arguments))
                                 .show(ui, |ui| {
                                     self.body(
                                         ui,
                                         view,
-                                        output,
-                                        row.preview.as_ref(),
+                                        &call.arguments,
+                                        None,
                                         state,
                                         false,
                                         true,
+                                        chrome,
                                         asks,
                                         layouts,
                                     );
                                 });
                         }
-                    } else if row.text.bytes > 0 {
-                        self.body(
-                            ui,
-                            view,
-                            &row.text,
-                            row.preview.as_ref(),
-                            state,
-                            running && !row.complete && !row.info.failed_model_attempt,
-                            false,
-                            asks,
-                            layouts,
-                        );
-                    } else {
-                        let top = ui.cursor().min.y;
-                        if !row.complete {
-                            ui.label(
-                                RichText::new(if running {
-                                    "等待回复…"
-                                } else {
-                                    "本轮已结束，保留已接收记录"
-                                })
-                                .weak(),
-                            );
+                        if self.behavior.show_reasoning && row.thinking.bytes > 0 {
+                            let streaming =
+                                running && !row.complete && !row.info.failed_model_attempt;
+                            let default_open = streaming || self.behavior.expand_reasoning;
+                            let open = restore_open(state, &row.thinking).or_else(|| {
+                                (!state.reasoning_manual.contains(&row.id)).then_some(default_open)
+                            });
+                            let response = egui::CollapsingHeader::new("思考过程")
+                                .id_salt("thinking")
+                                .default_open(default_open)
+                                .open(open)
+                                .show(ui, |ui| {
+                                    egui::ScrollArea::vertical()
+                                        .id_salt((
+                                            "reasoning-body",
+                                            &body_source_key(&row.thinking),
+                                        ))
+                                        .max_height(self.behavior.reasoning_height_dp() as f32)
+                                        .stick_to_bottom(
+                                            self.behavior.follow_reasoning
+                                                && running
+                                                && !row.complete
+                                                && !row.info.failed_model_attempt,
+                                        )
+                                        .show(ui, |ui| {
+                                            self.body(
+                                                ui,
+                                                view,
+                                                &row.thinking,
+                                                None,
+                                                state,
+                                                running
+                                                    && !row.complete
+                                                    && !row.info.failed_model_attempt,
+                                                false,
+                                                chrome,
+                                                asks,
+                                                layouts,
+                                            );
+                                        });
+                                });
+                            if response.header_response.clicked() {
+                                state.reasoning_manual.insert(row.id.clone());
+                            }
                         }
-                        layouts.push(BodyLayout {
-                            message_id: row.id.clone(),
-                            body_message_id: row.id.clone(),
-                            footer_from: None,
-                            kind: BodyKind::Text,
-                            from: 0,
-                            top,
-                            bottom: ui.cursor().min.y.max(top + 20.0),
-                            ready: true,
-                        });
-                    }
-                    if !row.images.is_empty() {
-                        egui::CollapsingHeader::new(format!("图片 · {} 张", row.images.len()))
-                            .id_salt("images")
-                            .default_open(false)
-                            .open(
-                                state
-                                    .restore
-                                    .as_ref()
-                                    .filter(|position| {
-                                        position.message_id == row.id
-                                            && matches!(position.body_kind, BodyKind::ImageBlock(_))
-                                    })
-                                    .map(|_| true),
-                            )
-                            .show(ui, |ui| {
-                                for (slot, image) in row.images.iter().enumerate() {
-                                    let top = ui.cursor().min.y;
-                                    self.image(ui, view, image, asks);
-                                    layouts.push(BodyLayout {
-                                        message_id: row.id.clone(),
-                                        body_message_id: row.id.clone(),
-                                        footer_from: None,
-                                        kind: BodyKind::ImageBlock(slot as u16),
-                                        from: 0,
-                                        top,
-                                        bottom: ui.cursor().min.y.max(top + 20.0),
-                                        ready: self.textures.contains_key(image),
+                        if row.role == "tool" {
+                            if let Some(arguments) = &row.tool_arguments {
+                                egui::CollapsingHeader::new("调用参数")
+                                    .id_salt(("tool-args", self.behavior.expand_tools))
+                                    .default_open(self.behavior.expand_tools)
+                                    .open(restore_open(state, arguments))
+                                    .show(ui, |ui| {
+                                        self.body(
+                                            ui, view, arguments, None, state, false, true, chrome,
+                                            asks, layouts,
+                                        );
                                     });
-                                }
-                            });
-                    }
-                    if !running
-                        && row.complete
-                        && row.role == "assistant"
-                        && row.tool_calls.is_empty()
-                    {
-                        self.footer(ui, view, row, state, asks, intents, layouts);
-                    }
-                    if !running && row.complete && row.tool_calls.is_empty() {
-                        ui.horizontal_wrapped(|ui| {
-                            if ui.small_button("复制").clicked() {
-                                intents.push(HistoryIntent::CopyBody(row.text.clone()));
                             }
-                            if row.role == "assistant"
-                                && row.text.bytes > 0
-                                && ui
-                                    .add_enabled(
-                                        self.reply_audio_enabled && row.text.bytes <= 256 * 1024,
-                                        egui::Button::new("朗读").small(),
-                                    )
-                                    .clicked()
-                            {
-                                intents.push(HistoryIntent::SpeakReply(row.text.clone()));
-                            }
-                            let offset = body_offset(state, &row.text, &view.position);
-                            let page = view.body_page(&row.text, offset).or_else(|| {
-                                row.preview.as_ref().filter(|page| {
-                                    page.from_byte == offset && page.to_byte == row.text.bytes
-                                })
-                            });
-                            if ["user", "assistant"].contains(&row.role.as_str())
-                                && ui
-                                    .add_enabled(
-                                        editable && page.is_some(),
-                                        egui::Button::new("修改").small(),
-                                    )
-                                    .clicked()
-                            {
-                                if let Some(page) = page {
-                                    self.editor = Some(EditDraft {
-                                        body: row.text.clone(),
-                                        from: page.from_byte,
-                                        to: page.to_byte,
-                                        text: page.text.clone(),
-                                        error: None,
-                                        pending: false,
-                                        resend_allowed: row.role == "user" && !row.steer,
+                            let output = row.tool_output.as_ref().unwrap_or(&row.text);
+                            if output.bytes > 0 {
+                                egui::CollapsingHeader::new("工具结果")
+                                    .id_salt(("tool-output", self.behavior.expand_tools))
+                                    .default_open(self.behavior.expand_tools)
+                                    .open(restore_open(state, output))
+                                    .show(ui, |ui| {
+                                        self.body(
+                                            ui,
+                                            view,
+                                            output,
+                                            row.preview.as_ref(),
+                                            state,
+                                            false,
+                                            true,
+                                            chrome,
+                                            asks,
+                                            layouts,
+                                        );
                                     });
-                                }
                             }
-                            if row.info.edited {
-                                ui.label(RichText::new("已修改").small().weak());
-                            }
-                            if row.info.elapsed_ms > 0 {
+                        } else if row.text.bytes > 0 {
+                            self.body(
+                                ui,
+                                view,
+                                &row.text,
+                                row.preview.as_ref(),
+                                state,
+                                running && !row.complete && !row.info.failed_model_attempt,
+                                mobile_user,
+                                chrome,
+                                asks,
+                                layouts,
+                            );
+                        } else {
+                            let top = ui.cursor().min.y;
+                            if !row.complete {
                                 ui.label(
-                                    RichText::new(format!(
-                                        "{:.1} 秒",
-                                        row.info.elapsed_ms as f64 / 1000.0
-                                    ))
-                                    .small()
+                                    RichText::new(if running {
+                                        "等待回复…"
+                                    } else {
+                                        "本轮已结束，保留已接收记录"
+                                    })
                                     .weak(),
                                 );
                             }
-                            if let Some((input, output)) =
-                                row.info.prompt_tokens.zip(row.info.completion_tokens)
-                            {
-                                ui.label(
-                                    RichText::new(format!("输入 {input} · 输出 {output}"))
+                            layouts.push(BodyLayout {
+                                message_id: row.id.clone(),
+                                body_message_id: row.id.clone(),
+                                footer_from: None,
+                                kind: BodyKind::Text,
+                                from: 0,
+                                top,
+                                bottom: ui.cursor().min.y.max(top + 20.0),
+                                ready: true,
+                            });
+                        }
+                        if !row.images.is_empty() {
+                            egui::CollapsingHeader::new(format!("图片 · {} 张", row.images.len()))
+                                .id_salt("images")
+                                .default_open(false)
+                                .open(
+                                    state
+                                        .restore
+                                        .as_ref()
+                                        .filter(|position| {
+                                            position.message_id == row.id
+                                                && matches!(
+                                                    position.body_kind,
+                                                    BodyKind::ImageBlock(_)
+                                                )
+                                        })
+                                        .map(|_| true),
+                                )
+                                .show(ui, |ui| {
+                                    for (slot, image) in row.images.iter().enumerate() {
+                                        let top = ui.cursor().min.y;
+                                        self.image(ui, view, image, asks);
+                                        layouts.push(BodyLayout {
+                                            message_id: row.id.clone(),
+                                            body_message_id: row.id.clone(),
+                                            footer_from: None,
+                                            kind: BodyKind::ImageBlock(slot as u16),
+                                            from: 0,
+                                            top,
+                                            bottom: ui.cursor().min.y.max(top + 20.0),
+                                            ready: self.textures.contains_key(image),
+                                        });
+                                    }
+                                });
+                        }
+                        if !running
+                            && row.complete
+                            && row.role == "assistant"
+                            && row.tool_calls.is_empty()
+                        {
+                            self.footer(ui, view, row, state, asks, intents, layouts);
+                        }
+                        if !mobile_user && !running && row.complete && row.tool_calls.is_empty() {
+                            ui.horizontal_wrapped(|ui| {
+                                if transcript_action(ui, chrome, Icon::Copy, "复制", true) {
+                                    intents.push(HistoryIntent::CopyBody(row.text.clone()));
+                                }
+                                if row.role == "assistant"
+                                    && row.text.bytes > 0
+                                    && (chrome.is_none() || self.reply_audio_enabled)
+                                    && ui
+                                        .add_enabled(
+                                            self.reply_audio_enabled
+                                                && row.text.bytes <= 256 * 1024,
+                                            egui::Button::new("朗读").small(),
+                                        )
+                                        .clicked()
+                                {
+                                    intents.push(HistoryIntent::SpeakReply(row.text.clone()));
+                                }
+                                let offset = body_offset(state, &row.text, &view.position);
+                                let page = view.body_page(&row.text, offset).or_else(|| {
+                                    row.preview.as_ref().filter(|page| {
+                                        page.from_byte == offset && page.to_byte == row.text.bytes
+                                    })
+                                });
+                                if ["user", "assistant"].contains(&row.role.as_str())
+                                    && transcript_action(
+                                        ui,
+                                        chrome,
+                                        Icon::Edit,
+                                        "修改",
+                                        editable && page.is_some(),
+                                    )
+                                {
+                                    if let Some(page) = page {
+                                        self.editor = Some(EditDraft {
+                                            body: row.text.clone(),
+                                            from: page.from_byte,
+                                            to: page.to_byte,
+                                            text: page.text.clone(),
+                                            error: None,
+                                            pending: false,
+                                            resend_allowed: row.role == "user" && !row.steer,
+                                        });
+                                    }
+                                }
+                                if row.info.edited {
+                                    ui.label(RichText::new("已修改").small().weak());
+                                }
+                                if let Some(candidate) = regenerate
+                                    && let Some(stamp) = &view.stamp
+                                    && transcript_action(
+                                        ui,
+                                        chrome,
+                                        Icon::Regenerate,
+                                        "重新回答",
+                                        editable,
+                                    )
+                                {
+                                    intents.push(HistoryIntent::Regenerate {
+                                        source: view.source.clone(),
+                                        stamp: stamp.clone(),
+                                        question_id: candidate.turn_id.clone(),
+                                    });
+                                }
+                                if row.info.elapsed_ms > 0 {
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "{:.1} 秒",
+                                            row.info.elapsed_ms as f64 / 1000.0
+                                        ))
                                         .small()
                                         .weak(),
-                                );
-                            } else if row.role == "assistant" {
-                                ui.label(RichText::new("用量未报告").small().weak());
-                            }
-                        });
-                    }
-                });
+                                    );
+                                }
+                                if let Some((input, output)) =
+                                    row.info.prompt_tokens.zip(row.info.completion_tokens)
+                                {
+                                    ui.label(
+                                        RichText::new(format!("输入 {input} · 输出 {output}"))
+                                            .small()
+                                            .weak(),
+                                    );
+                                } else if row.role == "assistant" {
+                                    ui.label(RichText::new("用量未报告").small().weak());
+                                }
+                            });
+                        }
+                    });
+                if mobile_user && !running && row.complete && row.tool_calls.is_empty() {
+                    ui.horizontal(|ui| {
+                        let offset = body_offset(state, &row.text, &view.position);
+                        let page = view.body_page(&row.text, offset).or(row.preview.as_ref());
+                        if transcript_action(
+                            ui,
+                            chrome,
+                            Icon::Edit,
+                            "修改",
+                            editable && page.is_some(),
+                        ) && let Some(page) = page
+                        {
+                            self.editor = Some(EditDraft {
+                                body: row.text.clone(),
+                                from: page.from_byte,
+                                to: page.to_byte,
+                                text: page.text.clone(),
+                                error: None,
+                                pending: false,
+                                resend_allowed: !row.steer,
+                            });
+                        }
+                        if transcript_action(ui, chrome, Icon::Copy, "复制", true) {
+                            intents.push(HistoryIntent::CopyBody(row.text.clone()));
+                        }
+                    });
+                }
+            });
         });
         layouts.push(BodyLayout {
             message_id: row.id.clone(),
@@ -1660,6 +1807,7 @@ impl HistoryRenderer {
         state: &mut LayoutState,
         streaming: bool,
         plain: bool,
+        chrome: Option<(Skin, &Icons)>,
         asks: &mut Vec<Ask>,
         layouts: &mut Vec<BodyLayout>,
     ) {
@@ -1758,6 +1906,7 @@ impl HistoryRenderer {
                     ),
                     visible_text,
                     streaming || revealed < page.text.len(),
+                    chrome,
                 );
             }
         } else if body.bytes == 0 {
@@ -2019,6 +2168,7 @@ impl HistoryRenderer {
                                         state,
                                         false,
                                         true,
+                                        None,
                                         asks,
                                         layouts,
                                     );

@@ -10,6 +10,9 @@ import kotlinx.serialization.json.decodeFromJsonElement
 internal object NativeCoreJni {
     external fun nativeCreate(): Long
     external fun nativeCancel(handle: Long)
+    external fun nativeDrawerAxis(horizontal: Float, vertical: Float, slop: Float): Int
+    external fun nativeDrawerOffset(offset: Float, delta: Float, min: Float, max: Float): Float
+    external fun nativeDrawerReleaseOpen(progress: Float, velocityPx: Float, startProgress: Float): Boolean
     external fun nativeRelease(handle: Long)
     external fun nativeTokens(text: String): Int
     external fun nativeRetry(status: Int, present: Boolean, attempt: Int, max: Int, received: Boolean, cancelled: Boolean, midStream: Boolean): Boolean

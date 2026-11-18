@@ -1130,11 +1130,27 @@ impl ComposerPlatform {
             }
         }
     }
-    pub fn show(&mut self, ui: &mut egui::Ui, flags: &ComposerUi) -> Vec<ComposerIntent> {
+    pub(super) fn fill_suggestion(&mut self, text: &str) {
+        if let Some(draft) = self.drafts.get_mut(&self.selected) {
+            draft.text = text.to_owned();
+            draft.mutate_text();
+        }
+    }
+
+    pub(super) fn show<'a>(
+        &mut self,
+        ui: &mut egui::Ui,
+        flags: &ComposerUi,
+        mut chrome: Option<super::mobile_chat::InputChrome<'a>>,
+    ) -> (
+        Vec<ComposerIntent>,
+        Option<super::mobile_chat::InputChrome<'a>>,
+    ) {
+        use super::mobile_chat::{Icon, mix};
         let mut intents = Vec::new();
         if !self.drafts.contains_key(&self.selected) {
             ui.label("当前草稿尚未打开");
-            return intents;
+            return (intents, chrome);
         }
         let editable = flags.loaded
             && flags.connected
@@ -1175,15 +1191,33 @@ impl ComposerPlatform {
                     && !input.modifiers.command
                     && input.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
             });
-        let response = ui.add_enabled(
-            editable,
-            egui::TextEdit::multiline(&mut draft.text)
-                .id_salt(("composer", &current))
+        let field = egui::TextEdit::multiline(&mut draft.text)
+            .id_salt(("composer", &current))
+            .desired_width(f32::INFINITY)
+            .char_limit(MAX_TEXT_BYTES);
+        let field = if let Some(chrome) = chrome.as_ref() {
+            field
+                .hint_text(
+                    RichText::new(chrome.placeholder)
+                        .font(chrome.skin.font(16.0))
+                        .color(chrome.skin.ink),
+                )
+                .font(chrome.skin.font(16.0))
+                .frame(egui::Frame::NONE)
+                .margin(egui::Margin {
+                    left: 20,
+                    right: 20,
+                    top: 14,
+                    bottom: 4,
+                })
+                .desired_rows(1)
+                .min_size(egui::vec2(0.0, 30.0))
+        } else {
+            field
                 .hint_text("输入消息，也可以只发送图片")
                 .desired_rows(3)
-                .desired_width(f32::INFINITY)
-                .char_limit(MAX_TEXT_BYTES),
-        );
+        };
+        let response = ui.add_enabled(editable, field);
         if response.changed() {
             if draft.text.len() > text_budget {
                 let mut end = text_budget;
@@ -1270,88 +1304,187 @@ impl ComposerPlatform {
         let mut finish = false;
         let mut transcribe = false;
         let mut cancel = false;
-        ui.horizontal_wrapped(|ui| {
-            let picking = self.pending.values().any(|pending| {
-                pending.kind == PendingKind::Picker && pending.operation.conversation_id == current
-            });
-            for (kind, label) in [
-                (AttachmentKind::Images, "图片"),
-                (AttachmentKind::File, "文件"),
-                (AttachmentKind::Camera, "拍照"),
-            ] {
-                if ui
-                    .add_enabled(
-                        editable
-                            && flags.visible
-                            && !picking
-                            && (kind == AttachmentKind::File || flags.image_input),
-                        egui::Button::new(label),
-                    )
-                    .clicked()
-                {
-                    pick = Some(kind);
-                }
-            }
-            if picking {
-                ui.spinner();
-                ui.label("读取附件中");
-            }
-            let voice = self.drafts[&current].voice.as_ref();
-            if let Some(voice) = voice {
-                match voice.phase {
-                    VoicePhase::Permission => {
-                        ui.spinner();
-                        ui.label("等待麦克风权限");
-                    }
-                    VoicePhase::Starting => {
-                        ui.spinner();
-                        ui.label("正在启动录音");
-                    }
-                    VoicePhase::Recording => {
-                        ui.label(format!("录音 {:.1} 秒", voice.elapsed_ms as f64 / 1000.));
-                        ui.add(egui::ProgressBar::new(voice.level).desired_width(72.));
-                        if ui.button("完成并转写").clicked() {
-                            finish = true;
-                        }
-                    }
-                    VoicePhase::Finishing => {
-                        ui.spinner();
-                        ui.label(if voice.cancel_requested {
-                            "正在取消语音输入"
-                        } else {
-                            "正在结束录音"
-                        });
-                    }
-                    VoicePhase::Recorded => {
-                        ui.label(format!(
-                            "录音完成 · {:.1} 秒",
-                            voice.elapsed_ms as f64 / 1000.
-                        ));
-                        if ui.button("开始转写").clicked() {
-                            transcribe = true;
-                        }
-                    }
-                    VoicePhase::Transcribing => {
-                        ui.spinner();
-                        ui.label("正在转写");
-                    }
-                }
-                if ui
-                    .add_enabled(!voice.cancel_requested, egui::Button::new("取消语音输入"))
-                    .clicked()
-                {
-                    cancel = true;
-                }
-            } else if ui
-                .add_enabled(
-                    editable && flags.visible && flags.voice_input,
-                    egui::Button::new("语音输入"),
-                )
-                .clicked()
-            {
-                microphone = true;
-            }
+        let mut goal_requested = false;
+        let picking = self.pending.values().any(|pending| {
+            pending.kind == PendingKind::Picker && pending.operation.conversation_id == current
         });
+        let toolbar = chrome.as_mut().map(|chrome| {
+            let (full, _) = ui
+                .allocate_exact_size(egui::vec2(ui.available_width(), 48.0), egui::Sense::hover());
+            // Compose's row: 10dp on the left, 12dp on the right, 48dp tall.
+            let row = egui::Rect::from_min_max(
+                egui::pos2(full.left() + 10.0, full.top()),
+                egui::pos2(full.right() - 12.0, full.bottom()),
+            );
+            let plus = egui::Rect::from_min_size(row.min, egui::Vec2::splat(36.0));
+            let permissions = plus.translate(egui::vec2(36.0, 0.0));
+            let response = chrome.icons.button(
+                ui,
+                plus,
+                Icon::Plus,
+                "添加附件",
+                22.0,
+                chrome.skin.ink,
+                editable && flags.visible && !picking,
+            );
+            egui::Popup::menu(&response).show(|ui| {
+                for (kind, label) in [
+                    (AttachmentKind::Images, "图片"),
+                    (AttachmentKind::File, "文件"),
+                    (AttachmentKind::Camera, "拍照"),
+                ] {
+                    if ui
+                        .add_enabled(
+                            kind == AttachmentKind::File || flags.image_input,
+                            egui::Button::new(label),
+                        )
+                        .clicked()
+                    {
+                        pick = Some(kind);
+                        ui.close();
+                    }
+                }
+                if !flags.running
+                    && flags.configured
+                    && flags.can_start_goal
+                    && !self.text().trim().is_empty()
+                    && self.text().len() <= 64 * 1024
+                    && ui.button("启动持续目标").clicked()
+                {
+                    goal_requested = true;
+                    ui.close();
+                }
+            });
+            chrome.permissions = chrome
+                .icons
+                .button(
+                    ui,
+                    permissions,
+                    Icon::Permissions,
+                    "权限设置",
+                    22.0,
+                    chrome.skin.ink,
+                    true,
+                )
+                .clicked();
+            let submit = egui::Rect::from_min_size(
+                egui::pos2(row.right() - 40.0, row.top()),
+                egui::Vec2::splat(40.0),
+            );
+            // Compose: the context ring sits left of a 4dp gap and the mic, then the button.
+            let mic_width = if flags.voice_input { 30.0 } else { 0.0 };
+            let ring = egui::Rect::from_min_size(
+                egui::pos2(submit.left() - 4.0 - mic_width - 26.0, row.center().y - 13.0),
+                egui::Vec2::splat(26.0),
+            );
+            if flags.voice_input && self.drafts[&current].voice.is_none() {
+                let mic = egui::Rect::from_min_size(
+                    egui::pos2(ring.right() + 4.0, row.center().y - 15.0),
+                    egui::Vec2::splat(30.0),
+                );
+                microphone = chrome
+                    .icons
+                    .button(
+                        ui,
+                        mic,
+                        Icon::Mic,
+                        "语音输入",
+                        18.0,
+                        chrome.skin.ink,
+                        editable && flags.visible,
+                    )
+                    .clicked();
+            }
+            chrome.model = Some(egui::Rect::from_min_max(
+                egui::pos2(permissions.right(), row.top()),
+                egui::pos2(ring.left(), row.bottom()),
+            ));
+            chrome.context = Some(ring);
+            submit
+        });
+        if toolbar.is_none() || picking || self.drafts[&current].voice.is_some() {
+            ui.horizontal_wrapped(|ui| {
+                for (kind, label) in [
+                    (AttachmentKind::Images, "图片"),
+                    (AttachmentKind::File, "文件"),
+                    (AttachmentKind::Camera, "拍照"),
+                ] {
+                    if toolbar.is_none()
+                        && ui
+                            .add_enabled(
+                                editable
+                                    && flags.visible
+                                    && !picking
+                                    && (kind == AttachmentKind::File || flags.image_input),
+                                egui::Button::new(label),
+                            )
+                            .clicked()
+                    {
+                        pick = Some(kind);
+                    }
+                }
+                if picking {
+                    ui.spinner();
+                    ui.label("读取附件中");
+                }
+                let voice = self.drafts[&current].voice.as_ref();
+                if let Some(voice) = voice {
+                    match voice.phase {
+                        VoicePhase::Permission => {
+                            ui.spinner();
+                            ui.label("等待麦克风权限");
+                        }
+                        VoicePhase::Starting => {
+                            ui.spinner();
+                            ui.label("正在启动录音");
+                        }
+                        VoicePhase::Recording => {
+                            ui.label(format!("录音 {:.1} 秒", voice.elapsed_ms as f64 / 1000.));
+                            ui.add(egui::ProgressBar::new(voice.level).desired_width(72.));
+                            if ui.button("完成并转写").clicked() {
+                                finish = true;
+                            }
+                        }
+                        VoicePhase::Finishing => {
+                            ui.spinner();
+                            ui.label(if voice.cancel_requested {
+                                "正在取消语音输入"
+                            } else {
+                                "正在结束录音"
+                            });
+                        }
+                        VoicePhase::Recorded => {
+                            ui.label(format!(
+                                "录音完成 · {:.1} 秒",
+                                voice.elapsed_ms as f64 / 1000.
+                            ));
+                            if ui.button("开始转写").clicked() {
+                                transcribe = true;
+                            }
+                        }
+                        VoicePhase::Transcribing => {
+                            ui.spinner();
+                            ui.label("正在转写");
+                        }
+                    }
+                    if ui
+                        .add_enabled(!voice.cancel_requested, egui::Button::new("取消语音输入"))
+                        .clicked()
+                    {
+                        cancel = true;
+                    }
+                } else if toolbar.is_none()
+                    && ui
+                        .add_enabled(
+                            editable && flags.visible && flags.voice_input,
+                            egui::Button::new("语音输入"),
+                        )
+                        .clicked()
+                {
+                    microphone = true;
+                }
+            });
+        }
         if let Some(kind) = pick {
             match self.pick(kind) {
                 Ok(intent) => intents.push(intent),
@@ -1407,65 +1540,118 @@ impl ComposerPlatform {
         } else {
             None
         };
-        ui.horizontal_wrapped(|ui| {
-            if flags.running {
-                let mode = if flags.immediately {
+        if let (Some(chrome), Some(button)) = (chrome.as_mut(), toolbar) {
+            let can_stop = flags.running && !self.has_content() && !flags.cancelling;
+            let mode = if flags.running {
+                if flags.immediately {
                     SubmitMode::Steer
                 } else {
                     SubmitMode::Queue
-                };
-                let label = if flags.immediately {
-                    "立即插话"
-                } else {
-                    "排到下一轮"
-                };
-                if ui
-                    .add_enabled(
-                        can_send
-                            && flags.configured
-                            && current.is_some()
-                            && (!flags.immediately || !flags.cancelling),
-                        egui::Button::new(label),
-                    )
-                    .clicked()
-                {
-                    send = Some(mode);
                 }
             } else {
-                if ui
-                    .add_enabled(
-                        can_send
-                            && (flags.configured
-                                || crate::goal::slash_argument(self.text()).is_some()),
-                        egui::Button::new("发送"),
-                    )
-                    .clicked()
-                {
-                    send = Some(SubmitMode::Send);
-                }
-                if ui
-                    .add_enabled(
-                        can_send
-                            && flags.configured
-                            && flags.can_start_goal
-                            && !self.text().trim().is_empty()
-                            && self.text().len() <= 64 * 1024,
-                        egui::Button::new("启动持续目标"),
-                    )
-                    .clicked()
-                {
-                    send = Some(SubmitMode::Goal);
+                SubmitMode::Send
+            };
+            let allowed = can_send
+                && if flags.running {
+                    flags.configured
+                        && current.is_some()
+                        && (!flags.immediately || !flags.cancelling)
+                } else {
+                    flags.configured || crate::goal::slash_argument(self.text()).is_some()
+                };
+            let active = allowed || can_stop;
+            let disc = button.shrink(2.0);
+            let fill = if active {
+                chrome.skin.accent
+            } else {
+                mix(chrome.skin.input, chrome.skin.ink, 0.10)
+            };
+            ui.painter()
+                .circle_filled(disc.center(), disc.width() * 0.5, fill);
+            let response = chrome.icons.button(
+                ui,
+                button,
+                if can_stop { Icon::Stop } else { Icon::Send },
+                if can_stop { "停止生成" } else { "发送" },
+                22.0,
+                if active {
+                    chrome.skin.surface
+                } else {
+                    chrome.skin.ink
+                },
+                active,
+            );
+            if response.clicked() {
+                if can_stop {
+                    chrome.stop = true;
+                } else {
+                    send = Some(mode);
                 }
             }
-            if self
-                .submitted
-                .values()
-                .any(|value| value.operation.conversation_id == current)
-            {
-                ui.spinner();
-                ui.label("等待接收确认");
+            if goal_requested && can_send {
+                send = Some(SubmitMode::Goal);
             }
-        });
+        } else {
+            ui.horizontal_wrapped(|ui| {
+                if flags.running {
+                    let mode = if flags.immediately {
+                        SubmitMode::Steer
+                    } else {
+                        SubmitMode::Queue
+                    };
+                    let label = if flags.immediately {
+                        "立即插话"
+                    } else {
+                        "排到下一轮"
+                    };
+                    if ui
+                        .add_enabled(
+                            can_send
+                                && flags.configured
+                                && current.is_some()
+                                && (!flags.immediately || !flags.cancelling),
+                            egui::Button::new(label),
+                        )
+                        .clicked()
+                    {
+                        send = Some(mode);
+                    }
+                } else {
+                    if ui
+                        .add_enabled(
+                            can_send
+                                && (flags.configured
+                                    || crate::goal::slash_argument(self.text()).is_some()),
+                            egui::Button::new("发送"),
+                        )
+                        .clicked()
+                    {
+                        send = Some(SubmitMode::Send);
+                    }
+                    if ui
+                        .add_enabled(
+                            can_send
+                                && flags.configured
+                                && flags.can_start_goal
+                                && !self.text().trim().is_empty()
+                                && self.text().len() <= 64 * 1024,
+                            egui::Button::new("启动持续目标"),
+                        )
+                        .clicked()
+                    {
+                        send = Some(SubmitMode::Goal);
+                    }
+                }
+                if self
+                    .submitted
+                    .values()
+                    .any(|value| value.operation.conversation_id == current)
+                {
+                    ui.spinner();
+                    ui.label("等待接收确认");
+                }
+            });
+        }
         if let Some(mode) = send {
             let expected = if mode == SubmitMode::Steer {
                 flags.expected_run.clone()
@@ -1478,7 +1664,7 @@ impl ComposerPlatform {
             }
         }
         self.show_speech(ui, &mut intents, None);
-        intents
+        (intents, chrome)
     }
     pub fn reply_audio_controls(
         &mut self,

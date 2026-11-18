@@ -1,5 +1,8 @@
 package com.suixing.agent.ui.drawer
 
+import com.suixing.agent.core.NativeCore
+import com.suixing.agent.core.NativeCoreJni
+
 /** The final progress for one drag; a later begin invalidates this release. */
 internal data class DrawerDragRelease(val generation: Long, val progress: Float, val startProgress: Float)
 
@@ -36,7 +39,11 @@ internal class DrawerDragAccumulator {
      */
     fun dragBy(dragGeneration: Long, deltaPx: Float): Float? {
         if (!active || generation != dragGeneration) return null
-        accumulatedPx = (accumulatedPx + deltaPx).coerceIn(minOffsetPx, maxOffsetPx)
+        accumulatedPx = if (NativeCore.available) {
+            NativeCoreJni.nativeDrawerOffset(accumulatedPx, deltaPx, minOffsetPx, maxOffsetPx)
+        } else {
+            (accumulatedPx + deltaPx).coerceIn(minOffsetPx, maxOffsetPx)
+        }
         latestProgress = startProgress + accumulatedPx / panelWidthPx
         return latestProgress
     }

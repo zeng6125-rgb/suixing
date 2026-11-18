@@ -34,6 +34,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.FrameRateCategory
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.preferredFrameRate
+import com.suixing.agent.core.NativeCore
+import com.suixing.agent.core.NativeCoreJni
 import com.suixing.agent.ui.components.LocalDrawerBusy
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.unit.dp
@@ -325,6 +327,13 @@ private const val DRAWER_EDGE_EXCLUSION_DP = 32f
 
 /** Wait for a clear lead when the first movements are nearly diagonal. */
 private fun drawerDragAxis(horizontal: Float, vertical: Float, slop: Float): Orientation? {
+    if (NativeCore.available) {
+        return when (NativeCoreJni.nativeDrawerAxis(horizontal, vertical, slop)) {
+            1 -> Orientation.Horizontal
+            2 -> Orientation.Vertical
+            else -> null
+        }
+    }
     val x = abs(horizontal)
     val y = abs(vertical)
     val lead = slop / 2f

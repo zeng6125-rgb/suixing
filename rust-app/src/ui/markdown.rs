@@ -1,4 +1,5 @@
 //! Bounded Markdown presentation. Parsing and layout are retained across repaint frames.
+use super::mobile_chat::{Icon, Icons, Skin, single_line};
 use eframe::egui::{
     self, Color32, FontId, Galley, Id, Label, Sense, Stroke, TextFormat, TextStyle, text::LayoutJob,
 };
@@ -27,12 +28,13 @@ pub struct MarkdownRenderer {
 
 impl MarkdownRenderer {
     /// A changing stream only reparses its unsettled suffix. Unchanged frames do no parsing.
-    pub fn show(
+    pub(super) fn show(
         &mut self,
         ui: &mut egui::Ui,
         source_id: impl Hash + Debug,
         text: &str,
         streaming: bool,
+        chrome: Option<(Skin, &Icons)>,
     ) {
         let id = Id::unique(("jagent_markdown", source_id));
         let frame = ui.ctx().cumulative_frame_nr();
@@ -62,7 +64,7 @@ impl MarkdownRenderer {
                 entry.raw.show(ui, text, id.with("original"));
             } else {
                 for block in &mut entry.settled {
-                    block.show(ui);
+                    block.show(ui, chrome);
                 }
                 if entry.tail_plain {
                     entry
@@ -70,7 +72,7 @@ impl MarkdownRenderer {
                         .show(ui, &text[entry.settled_end..], id.with("tail"));
                 } else {
                     for block in &mut entry.tail {
-                        block.show(ui);
+                        block.show(ui, chrome);
                     }
                 }
             }
@@ -367,7 +369,7 @@ impl PreparedBlock {
         Ok(Self { id, body })
     }
 
-    fn show(&mut self, ui: &mut egui::Ui) {
+    fn show(&mut self, ui: &mut egui::Ui, chrome: Option<(Skin, &Icons)>) {
         ui.push_id(self.id, |ui| {
             match &mut self.body {
                 PreparedBody::Heading(level, text) => {
@@ -389,25 +391,65 @@ impl PreparedBlock {
                         });
                 }
                 PreparedBody::Code(language, text) => {
-                    ui.horizontal(|ui| {
-                        if !language.is_empty() {
-                            ui.label(egui::RichText::new(language.as_str()).small().weak());
-                        }
-                        if ui.small_button("复制代码").clicked() {
-                            ui.ctx().copy_text(text.source.clone());
-                        }
-                    });
-                    egui::Frame::NONE
-                        .fill(ui.visuals().code_bg_color)
-                        .inner_margin(8)
-                        .show(ui, |ui| {
-                            egui::ScrollArea::both()
-                                .id_salt("code")
-                                .max_height(360.0)
-                                .show(ui, |ui| {
-                                    text.show(ui, TextKind::Code);
-                                });
+                    if let Some((skin, icons)) = chrome {
+                        egui::Frame::NONE
+                            .fill(skin.code)
+                            .corner_radius(12)
+                            .inner_margin(egui::Margin::symmetric(12, 8))
+                            .show(ui, |ui| {
+                                ui.set_min_width(ui.available_width());
+                                ui.spacing_mut().item_spacing.y = 3.0;
+                                ui.visuals_mut().code_bg_color = Color32::TRANSPARENT;
+                                let (header, _) = ui.allocate_exact_size(
+                                    egui::vec2(ui.available_width(), 24.0),
+                                    Sense::hover(),
+                                );
+                                let copy = egui::Rect::from_min_max(
+                                    egui::pos2(header.right() - 24.0, header.top()),
+                                    header.right_bottom(),
+                                );
+                                let mut language_bounds = header;
+                                language_bounds.max.x = copy.left() - 4.0;
+                                single_line(
+                                    ui,
+                                    language,
+                                    language_bounds,
+                                    FontId::monospace(12.0),
+                                    skin.ink,
+                                );
+                                if icons
+                                    .button(ui, copy, Icon::Copy, "复制代码", 16.0, skin.ink, true)
+                                    .clicked()
+                                {
+                                    ui.ctx().copy_text(text.source.clone());
+                                }
+                                egui::ScrollArea::both()
+                                    .id_salt("code")
+                                    .auto_shrink([false, true])
+                                    .max_height(360.0)
+                                    .show(ui, |ui| text.show(ui, TextKind::Code));
+                            });
+                    } else {
+                        ui.horizontal(|ui| {
+                            if !language.is_empty() {
+                                ui.label(egui::RichText::new(language.as_str()).small().weak());
+                            }
+                            if ui.small_button("复制代码").clicked() {
+                                ui.ctx().copy_text(text.source.clone());
+                            }
                         });
+                        egui::Frame::NONE
+                            .fill(ui.visuals().code_bg_color)
+                            .inner_margin(8)
+                            .show(ui, |ui| {
+                                egui::ScrollArea::both()
+                                    .id_salt("code")
+                                    .max_height(360.0)
+                                    .show(ui, |ui| {
+                                        text.show(ui, TextKind::Code);
+                                    });
+                            });
+                    }
                 }
                 PreparedBody::Bullet(bullet) => bullet.show(ui, self.id),
                 PreparedBody::Rule => {
@@ -446,7 +488,7 @@ impl PreparedBlock {
                         });
                 }
             }
-            ui.add_space(4.0);
+            ui.add_space(if chrome.is_some() { 2.0 } else { 4.0 });
         });
     }
 }

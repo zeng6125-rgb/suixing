@@ -6,6 +6,7 @@ mod configuration;
 mod context_readout;
 mod conversation_manager;
 mod conversation_preferences;
+mod drawer;
 mod file_transfers;
 pub(crate) mod history;
 mod history_runtime;
@@ -16,6 +17,7 @@ mod legacy_usage;
 mod linux;
 mod markdown;
 mod mcp;
+mod mobile_chat;
 mod notice;
 mod plugins;
 mod schedules;
@@ -54,6 +56,8 @@ pub struct RustApplication {
     settings_view: settings::SettingsView,
     settings_leave: settings_leave::LeaveState,
     composer_platform: composer_platform::ComposerPlatform,
+    mobile_icons: mobile_chat::Icons,
+    drawer_sorting: bool,
     composer_run_pending: Option<crate::platform::permissions::OperationKey>,
     rewrite_pending: Option<String>,
     history_mutations: std::collections::HashSet<crate::display::ViewSource>,
@@ -85,6 +89,7 @@ pub struct RustApplication {
     legacy_confirm: Option<String>,
     legacy_import_report: Option<Result<crate::state::LegacyImportReport, String>>,
     drawer_open: bool,
+    drawer_motion: drawer::DrawerMotion,
     rendered_dark_mode: Option<(bool, i32, i32, i32, Option<[Color32; 12]>, f32)>,
     memory_editor: Option<Memory>,
     memory_delete: Option<String>,
@@ -282,7 +287,13 @@ impl RustApplication {
         }
         ctx.request_repaint();
     }
-    fn composer_input(&mut self, ui: &mut egui::Ui, configured: bool, can_start_goal: bool) {
+    fn composer_input(
+        &mut self,
+        ui: &mut egui::Ui,
+        configured: bool,
+        can_start_goal: bool,
+        skin: Option<mobile_chat::Skin>,
+    ) {
         let flags = ComposerUi {
             loaded: self.state.loaded && self.state.capabilities.chat,
             connected: self.runtime.is_some(),
@@ -307,12 +318,53 @@ impl RustApplication {
             enter_key_sends: self.state.settings.behavior.enter_key_sends,
             expected_run: self.state.current_run_key(),
         };
-        let intents = self.composer_platform.show(ui, &flags);
+        let icons = self.mobile_icons.clone();
+        let placeholder = if self.state.running {
+            "插一句话…".to_owned()
+        } else {
+            let id = self.current_assistant_id();
+            let name = self
+                .state
+                .settings
+                .assistants
+                .iter()
+                .find(|item| id.as_ref() == Some(&item.id))
+                .map(|item| item.name.as_str())
+                .filter(|name| !name.is_empty())
+                .unwrap_or("JAgent");
+            format!("让{name}做点什么…")
+        };
+        let chrome = skin.map(|skin| mobile_chat::InputChrome {
+            icons: &icons,
+            skin,
+            placeholder: &placeholder,
+            model: None,
+            context: None,
+            permissions: false,
+            stop: false,
+        });
+        let (intents, chrome) = self.composer_platform.show(ui, &flags, chrome);
         self.composer_intents(intents);
+        if let Some(chrome) = chrome {
+            if let Some(bounds) = chrome.model {
+                self.composer_model_selector(ui, &chrome, bounds);
+            }
+            if let Some(bounds) = chrome.context {
+                self.composer_context_ring(ui, &chrome, bounds);
+            }
+            if chrome.permissions {
+                self.navigate(Navigation::Page(Page::Settings), true);
+                self.open_chat_permissions();
+            }
+            if chrome.stop && self.stop_current_run() {
+                self.state.cancelling = true;
+            }
+        }
         // Keep the existing CancelRun button and assistant/model, goals, todos,
         // queue and child controls around this input.
     }
     pub fn new(cc: &eframe::CreationContext<'_>, data_dir: PathBuf) -> Self {
+        crate::platform::install_system_fonts(&cc.egui_ctx);
         crate::platform::accessibility::install(&cc.egui_ctx);
         let backend = cc
             .wgpu_render_state
@@ -329,6 +381,8 @@ impl RustApplication {
             settings_view: Default::default(),
             settings_leave: Default::default(),
             composer_platform: Default::default(),
+            mobile_icons: mobile_chat::Icons::load(&cc.egui_ctx),
+            drawer_sorting: false,
             composer_run_pending: None,
             rewrite_pending: None,
             history_mutations: Default::default(),
@@ -350,6 +404,7 @@ impl RustApplication {
             legacy_confirm: None,
             legacy_import_report: None,
             drawer_open: false,
+            drawer_motion: drawer::DrawerMotion::default(),
             rendered_dark_mode: None,
             memory_editor: None,
             memory_delete: None,
@@ -1558,51 +1613,7 @@ impl RustApplication {
             });
         ui.separator();
         ui.label(RichText::new("会话").small().weak());
-        if let Some(id) = self.conversation_delete.clone() {
-            if let Some(conversation) = self
-                .state
-                .conversations
-                .iter()
-                .find(|conversation| conversation.id == id)
-            {
-                ui.add(egui::Label::new(format!("删除“{}”？", conversation.title)).wrap());
-                ui.label(
-                    RichText::new("聊天内容将删除，用量记录会保留。")
-                        .small()
-                        .weak(),
-                );
-                let allowed = self.can_delete_conversation(&id);
-                if self.state.running && self.state.running_conversation.as_ref() == Some(&id) {
-                    ui.label(
-                        RichText::new("此会话正在执行，请先停止或等待结束。")
-                            .small()
-                            .weak(),
-                    );
-                }
-                ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled(allowed, egui::Button::new("确认删除"))
-                        .clicked()
-                    {
-                        navigation = Some(Navigation::DeleteConversation(id.clone()));
-                    }
-                    if ui
-                        .add_enabled(
-                            self.state.conversation_delete_pending.is_none(),
-                            egui::Button::new("保留"),
-                        )
-                        .clicked()
-                    {
-                        self.conversation_delete = None;
-                    }
-                    if self.state.conversation_delete_pending.as_ref() == Some(&id) {
-                        ui.spinner();
-                    }
-                });
-            } else if self.state.conversation_delete_pending.is_none() {
-                self.conversation_delete = None;
-            }
-        }
+        self.drawer_delete_confirmation(ui, &mut navigation);
         let drawer_conversations = self
             .state
             .conversation_preferences
@@ -1695,6 +1706,58 @@ impl RustApplication {
                 });
         }
         navigation
+    }
+
+    fn drawer_delete_confirmation(
+        &mut self,
+        ui: &mut egui::Ui,
+        navigation: &mut Option<Navigation>,
+    ) {
+        if let Some(id) = self.conversation_delete.clone() {
+            if let Some(conversation) = self
+                .state
+                .conversations
+                .iter()
+                .find(|conversation| conversation.id == id)
+            {
+                ui.add(egui::Label::new(format!("删除“{}”？", conversation.title)).wrap());
+                ui.label(
+                    RichText::new("聊天内容将删除，用量记录会保留。")
+                        .small()
+                        .weak(),
+                );
+                let allowed = self.can_delete_conversation(&id);
+                if self.state.running && self.state.running_conversation.as_ref() == Some(&id) {
+                    ui.label(
+                        RichText::new("此会话正在执行，请先停止或等待结束。")
+                            .small()
+                            .weak(),
+                    );
+                }
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(allowed, egui::Button::new("确认删除"))
+                        .clicked()
+                    {
+                        *navigation = Some(Navigation::DeleteConversation(id.clone()));
+                    }
+                    if ui
+                        .add_enabled(
+                            self.state.conversation_delete_pending.is_none(),
+                            egui::Button::new("保留"),
+                        )
+                        .clicked()
+                    {
+                        self.conversation_delete = None;
+                    }
+                    if self.state.conversation_delete_pending.as_ref() == Some(&id) {
+                        ui.spinner();
+                    }
+                });
+            } else if self.state.conversation_delete_pending.is_none() {
+                self.conversation_delete = None;
+            }
+        }
     }
 
     fn navigate(&mut self, navigation: Navigation, narrow: bool) {
@@ -2107,12 +2170,120 @@ impl RustApplication {
             });
     }
 
-    fn chat(&mut self, ui: &mut egui::Ui) {
+    /// Compose's UnifiedSelector: the model id, the reasoning badge and the caret.
+    fn composer_model_selector(
+        &mut self,
+        ui: &mut egui::Ui,
+        chrome: &mobile_chat::InputChrome,
+        bounds: egui::Rect,
+    ) {
+        let skin = chrome.skin;
+        let caption = self.conversation_model_caption();
+        let model_font = skin.font(13.0);
+        let badge_font = skin.font(11.0);
+        let mode = self.state.settings.reasoning_effort.trim();
+        let mode = if mode.is_empty() { "Default" } else { mode };
+        let badge_text = ui
+            .painter()
+            .layout_no_wrap(mode.to_owned(), badge_font.clone(), skin.ink)
+            .size()
+            .x;
+        let badge_width = badge_text + 12.0;
+        let model_width = ui
+            .painter()
+            .layout_no_wrap(caption.clone(), model_font.clone(), skin.ink)
+            .size()
+            .x
+            .min(160.0);
+        let right = bounds.right();
+        let caret = egui::Rect::from_min_max(
+            egui::pos2(right - 16.0, bounds.center().y - 8.0),
+            egui::pos2(right, bounds.center().y + 8.0),
+        );
+        let badge_right = caret.left() - 4.0;
+        let badge = egui::Rect::from_min_max(
+            egui::pos2(badge_right - badge_width, bounds.center().y - 9.5),
+            egui::pos2(badge_right, bounds.center().y + 9.5),
+        );
+        let model_right = badge.left() - 4.0;
+        let model = egui::Rect::from_min_max(
+            egui::pos2((model_right - model_width).max(bounds.left()), bounds.top()),
+            egui::pos2(model_right, bounds.bottom()),
+        );
+        mobile_chat::single_line(ui, &caption, model, model_font, skin.ink);
+        ui.painter().rect_filled(badge, 4.0, skin.primary_container);
+        mobile_chat::single_line(
+            ui,
+            mode,
+            badge.shrink2(egui::vec2(6.0, 2.0)),
+            badge_font,
+            skin.on_primary_container,
+        );
+        let painter = ui.painter();
+        let tip = egui::pos2(caret.center().x, caret.center().y + 2.5);
+        painter.line_segment(
+            [
+                egui::pos2(caret.center().x - 5.0, caret.center().y - 2.0),
+                tip,
+            ],
+            egui::Stroke::new(1.6, skin.ink),
+        );
+        painter.line_segment(
+            [
+                tip,
+                egui::pos2(caret.center().x + 5.0, caret.center().y - 2.0),
+            ],
+            egui::Stroke::new(1.6, skin.ink),
+        );
+        if self.conversation_model_editable() {
+            let response = ui.interact(
+                bounds,
+                ui.make_persistent_id("composer model"),
+                egui::Sense::click(),
+            );
+            egui::Popup::menu(&response).show(|ui| self.conversation_model_menu(ui));
+        }
+    }
+
+    /// Compose's context ring: a 22dp circle with the used context in the middle.
+    fn composer_context_ring(
+        &mut self,
+        ui: &mut egui::Ui,
+        chrome: &mobile_chat::InputChrome,
+        bounds: egui::Rect,
+    ) {
+        let skin = chrome.skin;
+        let used = self
+            .state
+            .selected_conversation
+            .as_ref()
+            .and_then(|id| self.context_readings.get(id))
+            .map_or(0, |(_, reading)| reading.used);
+        let center = bounds.center();
+        let painter = ui.painter();
+        painter.circle_stroke(center, 11.0, Stroke::new(2.0, skin.divider));
+        let label = if used >= 1000 {
+            format!("{}k", used / 1000)
+        } else {
+            used.to_string()
+        };
+        painter.text(
+            center,
+            egui::Align2::CENTER_CENTER,
+            label,
+            skin.font(9.0),
+            skin.accent,
+        );
+    }
+
+    fn chat(&mut self, ui: &mut egui::Ui, skin: Option<mobile_chat::Skin>) {
         if self.child_viewer.is_some() {
             self.child_transcript(ui);
             return;
         }
-        if let Some(conversation_id) = self.state.selected_conversation.clone() {
+        if skin.is_none()
+            && let Some(conversation_id) = self.state.selected_conversation.clone()
+        {
             if full_button(
                 ui,
                 "压缩上下文",
@@ -2128,11 +2299,25 @@ impl RustApplication {
                 }
             }
         }
+        let composer_margin = if skin.is_some() {
+            egui::Margin {
+                left: 16,
+                right: 16,
+                top: 6,
+                bottom: 12,
+            }
+        } else {
+            egui::Margin::same(12)
+        };
+        let mut chat_configured = false;
         egui::Panel::bottom("composer")
-            .frame(egui::Frame::NONE.inner_margin(12))
+            .show_separator_line(skin.is_none())
+            .frame(egui::Frame::NONE.inner_margin(composer_margin))
             .show(ui, |ui| {
-                self.conversation_assistant(ui);
-                self.conversation_model(ui);
+                if skin.is_none() {
+                    self.conversation_assistant(ui);
+                    self.conversation_model(ui);
+                }
                 if self.model_choice_pending.is_some() {
                     ui.horizontal(|ui| {
                         ui.spinner();
@@ -2154,11 +2339,12 @@ impl RustApplication {
                 let configured = resolved.as_ref().is_ok_and(|settings| {
                     !settings.endpoint.trim().is_empty() && !settings.model.trim().is_empty()
                 });
+                chat_configured = configured;
                 if !self.state.capabilities.chat {
                     unavailable(ui, "聊天运行时尚未接入");
-                } else if !configured {
+                } else if !configured && skin.is_none() {
                     ui.label(RichText::new("请先在设置中填写接口地址和模型并保存").weak());
-                } else {
+                } else if skin.is_none() {
                     if let Ok(settings) = &resolved {
                         ui.label(RichText::new(settings.model).small().weak());
                         let reading = self
@@ -2190,8 +2376,14 @@ impl RustApplication {
                         || self.state.goal.status == crate::goal::Status::Completed
                         || self.state.selected_conversation.as_deref()
                             == Some(self.state.goal.chat_id.as_str()));
-                self.composer_input(ui, configured, can_start_goal);
-                if self.state.running {
+                if let Some(skin) = skin {
+                    mobile_chat::composer_frame(skin).show(ui, |ui| {
+                        self.composer_input(ui, configured, can_start_goal, Some(skin));
+                    });
+                } else {
+                    self.composer_input(ui, configured, can_start_goal, None);
+                }
+                if self.state.running && skin.is_none() {
                     ui.horizontal(|ui| {
                         ui.spinner();
                         if self
@@ -2218,13 +2410,21 @@ impl RustApplication {
                     });
                 }
             });
-        egui::CentralPanel::default().show(ui, |ui| {
+        let mut main = egui::CentralPanel::default();
+        if skin.is_some() {
+            main = main.frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(16, 0)));
+        }
+        main.show(ui, |ui| {
             if self.state.conversation_pending {
                 ui.spinner();
                 ui.label("正在读取会话…");
                 return;
             }
             let Some(conversation_id) = self.state.selected_conversation.clone() else {
+                if let Some(skin) = skin {
+                    self.mobile_empty_chat(ui, skin, chat_configured);
+                    return;
+                }
                 ui.add_space(24.0);
                 ui.heading("开始一段对话");
                 ui.label("保存模型配置后即可发送消息。");
@@ -2245,15 +2445,25 @@ impl RustApplication {
                 || (self.state.run_pending
                     && self.state.pending_run_conversation.as_ref() == Some(&conversation_id));
             let editable = !running && !self.history_mutations.contains(&source);
+            if skin.is_some() {
+                self.avatar_view
+                    .set_brand(Some(self.mobile_icons.brand_texture()));
+            }
             self.main_history_face(&source);
             self.history_renderer.set_reply_audio_enabled(
                 self.state.settings.speak_replies && self.runtime.is_some(),
             );
             self.history_renderer
                 .set_navigation_interacting(&source, self.turn_navigation.interacting());
-            let intents =
-                self.history_renderer
-                    .show(ui, &mut self.history_views, &source, running, editable);
+            let chrome = skin.map(|skin| (skin, &self.mobile_icons));
+            let intents = self.history_renderer.show(
+                ui,
+                &mut self.history_views,
+                &source,
+                running,
+                editable,
+                chrome,
+            );
             if let (Some(observer), Some(stamp)) = (
                 self.runtime.as_ref().map(|runtime| runtime.observer_id()),
                 self.history_renderer.presented_stamp(&source).cloned(),
@@ -2422,9 +2632,14 @@ impl RustApplication {
         self.history_renderer
             .set_reply_audio_enabled(self.state.settings.speak_replies && self.runtime.is_some());
         egui::CentralPanel::default().show(ui, |ui| {
-            let intents =
-                self.history_renderer
-                    .show(ui, &mut self.history_views, &source, running, false);
+            let intents = self.history_renderer.show(
+                ui,
+                &mut self.history_views,
+                &source,
+                running,
+                false,
+                None,
+            );
             self.history_intents(intents);
         });
         if cancel {
@@ -3080,6 +3295,10 @@ impl eframe::App for RustApplication {
         self.history_renderer
             .set_behavior(&self.state.settings.behavior);
         self.apply_theme(&context);
+        let frame_bounds = ui.available_rect_before_wrap();
+        let mobile = frame_bounds.width() < 720.0
+            && self.state.page == Page::Chat
+            && self.child_viewer.is_none();
         #[cfg(target_os = "android")]
         if let Some(view) = &mut self.window_insets {
             let [left, top, right, bottom] = view.points(&context);
@@ -3093,6 +3312,7 @@ impl eframe::App for RustApplication {
                     panel
                         .exact_size(size)
                         .resizable(false)
+                        .show_separator_line(!mobile)
                         .frame(egui::Frame::NONE.fill(ui.visuals().panel_fill))
                         .show(ui, |_| {});
                 }
@@ -3179,124 +3399,171 @@ impl eframe::App for RustApplication {
             }
         }
         let narrow = ui.available_width() < 720.0;
-        egui::Panel::top("app_header")
-            .frame(
-                egui::Frame::NONE
-                    .fill(ui.visuals().panel_fill)
-                    .inner_margin(12),
+        let mobile = narrow && mobile;
+        let skin = mobile_chat::Skin::from_app(self, ui);
+        let viewport = ui.available_rect_before_wrap();
+        let mut shell = viewport;
+        shell.min.y = frame_bounds.min.y;
+        if self.state.approval.is_none() {
+            shell.max.y = frame_bounds.max.y;
+        }
+        let mut home = narrow.then(|| {
+            self.drawer_motion.update(
+                &context,
+                viewport,
+                self.state.page == Page::Chat,
+                motion_scale,
+                &mut self.drawer_open,
+            );
+            drawer::home_layer(
+                ui,
+                viewport,
+                shell,
+                self.drawer_motion.progress(),
+                skin.drawer,
             )
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    if narrow && ui.button("菜单").clicked() {
-                        self.drawer_open = !self.drawer_open;
-                    }
-                    #[cfg(target_os = "android")]
-                    let foreground = crate::platform::android::activity_visible();
-                    #[cfg(not(target_os = "android"))]
-                    let foreground = true;
-                    if self.state.page != Page::Chat || !self.chat_portrait(ui, 34.0) {
-                        self.bundled_assets
-                            .show_icon(ui, self.state.running, foreground);
-                    }
-                    self.avatar_view
-                        .set_brand(self.bundled_assets.cached_icon());
-                    ui.label(RichText::new(self.state.page.label()).size(20.0).strong());
-                    ui.menu_button("开源许可", |ui| self.bundled_assets.show_licenses(ui));
-                    if !self.state.loaded {
-                        if self.runtime.is_some() {
-                            if self
-                                .state
-                                .notice
-                                .as_ref()
-                                .is_some_and(|notice| notice.error)
-                            {
-                                if ui.button("重试读取").clicked() {
-                                    self.state.notice = None;
-                                    self.dispatch(Action::Load);
+        });
+        if !narrow {
+            self.drawer_motion = drawer::DrawerMotion::default();
+        }
+        let ui = home.as_mut().unwrap_or(ui);
+        if mobile {
+            skin.background(ui, shell);
+            egui::Panel::top("mobile_chat_header")
+                .exact_size(60.0)
+                .resizable(false)
+                .show_separator_line(false)
+                .frame(egui::Frame::NONE)
+                .show(ui, |ui| self.mobile_header(ui, skin));
+        } else {
+            egui::Panel::top("app_header")
+                .frame(
+                    egui::Frame::NONE
+                        .fill(ui.visuals().panel_fill)
+                        .inner_margin(12),
+                )
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        if narrow && ui.button("菜单").clicked() {
+                            self.drawer_open = !self.drawer_open;
+                            context.request_repaint();
+                        }
+                        #[cfg(target_os = "android")]
+                        let foreground = crate::platform::android::activity_visible();
+                        #[cfg(not(target_os = "android"))]
+                        let foreground = true;
+                        if self.state.page != Page::Chat || !self.chat_portrait(ui, 34.0) {
+                            self.bundled_assets
+                                .show_icon(ui, self.state.running, foreground);
+                        }
+                        self.avatar_view
+                            .set_brand(self.bundled_assets.cached_icon());
+                        ui.label(RichText::new(self.state.page.label()).size(20.0).strong());
+                        ui.menu_button("开源许可", |ui| self.bundled_assets.show_licenses(ui));
+                        if !self.state.loaded {
+                            if self.runtime.is_some() {
+                                if self
+                                    .state
+                                    .notice
+                                    .as_ref()
+                                    .is_some_and(|notice| notice.error)
+                                {
+                                    if ui.button("重试读取").clicked() {
+                                        self.state.notice = None;
+                                        self.dispatch(Action::Load);
+                                    }
+                                } else {
+                                    ui.spinner();
+                                    ui.label(RichText::new("正在读取数据").small().weak());
                                 }
                             } else {
-                                ui.spinner();
-                                ui.label(RichText::new("正在读取数据").small().weak());
+                                ui.label(RichText::new("运行时未连接").small().weak());
                             }
-                        } else {
-                            ui.label(RichText::new("运行时未连接").small().weak());
                         }
-                    }
-                    if self.state.page == Page::Chat && !self.state.running {
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.menu_button("更多", |ui| {
-                                if ui.button("任务清单").clicked() {
-                                    self.todos_open = true;
-                                    ui.close();
-                                }
-                                ui.label(RichText::new("查看子智能体").strong());
-                                let records =
-                                    self.state.selected_conversation.as_ref().and_then(|id| {
-                                        self.state.children.get(id).map(|records| (id, records))
+                        if self.state.page == Page::Chat && !self.state.running {
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.menu_button("更多", |ui| {
+                                        if ui.button("任务清单").clicked() {
+                                            self.todos_open = true;
+                                            ui.close();
+                                        }
+                                        ui.label(RichText::new("查看子智能体").strong());
+                                        let records =
+                                            self.state.selected_conversation.as_ref().and_then(
+                                                |id| {
+                                                    self.state
+                                                        .children
+                                                        .get(id)
+                                                        .map(|records| (id, records))
+                                                },
+                                            );
+                                        if let Some((chat_id, records)) =
+                                            records.filter(|(_, records)| !records.is_empty())
+                                        {
+                                            egui::ScrollArea::vertical().max_height(280.0).show(
+                                                ui,
+                                                |ui| {
+                                                    for child in records {
+                                                        if full_button(
+                                                            ui,
+                                                            &format!(
+                                                                "{} · {}",
+                                                                child.name,
+                                                                child.status.label()
+                                                            ),
+                                                            true,
+                                                        )
+                                                        .clicked()
+                                                        {
+                                                            self.child_viewer = Some((
+                                                                chat_id.clone(),
+                                                                child.id().to_owned(),
+                                                            ));
+                                                            ui.close();
+                                                        }
+                                                    }
+                                                },
+                                            );
+                                        } else {
+                                            ui.label(
+                                                RichText::new("当前会话还没有子智能体").weak(),
+                                            );
+                                        }
                                     });
-                                if let Some((chat_id, records)) =
-                                    records.filter(|(_, records)| !records.is_empty())
-                                {
-                                    egui::ScrollArea::vertical()
-                                        .max_height(280.0)
-                                        .show(ui, |ui| {
-                                            for child in records {
-                                                if full_button(
-                                                    ui,
-                                                    &format!(
-                                                        "{} · {}",
-                                                        child.name,
-                                                        child.status.label()
-                                                    ),
-                                                    true,
-                                                )
-                                                .clicked()
-                                                {
-                                                    self.child_viewer = Some((
-                                                        chat_id.clone(),
-                                                        child.id().to_owned(),
-                                                    ));
-                                                    ui.close();
-                                                }
-                                            }
-                                        });
-                                } else {
-                                    ui.label(RichText::new("当前会话还没有子智能体").weak());
-                                }
-                            });
-                        });
-                    }
+                                },
+                            );
+                        }
+                    });
                 });
-            });
-        notice::show(ui, &mut self.state);
-        let mut expanded = !narrow || self.drawer_open;
-        let mut navigation = None;
-        egui::Panel::left("app_drawer")
-            .exact_size(if narrow {
-                260.0_f32.min(ui.available_width() * 0.8)
-            } else {
-                248.0
-            })
-            .resizable(false)
-            .frame(
-                egui::Frame::NONE
-                    .fill(ui.visuals().faint_bg_color)
-                    .inner_margin(12),
-            )
-            .show_collapsible(ui, &mut expanded, |ui| {
-                navigation = self.draw_drawer(ui);
-            });
-        if narrow {
-            self.drawer_open = expanded;
         }
+        notice::show(ui, &mut self.state);
+        let navigation = if narrow {
+            let progress = self.drawer_motion.progress();
+            drawer::overlay(&context, viewport, progress, skin.drawer, |ui| {
+                self.mobile_drawer(ui, skin)
+            })
+        } else {
+            egui::Panel::left("app_drawer")
+                .exact_size(248.0)
+                .resizable(false)
+                .frame(drawer::sheet_frame(ui.visuals()))
+                .show(ui, |ui| self.draw_drawer(ui))
+                .inner
+        };
         if let Some(navigation) = navigation {
             self.navigate(navigation, narrow);
         }
         if self.state.page != Page::Terminal {
             crate::platform::terminal_keys::invalidate();
         }
-        egui::CentralPanel::default().show(ui, |ui| match self.state.page {
-            Page::Chat => self.chat(ui),
+        let mut content = egui::CentralPanel::default();
+        if mobile {
+            content = content.frame(egui::Frame::NONE);
+        }
+        content.show(ui, |ui| match self.state.page {
+            Page::Chat => self.chat(ui, mobile.then_some(skin)),
             Page::Conversations => self.conversations_page(ui),
             Page::Memory => self.memory(ui),
             Page::Files => self.files(ui),
@@ -3314,6 +3581,9 @@ impl eframe::App for RustApplication {
             Page::Schedules => self.schedules_page(ui),
             Page::Jobs => self.jobs_page(ui),
         });
+        if narrow {
+            drawer::paint_home_corners(ui, shell, self.drawer_motion.progress(), skin.drawer);
+        }
         self.avatar_dialog(&context);
         self.subagent_dialogs(&context);
         self.schedule_dialog(&context);
