@@ -1,6 +1,6 @@
 //! Stateful SSE byte framing and JSON decoding. One completed event is returned per call so an
 //! error in later buffered bytes never discards a delta that the caller has already received.
-//! Network reads, protocol event handling and retries remain owned by Kotlin/OkHttp.
+//! Common text and reasoning events cross the bridge as strings; other events keep their tree.
 
 use crate::{STATUS_CANCELLED, STATUS_OK, STATUS_PANIC, STATUS_REQUEST_ERROR};
 use serde_json::Value;
@@ -28,6 +28,7 @@ const KIND_TREE: u32 = 1;
 const KIND_COMPATIBILITY: u32 = 2;
 const KIND_ERROR: u32 = 3;
 const KIND_NORMALIZE_LINE: u32 = 4;
+const KIND_DELTA: u32 = 5;
 
 #[repr(C)]
 pub struct SseBuffer {
@@ -66,7 +67,7 @@ fn stream(id: u64) -> Option<Arc<Stream>> {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn sx_sse_create() -> u64 {
+pub extern "C" fn sx_sse_create(protocol: u8) -> u64 {
     catch_unwind(|| {
         let mut registry = registry()
             .lock()
@@ -83,7 +84,10 @@ pub extern "C" fn sx_sse_create() -> u64 {
             id,
             Arc::new(Stream {
                 cancelled: AtomicBool::new(false),
-                state: Mutex::new(State::default()),
+                state: Mutex::new(State {
+                    protocol,
+                    ..State::default()
+                }),
             }),
         );
         id
@@ -172,7 +176,11 @@ pub unsafe extern "C" fn sx_sse_feed(
         std::mem::forget(bytes);
         // SAFETY: the output storage is still valid for this call.
         unsafe {
-            output.write(SseBuffer { data, len, capacity })
+            output.write(SseBuffer {
+                data,
+                len,
+                capacity,
+            })
         };
         Ok(())
     }));
@@ -237,6 +245,7 @@ impl Frame {
 
 #[derive(Default)]
 struct State {
+    protocol: u8,
     line: Vec<u8>,
     pending: String,
     pending_units: usize,
@@ -364,11 +373,8 @@ impl State {
         }
         if self.pending.is_empty() {
             // Deliver complete single-line objects immediately, without waiting for a blank line.
-            if let Some(tree) = decode_object(data, cancelled)? {
-                return Ok(Some(Event {
-                    kind: KIND_TREE,
-                    body: tree,
-                }));
+            if let Some(event) = decode_event(data, cancelled, self.protocol)? {
+                return Ok(Some(event));
             }
         }
         if !self.pending.is_empty() {
@@ -392,11 +398,8 @@ impl State {
         let units = self.pending_units;
         self.pending_units = 0;
         self.frame = Frame::default();
-        if let Some(tree) = decode_object(&payload, cancelled)? {
-            Ok(Some(Event {
-                kind: KIND_TREE,
-                body: tree,
-            }))
+        if let Some(event) = decode_event(&payload, cancelled, self.protocol)? {
+            Ok(Some(event))
         } else {
             let mut body = response_buffer(4 + units * 2);
             put_string(&mut body, &payload, units);
@@ -444,13 +447,7 @@ fn response(consumed: usize, flags: u32, event: Option<Event>) -> Vec<u8> {
     } else {
         body.len() - HEADER_BYTES
     };
-    let header = [
-        MAGIC,
-        consumed as u32,
-        flags,
-        kind,
-        body_bytes as u32,
-    ];
+    let header = [MAGIC, consumed as u32, flags, kind, body_bytes as u32];
     if body.is_empty() {
         for value in header {
             body.extend_from_slice(&value.to_le_bytes());
@@ -590,8 +587,154 @@ fn number_tokens<'a>(
     Ok(Some(numbers))
 }
 
-pub(super) fn decode_object(payload: &str, cancelled: &AtomicBool) -> Result<Option<Vec<u8>>, i32> {
-    decode(payload, cancelled, true, true)
+fn compact_delta(chunk: &Value, protocol: u8) -> Option<(&str, &str)> {
+    // Preserve the Kotlin error path even for an explicit JSON null.
+    if chunk.get("error").is_some() {
+        return None;
+    }
+    match protocol {
+        1 => {
+            if chunk.get("usage").is_some()
+                || chunk.get("reasoning_content").is_some()
+                || chunk.get("reasoning").is_some()
+            {
+                return None;
+            }
+            let choice = chunk.get("choices")?.as_array()?.first()?.as_object()?;
+            if choice
+                .get("finish_reason")
+                .is_some_and(|value| !value.is_null())
+                || ["message", "reasoning_content", "reasoning"]
+                    .iter()
+                    .any(|key| choice.contains_key(*key))
+            {
+                return None;
+            }
+            let delta = choice.get("delta")?.as_object()?;
+            if delta.contains_key("tool_calls") {
+                return None;
+            }
+            let string = |key| match delta.get(key) {
+                None | Some(Value::Null) => Some(""),
+                Some(value) => value.as_str(),
+            };
+            let content = string("content")?;
+            let primary = string("reasoning_content")?;
+            let secondary = string("reasoning")?;
+            Some((
+                content,
+                if primary.trim_matches(kotlin_whitespace).is_empty() {
+                    secondary
+                } else {
+                    primary
+                },
+            ))
+        }
+        2 if chunk.get("type")?.as_str()? == "content_block_delta" => {
+            let delta = chunk.get("delta")?;
+            match delta.get("type")?.as_str()? {
+                "text_delta" => Some((delta.get("text")?.as_str()?, "")),
+                "thinking_delta" => Some(("", delta.get("thinking")?.as_str()?)),
+                _ => None,
+            }
+        }
+        3 => match chunk.get("type")?.as_str()? {
+            "response.output_text.delta" => Some((chunk.get("delta")?.as_str()?, "")),
+            "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
+                Some(("", chunk.get("delta")?.as_str()?))
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn decode_event(payload: &str, cancelled: &AtomicBool, protocol: u8) -> Result<Option<Event>, i32> {
+    let Some((value, tokens)) = parse_json(payload, cancelled)? else {
+        return Ok(None);
+    };
+    if !value.is_object() {
+        return Ok(None);
+    }
+    if let Some((text, reasoning)) = compact_delta(&value, protocol) {
+        let text_units = text.encode_utf16().count();
+        let reasoning_units = reasoning.encode_utf16().count();
+        let mut body = response_buffer(8 + 2 * (text_units + reasoning_units));
+        put_string(&mut body, text, text_units);
+        put_string(&mut body, reasoning, reasoning_units);
+        return Ok(Some(Event {
+            kind: KIND_DELTA,
+            body,
+        }));
+    }
+    Ok(
+        encode_tree(&value, tokens, cancelled, true)?.map(|body| Event {
+            kind: KIND_TREE,
+            body,
+        }),
+    )
+}
+
+#[cfg(test)]
+mod delta_tests {
+    use super::*;
+
+    #[test]
+    fn projects_text_and_reasoning_through_the_stream_wire() {
+        let cases = [
+            (
+                1,
+                r#"{"choices":[{"finish_reason":null,"delta":{"content":"\n🙂","reasoning_content":" ","reasoning":"想"}}]}"#,
+                "\n🙂",
+                "想",
+            ),
+            (
+                2,
+                r#"{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"想"}}"#,
+                "",
+                "想",
+            ),
+            (
+                3,
+                r#"{"type":"response.output_text.delta","delta":"\n🙂"}"#,
+                "\n🙂",
+                "",
+            ),
+        ];
+        for (protocol, json, text, reasoning) in cases {
+            let mut state = State {
+                protocol,
+                ..State::default()
+            };
+            let frame = format!("data: {json}\n\n");
+            let output = state
+                .feed(frame.as_bytes(), 0, &AtomicBool::new(false))
+                .unwrap();
+            let mut body = response_buffer(32);
+            for piece in [text, reasoning] {
+                put_string(&mut body, piece, piece.encode_utf16().count());
+            }
+            assert_eq!(&output[12..16], &KIND_DELTA.to_le_bytes());
+            assert_eq!(&output[HEADER_BYTES..], &body[HEADER_BYTES..]);
+        }
+    }
+
+    #[test]
+    fn errors_and_non_delta_fields_keep_their_tree() {
+        for json in [
+            r#"{"error":null,"choices":[{"delta":{"content":"a"}}]}"#,
+            r#"{"choices":[{"finish_reason":"stop","delta":{"content":"a"}}]}"#,
+            r#"{"choices":[{"delta":{"content":"a","tool_calls":[]}}]}"#,
+        ] {
+            assert_eq!(
+                decode_event(json, &AtomicBool::new(false), 1)
+                    .unwrap()
+                    .unwrap()
+                    .kind,
+                KIND_TREE
+            );
+        }
+    }
 }
 
 pub(super) fn decode_value(
@@ -599,25 +742,35 @@ pub(super) fn decode_value(
     cancelled: &AtomicBool,
     object_only: bool,
 ) -> Result<Option<Vec<u8>>, i32> {
-    decode(payload, cancelled, object_only, false)
+    let Some((value, tokens)) = parse_json(payload, cancelled)? else {
+        return Ok(None);
+    };
+    if object_only && !value.is_object() {
+        return Ok(None);
+    }
+    encode_tree(&value, tokens, cancelled, false)
 }
 
-fn decode(
-    payload: &str,
+fn parse_json<'a>(
+    payload: &'a str,
     cancelled: &AtomicBool,
-    object_only: bool,
-    framed: bool,
-) -> Result<Option<Vec<u8>>, i32> {
+) -> Result<Option<(Value, Vec<&'a str>)>, i32> {
     let Some(tokens) = number_tokens(payload, cancelled)? else {
         return Ok(None);
     };
     let Ok(value) = serde_json::from_str::<Value>(payload) else {
         return Ok(None);
     };
-    if object_only && !value.is_object() {
-        return Ok(None);
-    }
     check_cancel(cancelled)?;
+    Ok(Some((value, tokens)))
+}
+
+fn encode_tree(
+    value: &Value,
+    tokens: Vec<&str>,
+    cancelled: &AtomicBool,
+    framed: bool,
+) -> Result<Option<Vec<u8>>, i32> {
     let mut encoder = Encoder {
         output: if framed {
             // Start geometric growth at a power of two after reserving the wire header.
@@ -630,7 +783,7 @@ fn decode(
         nodes: 0,
         cancelled,
     };
-    if !encoder.value(&value, 0)? || encoder.tokens.next().is_some() {
+    if !encoder.value(value, 0)? || encoder.tokens.next().is_some() {
         return Ok(None);
     }
     Ok(Some(encoder.output))

@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="rust_accessibility_service_description">帮助JAgent识别界面、在所选屏幕点击和输入文字；请由您在系统设置中启用。</string>
+</resources>

@@ -1,6 +1,7 @@
 //! Android PTY ownership. Registry handles never expose/reuse a kernel file descriptor.
 //! All argv/envp storage is prepared before fork; the child only uses async-signal-safe syscalls.
 use crate::SearchBuffer;
+use crate::terminal_output::{HISTORY_UNITS, READ_UNITS, TerminalOutput};
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::io;
@@ -109,6 +110,21 @@ fn master(handle: i32) -> Result<Arc<Master>, i32> {
         .cloned()
         .ok_or(libc::EBADF)
 }
+
+#[derive(Default)]
+struct Outputs {
+    next: i64,
+    rings: HashMap<i64, Arc<Mutex<TerminalOutput>>>,
+}
+
+fn outputs() -> &'static Mutex<Outputs> {
+    static OUTPUTS: OnceLock<Mutex<Outputs>> = OnceLock::new();
+    OUTPUTS.get_or_init(|| Mutex::new(Outputs::default()))
+}
+
+fn output(id: i64) -> Result<Arc<Mutex<TerminalOutput>>, i32> {
+    lock(outputs()).rings.get(&id).cloned().ok_or(libc::EBADF)
+}
 fn errno() -> i32 {
     io::Error::last_os_error()
         .raw_os_error()
@@ -200,6 +216,55 @@ fn signal(p: &Process, signal: i32) -> Result<(), i32> {
         return Err(errno());
     }
     Ok(())
+}
+#[cfg(feature = "rust-app")]
+fn peek_owned(pid: i32) -> Result<bool, i32> {
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    loop {
+        if unsafe {
+            libc::waitid(
+                libc::P_PID,
+                pid as libc::id_t,
+                &mut info,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            )
+        } < 0
+        {
+            let error = errno();
+            if error == libc::EINTR {
+                continue;
+            }
+            return Err(error);
+        }
+        let observed = unsafe { info.si_pid() };
+        if observed != 0 && observed != pid {
+            return Err(libc::ECHILD);
+        }
+        return Ok(observed != 0);
+    }
+}
+/// Rust-only observation; no new C symbol or ABI is introduced.
+#[cfg(feature = "rust-app")]
+pub(crate) fn owned_exit_ready(handle: i32, pid: i32) -> Result<bool, i32> {
+    let process = owned_process(handle, pid)?;
+    let mut exited = lock(&process.exit);
+    if exited.is_some() {
+        return Err(libc::ECHILD);
+    }
+    let result = peek_owned(pid);
+    if result == Err(libc::ECHILD) {
+        *exited = Some(-1);
+        drop(exited);
+        let mut registry = lock(processes());
+        if registry
+            .pids
+            .get(&pid)
+            .is_some_and(|owner| Arc::ptr_eq(owner, &process))
+        {
+            registry.pids.remove(&pid);
+        }
+    }
+    result
 }
 fn wait(p: &Arc<Process>, timeout: Option<i32>) -> Result<i32, i32> {
     let deadline = timeout.map(|ms| Instant::now() + Duration::from_millis(ms as u64));
@@ -444,12 +509,35 @@ fn writes() -> &'static Mutex<Writes> {
 fn write_task(id: u64) -> Result<Arc<WriteTask>, i32> {
     lock(writes()).tasks.get(&id).cloned().ok_or(libc::EBADF)
 }
-fn write_bytes(task: &WriteTask, bytes: &[u8]) -> Result<i32, i32> {
+#[cfg(feature = "rust-app")]
+pub(crate) fn write_scoped(id: u64, bytes: &[u8], cancel: &AtomicBool) -> io::Result<usize> {
+    if id == 0 || id > i64::MAX as u64 || bytes.len() > 16384 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "无效scoped PTY写入参数",
+        ));
+    }
+    match catch_unwind(AssertUnwindSafe(|| {
+        let task = write_task(id)?;
+        write_bytes(&task, bytes, Some(cancel))
+    })) {
+        Ok(Ok(count)) => usize::try_from(count).map_err(|_| io::Error::other("PTY写入长度无效")),
+        Ok(Err(error)) if error == libc::ECANCELED => Err(io::Error::new(
+            io::ErrorKind::Interrupted,
+            "所属任务或PTY写入已取消；可能已提交部分字节",
+        )),
+        Ok(Err(error)) => Err(io::Error::from_raw_os_error(error)),
+        Err(_) => Err(io::Error::other("scoped PTY写入异常；可能已提交部分字节")),
+    }
+}
+fn write_bytes(task: &WriteTask, bytes: &[u8], scope_cancel: Option<&AtomicBool>) -> Result<i32, i32> {
     let mut at = 0;
     let deadline = Instant::now() + Duration::from_secs(2);
     while at < bytes.len() {
         task.io.active()?;
-        if task.cancelled.load(Ordering::Acquire) {
+        if task.cancelled.load(Ordering::Acquire)
+            || scope_cancel.is_some_and(|flag| flag.load(Ordering::Acquire))
+        {
             return Err(libc::ECANCELED);
         }
         if Instant::now() >= deadline {
@@ -477,7 +565,7 @@ fn write_bytes(task: &WriteTask, bytes: &[u8]) -> Result<i32, i32> {
             poll_io(
                 &task.io,
                 libc::POLLOUT,
-                milliseconds(deadline).min(1000),
+                milliseconds(deadline).min(if scope_cancel.is_some() { 40 } else { 1000 }),
                 Some(&task.wake),
             )?;
             continue;
@@ -537,6 +625,7 @@ pub unsafe extern "C" fn sx_pty_read(
     handle: i32,
     max: i32,
     timeout: i32,
+    history_id: i64,
     output: *mut SearchBuffer,
     error: *mut i32,
 ) -> i32 {
@@ -557,6 +646,11 @@ pub unsafe extern "C" fn sx_pty_read(
     let result = unsafe {
         status(error, || {
             let io = master(handle)?;
+            let history = if history_id == 0 {
+                None
+            } else {
+                Some(self::output(history_id)?)
+            };
             if !poll_io(&io, libc::POLLIN, timeout, None)? {
                 timed_out = true;
                 return Ok(());
@@ -577,6 +671,9 @@ pub unsafe extern "C" fn sx_pty_read(
             }
             bytes.truncate(n as usize);
             if !bytes.is_empty() {
+                if let Some(history) = history {
+                    lock(&history).append(&bytes, false);
+                }
                 let owned = bytes.into_boxed_slice();
                 let len = owned.len();
                 unsafe {
@@ -593,6 +690,86 @@ pub unsafe extern "C" fn sx_pty_read(
         TIMEOUT
     } else {
         result
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_pty_output_create(id: *mut i64, error: *mut i32) -> i32 {
+    unsafe {
+        status(error, || {
+            let mut all = lock(outputs());
+            let next = all.next.checked_add(1).ok_or(libc::EMFILE)?;
+            all.rings.try_reserve(1).map_err(|_| libc::ENOMEM)?;
+            all.rings.insert(
+                next,
+                Arc::new(Mutex::new(TerminalOutput::new(HISTORY_UNITS))),
+            );
+            all.next = next;
+            id.write(next);
+            Ok(())
+        })
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn sx_pty_output_release(id: i64) {
+    lock(outputs()).rings.remove(&id);
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_pty_output_update(id: i64, clear: bool, error: *mut i32) -> i32 {
+    unsafe {
+        status(error, || {
+            let history = output(id)?;
+            let mut history = lock(&history);
+            if clear {
+                history.clear();
+            } else {
+                history.append(&[], true);
+            }
+            Ok(())
+        })
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_pty_output_truncated(
+    id: i64,
+    truncated: *mut bool,
+    error: *mut i32,
+) -> i32 {
+    unsafe {
+        status(error, || {
+            let history = output(id)?;
+            truncated.write(lock(&history).truncated());
+            Ok(())
+        })
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_pty_output_read(
+    id: i64,
+    has_cursor: bool,
+    cursor: *mut i64,
+    budget: i32,
+    units: *mut u16,
+    len: *mut usize,
+    truncated: *mut bool,
+    error: *mut i32,
+) -> i32 {
+    unsafe {
+        status(error, || {
+            let start = has_cursor.then(|| cursor.read());
+            let buf = slice::from_raw_parts_mut(units, READ_UNITS);
+            let history = output(id)?;
+            let (count, next, lost) =
+                lock(&history).read(start, budget.clamp(1, READ_UNITS as i32) as usize, buf);
+            len.write(count);
+            cursor.write(next);
+            truncated.write(lost);
+            Ok(())
+        })
     }
 }
 #[unsafe(no_mangle)]
@@ -665,7 +842,7 @@ pub unsafe extern "C" fn sx_pty_write(
             } else {
                 slice::from_raw_parts(bytes, len)
             };
-            count.write(write_bytes(&t, data)?);
+            count.write(write_bytes(&t, data, None)?);
             Ok(())
         })
     }

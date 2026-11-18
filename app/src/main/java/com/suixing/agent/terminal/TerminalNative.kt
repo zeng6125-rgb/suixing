@@ -23,7 +23,14 @@ internal object TerminalNative {
         arrayOf("PATH=/system/bin:/system/xbin", "TERM=xterm-256color", "LANG=C.UTF-8", "PS1=$ ", "HOME=$cwd"),
         cwd, columns, rows,
     )
-    external fun nativeRead(masterFd: Int, maxBytes: Int, timeoutMs: Int): ByteArray?
+    fun nativeRead(masterFd: Int, maxBytes: Int, timeoutMs: Int, history: Long = 0): ByteArray? =
+        nativeReadChunk(masterFd, maxBytes, timeoutMs, history)
+    private external fun nativeReadChunk(masterFd: Int, maxBytes: Int, timeoutMs: Int, history: Long): ByteArray?
+    external fun nativeCreateOutput(): Long
+    external fun nativeReleaseOutput(history: Long)
+    external fun nativeUpdateOutput(history: Long, clear: Boolean)
+    external fun nativeOutputTruncated(history: Long): Boolean
+    external fun nativeReadOutput(history: Long, hasCursor: Boolean, cursor: Long, maxBytes: Int): TerminalRead
     external fun nativeWrite(masterFd: Int, bytes: ByteArray): Int
     external fun nativeResize(masterFd: Int, columns: Int, rows: Int)
     external fun nativeSignalGroup(pid: Int, signal: Int)

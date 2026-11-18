@@ -625,6 +625,10 @@ internal class ChatStore(private val root: File) {
     private fun windowFrom(file: RandomAccessFile, name: String, end: Long, turns: Int): MessageWindow {
         require(turns >= 1) { "turns must be at least 1, was $turns" }
         if (end == 0L) return MessageWindow(emptyList(), 0, atStart = true)
+        NativeChatLog.windowStart(file, end, turns)?.takeIf { end - it <= Int.MAX_VALUE }?.let { start ->
+            val entries = readEntries(file, name, start, end)
+            return MessageWindow(entries.map { it.message }, entries.firstOrNull()?.offset ?: start, atStart = start == 0L)
+        }
 
         var budget = INITIAL_WINDOW_BYTES
         var parsedFrom = end

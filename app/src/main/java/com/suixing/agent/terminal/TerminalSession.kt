@@ -36,8 +36,6 @@ internal class TerminalSession(
     val revision = _revision.asStateFlow()
     private val _historyLimited = MutableStateFlow(false)
     val historyLimited = _historyLimited.asStateFlow()
-    private val outputRing = TerminalOutputRing()
-    private val decoder = TerminalUtf8Decoder()
     private val closing = AtomicBoolean(false)
     private val finished = CompletableDeferred<Unit>()
     private val nativeLock = Any()
@@ -58,7 +56,7 @@ internal class TerminalSession(
     var onPaste: (() -> Unit)? = null
     val shell: String get() = launch.label
     val cwd: String get() = launch.cwd
-    val historyTruncated: Boolean get() = outputRing.truncated
+    val historyTruncated: Boolean get() = TerminalNative.nativeOutputTruncated(outputHistory)
 
     // The emulator and view share Main; all native calls run on IO.
     val display = TerminalDisplay(object : TerminalDisplay.Host {
@@ -74,6 +72,7 @@ internal class TerminalSession(
         override fun copy(text: String) { onCopy?.invoke(text) }
         override fun paste() { onPaste?.invoke() }
     }, 80, 24)
+    private val outputHistory = TerminalNative.nativeCreateOutput()
 
     fun start() {
         check(_status.value == SessionStatus.STARTING)
@@ -139,16 +138,15 @@ internal class TerminalSession(
             try {
                 while (!closing.get() && isActive) {
                     // close waits for this reader before releasing/reusing the fd.
-                    val bytes = TerminalNative.nativeRead(masterFd, 16 * 1024, 200) ?: continue
+                    val bytes = TerminalNative.nativeRead(masterFd, 16 * 1024, 200, outputHistory) ?: continue
                     if (bytes.isEmpty()) break
-                    outputRing.append(decoder.decode(bytes))
                     log.append(bytes)
                     chunks.send(bytes)
                 }
             } catch (error: Exception) {
                 if (!closing.get()) failure = error.message ?: error.javaClass.simpleName
             } finally {
-                outputRing.append(decoder.decode(ByteArray(0), end = true))
+                TerminalNative.nativeUpdateOutput(outputHistory, clear = false)
                 if (!closing.get()) {
                     scope.launch { finish(force = failure != null, failure = failure) }
                 }
@@ -173,13 +171,15 @@ internal class TerminalSession(
     suspend fun write(text: String, caller: TerminalCaller? = null) = writeBytes(text.toByteArray(Charsets.UTF_8), caller)
     /** The line discipline delivers ^C to the actual foreground process group. */
     suspend fun interrupt(caller: TerminalCaller? = null) = writeBytes(byteArrayOf(3), caller)
-    fun read(cursor: Long?, maxBytes: Int): TerminalRead = outputRing.read(cursor, maxBytes)
+    fun read(cursor: Long?, maxBytes: Int): TerminalRead =
+        TerminalNative.nativeReadOutput(outputHistory, cursor != null, cursor ?: 0, maxBytes)
+    fun releaseOutput() = TerminalNative.nativeReleaseOutput(outputHistory)
     suspend fun transcript(): String = withContext(Dispatchers.Main.immediate) {
         display.emulator.screen.transcriptText
     }
     fun clearOutput() {
         display.emulator.clearScreenAndHistory()
-        outputRing.clear()
+        TerminalNative.nativeUpdateOutput(outputHistory, clear = true)
         _historyLimited.value = false
         publish(android.os.SystemClock.uptimeMillis())
     }

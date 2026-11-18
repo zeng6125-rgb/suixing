@@ -335,6 +335,9 @@ private fun drawerDragAxis(horizontal: Float, vertical: Float, slop: Float): Ori
     }
 }
 
+private fun canStartDrawerDrag(progress: Float, delta: Float): Boolean =
+    (delta > 0f && progress < 1f) || (delta < 0f && progress > 0f)
+
 /** Horizontal content keeps a drag only when it can scroll in the finger's direction. */
 @Composable
 internal fun Modifier.drawerScrollPriority(canScroll: (Float) -> Boolean): Modifier {
@@ -505,13 +508,19 @@ internal fun SuixingDrawer(
                                     if (childCanScroll) {
                                         childOwnsGesture = true
                                     } else if (!childOwnsGesture || dx != 0f) {
-                                        if (ownedSession == null) {
-                                            if (childOwnsGesture) appliedHorizontal = horizontal - dx
-                                            ownedSession = state.beginGesture()
-                                            ownedGeneration = dragAccumulator.begin(state.visualProgress.value, panelPx)
+                                        val delta = if (childOwnsGesture) dx else horizontal
+                                        if (ownedSession != null || canStartDrawerDrag(state.visualProgress.value, delta)) {
+                                            if (ownedSession == null) {
+                                                if (childOwnsGesture) appliedHorizontal = horizontal - dx
+                                                ownedSession = state.beginGesture()
+                                                ownedGeneration = dragAccumulator.begin(state.visualProgress.value, panelPx)
+                                            }
+                                            childOwnsGesture = false
+                                            isDrag = true
+                                        } else if (!childOwnsGesture) {
+                                            // Keep a wrong-way swipe with the page until the finger lifts.
+                                            break
                                         }
-                                        childOwnsGesture = false
-                                        isDrag = true
                                     }
                                 }
                             }
@@ -649,7 +658,7 @@ internal fun SuixingDrawer(
                             var horizontal = 0f
                             var vertical = 0f
                             var isDrag = false
-                            var isVertical = false
+                            var ignoreSwipe = false
                             var movedPastSlop = false
                             var appliedHorizontal = 0f
                             val interruptedMotion = state.motion
@@ -666,19 +675,20 @@ internal fun SuixingDrawer(
                                     horizontal += change.position.x - change.previousPosition.x
                                     vertical += change.position.y - change.previousPosition.y
                                     event.changes.forEach { it.consume() }
-                                    if (!isDrag && !isVertical) {
+                                    if (!isDrag && !ignoreSwipe) {
                                         val slop = viewConfiguration.touchSlop
                                         movedPastSlop = movedPastSlop || maxOf(abs(horizontal), abs(vertical)) > slop
                                         val axis = drawerDragAxis(horizontal, vertical, slop)
-                                        isDrag = axis == Orientation.Horizontal
-                                        // An undecided swipe that ends past slop is not a shield tap.
-                                        isVertical = axis == Orientation.Vertical ||
-                                            (movedPastSlop && !isDrag && !change.pressed &&
-                                                event.changes.none { it.pressed })
+                                        isDrag = axis == Orientation.Horizontal &&
+                                            (ownedSession != null ||
+                                                canStartDrawerDrag(state.visualProgress.value, horizontal))
+                                        // A rejected or undecided swipe must not become a shield tap.
+                                        ignoreSwipe = !isDrag && (axis != null ||
+                                            (movedPastSlop && !change.pressed && event.changes.none { it.pressed }))
                                         if (isDrag && ownedSession == null) {
                                             ownedSession = state.beginGesture()
                                             ownedGeneration = dragAccumulator.begin(state.visualProgress.value, panelPx)
-                                        } else if (isVertical) {
+                                        } else if (ignoreSwipe) {
                                             val session = ownedSession
                                             val generation = ownedGeneration
                                             ownedSession = null
@@ -711,7 +721,7 @@ internal fun SuixingDrawer(
                                             tracker.trackDrawerPointer(replacement)
                                             continue
                                         }
-                                        if (isVertical) break
+                                        if (ignoreSwipe) break
                                         if (!isDrag) {
                                             // **轻点 = 点遮罩**：外部状态动作优先，作废旧拖拽。
                                             scope.launch(start = CoroutineStart.UNDISPATCHED) {

@@ -104,6 +104,8 @@ internal class TerminalSessionManager(
             withContext(runtime.main) { session.start() }
             _backgroundWarning.value = runtime.ensureForeground(context)
             saveLocked()
+            val activeIds = _entries.value.mapTo(HashSet()) { it.info.id }
+            retained.forEach { if (it.info.id !in activeIds) it.session?.releaseOutput() }
             entry
         } catch (failure: Throwable) {
             if (publishedId != null) {
@@ -114,7 +116,9 @@ internal class TerminalSessionManager(
             withContext(NonCancellable + runtime.io) {
                 try {
                     val owner = ownedSession
-                    if (owner == null) runtime.releaseUnclaimed(native) else owner.stop()
+                    if (owner == null) runtime.releaseUnclaimed(native) else {
+                        try { owner.stop() } finally { owner.releaseOutput() }
+                    }
                 } catch (cleanup: Throwable) {
                     if (cleanup !== failure) failure.addSuppressed(cleanup)
                 }
@@ -145,7 +149,12 @@ internal class TerminalSessionManager(
         val removed = _entries.value.filter { it.info.id == id }
         _entries.value = _entries.value.filterNot { it.info.id == id }
         saveLocked()
-        removed.forEach { it.session?.display?.emulator?.close() }
+        removed.forEach { entry ->
+            entry.session?.let { session ->
+                session.releaseOutput()
+                session.display.emulator.close()
+            }
+        }
     }
 
     suspend fun removeLinux(distro: LinuxDistro) = mutex.withLock {

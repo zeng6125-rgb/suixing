@@ -6,6 +6,8 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
 use std::slice;
 use std::sync::atomic::AtomicBool;
+#[cfg(feature = "rust-app")]
+use std::sync::atomic::Ordering;
 
 const MAGIC: u32 = 0x314d_5853;
 const COMPATIBILITY: i32 = 4;
@@ -122,7 +124,8 @@ impl Writer {
     }
 }
 
-enum Block {
+#[cfg_attr(feature = "rust-app", derive(Clone, Debug, PartialEq, Eq))]
+pub enum Block {
     Heading(u32, String),
     Paragraph(String),
     Bullet(Bullet),
@@ -131,12 +134,254 @@ enum Block {
     Rule,
     Table(Vec<String>, Vec<Vec<String>>),
 }
-struct Bullet {
-    items: Vec<String>,
-    ordered: bool,
-    depth: u32,
-    start: u32,
-    children: BTreeMap<usize, Vec<Bullet>>,
+#[cfg_attr(feature = "rust-app", derive(Clone, Debug, PartialEq, Eq))]
+pub struct Bullet {
+    pub items: Vec<String>,
+    pub ordered: bool,
+    pub depth: u32,
+    pub start: u32,
+    pub children: BTreeMap<usize, Vec<Bullet>>,
+}
+/// A complete parse. Inline runs are keyed by their exact block/list/cell source.
+#[cfg(feature = "rust-app")]
+#[derive(Debug)]
+pub struct Document {
+    pub blocks: Vec<Block>,
+    pub inline: BTreeMap<String, Vec<InlineRun>>,
+}
+
+#[cfg(feature = "rust-app")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ParseError {
+    Cancelled,
+    Unsupported,
+    Budget,
+    Failed,
+}
+
+/// Callers may lower the native ceilings; raising them never disables a ceiling.
+#[cfg(feature = "rust-app")]
+#[derive(Clone, Copy, Debug)]
+pub struct ParseLimits {
+    pub source_bytes: usize,
+    pub nodes: usize,
+    pub output_bytes: usize,
+    pub list_depth: u32,
+    pub inline_bytes: usize,
+}
+
+#[cfg(feature = "rust-app")]
+impl Default for ParseLimits {
+    fn default() -> Self {
+        Self {
+            source_bytes: MAX_DOCUMENT,
+            nodes: MAX_NODES,
+            output_bytes: MAX_RESPONSE,
+            list_depth: 32,
+            inline_bytes: MAX_DOCUMENT,
+        }
+    }
+}
+
+/// Parse without JNI/task ownership. Failure never supplies a partial document.
+#[cfg(feature = "rust-app")]
+pub fn parse(text: &str, cancelled: &AtomicBool) -> Result<Document, ParseError> {
+    parse_with_limits(text, cancelled, ParseLimits::default())
+}
+
+/// Incremental renderers use exactly the same fence dialect as the block parser.
+#[cfg(feature = "rust-app")]
+pub fn is_fence_start(line: &str) -> bool {
+    fence(trim(line)).is_some()
+}
+
+#[cfg(feature = "rust-app")]
+pub fn is_fence_end(line: &str) -> bool {
+    fence_close(line)
+}
+
+#[cfg(feature = "rust-app")]
+pub fn parse_with_limits(
+    text: &str,
+    cancelled: &AtomicBool,
+    limits: ParseLimits,
+) -> Result<Document, ParseError> {
+    match catch_unwind(AssertUnwindSafe(|| parse_typed(text, cancelled, limits))) {
+        Ok(result) => result,
+        Err(_) => Err(ParseError::Failed),
+    }
+}
+
+#[cfg(feature = "rust-app")]
+fn typed_cancel(cancelled: &AtomicBool) -> Result<(), ParseError> {
+    if cancelled.load(Ordering::Relaxed) {
+        Err(ParseError::Cancelled)
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(feature = "rust-app")]
+fn typed_status(status: i32, cancelled: &AtomicBool) -> ParseError {
+    if cancelled.load(Ordering::Relaxed) {
+        ParseError::Cancelled
+    } else if status == COMPATIBILITY {
+        ParseError::Budget
+    } else {
+        ParseError::Failed
+    }
+}
+
+#[cfg(feature = "rust-app")]
+struct TypedBudget {
+    nodes: usize,
+    bytes: usize,
+    max_nodes: usize,
+    max_bytes: usize,
+}
+
+#[cfg(feature = "rust-app")]
+impl TypedBudget {
+    fn add(&mut self, nodes: usize, bytes: usize) -> Result<(), ParseError> {
+        self.nodes = self.nodes.checked_add(nodes).ok_or(ParseError::Budget)?;
+        self.bytes = self.bytes.checked_add(bytes).ok_or(ParseError::Budget)?;
+        if self.nodes > self.max_nodes || self.bytes > self.max_bytes {
+            return Err(ParseError::Budget);
+        }
+        Ok(())
+    }
+}
+
+#[cfg(feature = "rust-app")]
+fn parse_typed(
+    text: &str,
+    cancelled: &AtomicBool,
+    limits: ParseLimits,
+) -> Result<Document, ParseError> {
+    typed_cancel(cancelled)?;
+    if text.len() > limits.source_bytes.min(MAX_DOCUMENT) {
+        return Err(ParseError::Budget);
+    }
+    // Preflight lines/depth before allocating a block tree or entering list recursion.
+    let max_nodes = limits.nodes.min(MAX_NODES);
+    let mut line_count = 0usize;
+    for line in text.split(['\r', '\n']) {
+        typed_cancel(cancelled)?;
+        line_count += 1;
+        if line_count > max_nodes {
+            return Err(ParseError::Budget);
+        }
+        if list_marker(line).is_some_and(|marker| marker.depth > limits.list_depth.min(32)) {
+            return Err(ParseError::Budget);
+        }
+        for (index, ch) in line.char_indices() {
+            if index % POLL == 0 {
+                typed_cancel(cancelled)?;
+            }
+            if (!ch.is_ascii() && (crate::java_whitespace(ch) || ch.is_numeric()))
+                || matches!(ch, '\u{0085}' | '\u{2028}' | '\u{2029}')
+            {
+                return Err(ParseError::Unsupported);
+            }
+        }
+    }
+    let normalized = if text.contains('\r') {
+        Cow::Owned(text.replace("\r\n", "\n").replace('\r', "\n"))
+    } else {
+        Cow::Borrowed(text)
+    };
+    let blocks =
+        parse_blocks(&normalized, cancelled).map_err(|status| typed_status(status, cancelled))?;
+    let mut budget = TypedBudget {
+        nodes: 0,
+        bytes: 0,
+        max_nodes,
+        max_bytes: limits.output_bytes.min(MAX_RESPONSE),
+    };
+    let mut inline = BTreeMap::new();
+    for block in &blocks {
+        typed_cancel(cancelled)?;
+        budget.add(1, std::mem::size_of::<Block>())?;
+        match block {
+            Block::Heading(_, text) | Block::Paragraph(text) | Block::Quote(text) => {
+                typed_leaf(text, &mut inline, &mut budget, cancelled, limits)?;
+            }
+            Block::Bullet(bullet) => {
+                typed_bullet(bullet, &mut inline, &mut budget, cancelled, limits)?;
+            }
+            Block::Code(language, code) => budget.add(0, language.len() + code.len())?,
+            Block::Rule => {}
+            Block::Table(header, rows) => {
+                budget.add(rows.len(), 0)?;
+                for row in std::iter::once(header).chain(rows) {
+                    for cell in row {
+                        typed_leaf(cell, &mut inline, &mut budget, cancelled, limits)?;
+                    }
+                }
+            }
+        }
+    }
+    typed_cancel(cancelled)?;
+    Ok(Document { blocks, inline })
+}
+
+#[cfg(feature = "rust-app")]
+fn typed_bullet(
+    bullet: &Bullet,
+    inline: &mut BTreeMap<String, Vec<InlineRun>>,
+    budget: &mut TypedBudget,
+    cancelled: &AtomicBool,
+    limits: ParseLimits,
+) -> Result<(), ParseError> {
+    typed_cancel(cancelled)?;
+    budget.add(1, std::mem::size_of::<Bullet>())?;
+    for text in &bullet.items {
+        typed_leaf(text, inline, budget, cancelled, limits)?;
+    }
+    for children in bullet.children.values() {
+        for child in children {
+            typed_bullet(child, inline, budget, cancelled, limits)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "rust-app")]
+fn typed_leaf(
+    text: &str,
+    inline: &mut BTreeMap<String, Vec<InlineRun>>,
+    budget: &mut TypedBudget,
+    cancelled: &AtomicBool,
+    limits: ParseLimits,
+) -> Result<(), ParseError> {
+    typed_cancel(cancelled)?;
+    budget.add(1, text.len())?;
+    if inline.contains_key(text)
+        || !text
+            .bytes()
+            .any(|b| matches!(b, b'\\' | b'`' | b'*' | b'_' | b'~' | b'[' | b'/'))
+    {
+        return Ok(());
+    }
+    if text.len() > limits.inline_bytes.min(MAX_DOCUMENT) {
+        return Err(ParseError::Budget);
+    }
+    let runs = InlineParser::new(text, cancelled)
+        .parse()
+        .map_err(|status| typed_status(status, cancelled))?;
+    // Include both the exact source map key and all owned inline strings/targets.
+    budget.add(0, text.len())?;
+    for run in &runs {
+        typed_cancel(cancelled)?;
+        budget.add(
+            1,
+            std::mem::size_of::<InlineRun>()
+                + run.text.len()
+                + run.link.as_ref().map_or(0, String::len),
+        )?;
+    }
+    inline.insert(text.to_owned(), runs);
+    Ok(())
 }
 struct ListMarker<'a> {
     text: &'a str,
@@ -637,10 +882,11 @@ fn parse_document(text: &str, cancelled: &AtomicBool) -> Result<Vec<u8>, i32> {
     Ok(writer.bytes)
 }
 
-struct InlineRun {
-    text: String,
-    style: u32,
-    link: Option<String>,
+#[cfg_attr(feature = "rust-app", derive(Clone, Debug, PartialEq, Eq))]
+pub struct InlineRun {
+    pub text: String,
+    pub style: u32,
+    pub link: Option<String>,
 }
 
 fn image_segments(units: &[u16], streaming: bool, writer: &mut Writer) -> Result<(), i32> {
@@ -696,10 +942,10 @@ fn runtime(op: u32, units: &[u16], parameter: usize, flag: bool) -> Result<Vec<u
     if op == 3 {
         let mut writer = Writer::new(MAX_RESPONSE); image_segments(units, flag, &mut writer)?; return Ok(writer.bytes);
     }
-    let text = String::from_utf16(units).map_err(|_| COMPATIBILITY)?;
     let cancelled = AtomicBool::new(false); let mut writer = Writer::new(MAX_RESPONSE);
     match op {
         1 => {
+            let text = String::from_utf16(units).map_err(|_| COMPATIBILITY)?;
             for ch in text.chars() {
                 if !ch.is_ascii() && (crate::java_whitespace(ch) || ch.is_numeric()) || matches!(ch, '\u{0085}' | '\u{2028}' | '\u{2029}') { return Err(COMPATIBILITY); }
             }
@@ -715,6 +961,7 @@ fn runtime(op: u32, units: &[u16], parameter: usize, flag: bool) -> Result<Vec<u
             }
         }
         2 => {
+            let text = String::from_utf16(units).map_err(|_| COMPATIBILITY)?;
             let runs = InlineParser::new(&text, &cancelled).parse()?;
             writer.u32(runs.len() as u32)?;
             for run in runs { writer.string(&run.text)?; writer.u32(run.style)?; writer.string(run.link.as_deref().unwrap_or(""))?; }
@@ -738,10 +985,11 @@ fn runtime(op: u32, units: &[u16], parameter: usize, flag: bool) -> Result<Vec<u
             }
         }
         6 => {
-            let lines: Vec<_> = text.split('\n').collect(); let mut rows = Vec::new(); let mut start_units = 0;
+            let text = String::from_utf16(units).map_err(|_| COMPATIBILITY)?;
+            let mut lines = text.split('\n').peekable(); let mut rows = Vec::new(); let mut start_units = 0;
             let mut partial = None;
-            for (index, line) in lines.iter().enumerate() {
-                let last = index == lines.len()-1; let row = trim(line);
+            while let Some(line) = lines.next() {
+                let last = lines.peek().is_none(); let row = trim(line);
                 if row.is_empty() {
                     if !last { return Err(COMPATIBILITY); }
                 } else {
@@ -751,7 +999,7 @@ fn runtime(op: u32, units: &[u16], parameter: usize, flag: bool) -> Result<Vec<u
                 }
                 if !last { start_units += line.encode_utf16().count() + 1; }
             }
-            writer.u32(start_units as u32)?; writer.u32(lines[0].encode_utf16().count() as u32)?; writer.u32(rows.len() as u32)?;
+            writer.u32(start_units as u32)?; writer.u32(rows.len() as u32)?;
             for row in &rows { write_strings(&mut writer, row)?; }
             writer.u32(u32::from(partial.is_some()))?; if let Some(cells) = partial { write_strings(&mut writer, &cells)?; }
         }
@@ -1116,6 +1364,23 @@ mod tests {
         (0..input.u32().unwrap())
             .map(|_| input.string().unwrap())
             .collect()
+    }
+
+    #[test]
+    fn streaming_suffix_handles_code_fences_and_table_rows() {
+        let code: Vec<u16> = "😀".encode_utf16().collect();
+        assert_eq!(runtime(5, &code, 0, true).unwrap(), [0, 0, 0, 0, 1, 0, 0, 0]);
+        let close: Vec<u16> = "\n```".encode_utf16().collect();
+        assert_eq!(runtime(5, &close, 0, true), Err(COMPATIBILITY));
+
+        let table: Vec<u16> = "| 😀 | b |\n| c |".encode_utf16().collect();
+        let bytes = runtime(6, &table, 2, false).unwrap();
+        let mut row = crate::Input { bytes: &bytes, at: 0 };
+        assert_eq!(row.u32().unwrap(), "| 😀 | b |\n".encode_utf16().count() as u32);
+        assert_eq!(row.u32().unwrap(), 1);
+        assert_eq!(strings(&mut row), ["😀", "b"]);
+        assert_eq!(row.u32().unwrap(), 1);
+        assert_eq!(strings(&mut row), ["c", ""]);
     }
 
     #[test]

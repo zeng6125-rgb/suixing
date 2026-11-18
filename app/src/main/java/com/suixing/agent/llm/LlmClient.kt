@@ -453,7 +453,7 @@ class LlmClient(http: OkHttpClient? = null) {
             // The turn this attempt has assembled so far, kept outside the block below: a stream
             // that breaks after delivering text still has to hand that text back — see `received`.
             var partial: StreamTurn? = null
-            val nativeStream = NativeSseStream.open()
+            val nativeStream = NativeSseStream.open(settings.protocol)
             val outcome = runCatching {
                 nativeStream.use {
                     call.readCancellable(onCancellation = { nativeStream?.cancel() }) { response ->
@@ -502,6 +502,8 @@ class LlmClient(http: OkHttpClient? = null) {
                         val stream = StreamTurn(protocol, onToolPrepared).also { partial = it }
                         val source = body.source()
                         var unparsed = 0
+                        val deliverText: (String) -> Unit = { piece -> received = true; onDelta(piece) }
+                        val deliverReasoning: (String) -> Unit = { piece -> received = true; onReasoning(piece) }
                         /**
                          * 已经解析好的 chunk 交给 stream。
                          *
@@ -516,11 +518,7 @@ class LlmClient(http: OkHttpClient? = null) {
                                     ?: error.toString()
                                 throw LlmException("接口返回错误：$message")
                             }
-                            stream.accept(
-                                chunk,
-                                { piece -> received = true; onDelta(piece) },
-                                { piece -> received = true; onReasoning(piece) },
-                            )
+                            stream.accept(chunk, deliverText, deliverReasoning)
                             // Tool-call deltas do not travel through the two callbacks above, so a round
                             // that only asked for a tool would look like "nothing arrived" — and be
                             // retried, which is a second request for a turn the endpoint already
@@ -552,6 +550,9 @@ class LlmClient(http: OkHttpClient? = null) {
                                     if (call.isCanceled()) throw CancellationException("已停止")
                                     val event = nativeStream.feed(bytes, offset, if (eof) 0 else count - offset, eof)
                                     if (event.sawDone) sawDone = true
+                                    if (event.text != null) {
+                                        stream.acceptDelta(event.text, event.reasoning, deliverText, deliverReasoning)
+                                    }
                                     event.chunk?.let(::acceptChunk)
                                     event.compatibilityPayload?.let(::acceptPayload)
                                     offset += event.consumed
@@ -763,6 +764,11 @@ class LlmClient(http: OkHttpClient? = null) {
                 PROTOCOL_RESPONSES -> acceptResponses(chunk, onDelta, onReasoning)
                 else -> acceptChatCompletions(chunk, onDelta, onReasoning)
             }
+        }
+
+        fun acceptDelta(text: String, reasoning: String?, onDelta: (String) -> Unit, onReasoning: (String) -> Unit) {
+            emitThinking(reasoning, onReasoning)
+            emitText(text, onDelta)
         }
 
         // ---- the accumulator every protocol writes into (one copy, three readers) ----

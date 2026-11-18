@@ -1,10 +1,160 @@
 //! Chunked reads on the committed descriptor. No seek position or storage mutation.
 use crate::{STATUS_PANIC, STATUS_REQUEST_ERROR};
 use std::{
+    collections::VecDeque,
     ffi::c_void,
     panic::{AssertUnwindSafe, catch_unwind},
+    sync::atomic::AtomicBool,
 };
 type Consume = unsafe extern "C" fn(*mut c_void, *const u8, usize) -> i32;
+
+/// Find a page using validated message metadata before materializing messages.
+fn window_start(
+    end: u64,
+    want: usize,
+    mut read_at: impl FnMut(&mut [u8], u64) -> Result<(), i32>,
+) -> Result<u64, i32> {
+    let cancelled = AtomicBool::new(false);
+    let mut buffer = vec![0; 65536];
+    let mut line = Vec::new();
+    let mut budget = 256 * 1024;
+    let mut parsed_from = end;
+    let mut known = 0;
+    loop {
+        let raw_from = end.saturating_sub(budget);
+        let from = if raw_from == 0 {
+            0
+        } else {
+            let size = (end - raw_from).min(buffer.len() as u64) as usize;
+            read_at(&mut buffer[..size], raw_from)?;
+            buffer[..size]
+                .iter()
+                .position(|&byte| byte == b'\n')
+                .map_or(parsed_from, |i| (raw_from + i as u64 + 1).min(parsed_from))
+        };
+        if parsed_from - from > i32::MAX as u64 {
+            return Err(4);
+        }
+        let remaining = want - known;
+        let mut starts = VecDeque::new();
+        let mut count = 0;
+        let mut mark = |bytes: &[u8], offset: u64| -> Result<(), i32> {
+            if !bytes.is_empty() && crate::usage_projection::message_starts_turn(bytes, &cancelled)?
+            {
+                if starts.len() == remaining {
+                    starts.pop_front();
+                }
+                starts.push_back(offset);
+                count += 1;
+            }
+            Ok(())
+        };
+        let mut pos = from;
+        let mut offset = from;
+        while pos < parsed_from {
+            let size = (parsed_from - pos).min(buffer.len() as u64) as usize;
+            read_at(&mut buffer[..size], pos)?;
+            let mut start = 0;
+            for (i, &byte) in buffer[..size].iter().enumerate() {
+                if byte == b'\n' {
+                    if line.is_empty() {
+                        mark(&buffer[start..i], offset)?;
+                    } else {
+                        line.extend_from_slice(&buffer[start..i]);
+                        mark(&line, offset)?;
+                        line.clear();
+                    }
+                    start = i + 1;
+                    offset = pos + start as u64;
+                }
+            }
+            line.extend_from_slice(&buffer[start..size]);
+            if line.len() > 32 * 1024 * 1024 {
+                return Err(4);
+            }
+            pos += size as u64;
+        }
+        mark(&line, offset)?;
+        line.clear();
+        if from == 0 && count <= remaining {
+            return Ok(0);
+        }
+        if count >= remaining {
+            return Ok(starts[0]);
+        }
+        known += count;
+        parsed_from = from;
+        budget = (budget * 4).min(end);
+    }
+}
+
+#[cfg(test)]
+mod window_tests {
+    use super::window_start;
+
+    #[test]
+    fn skips_steers_and_keeps_prelude_when_the_entire_log_fits() {
+        let mut bytes = Vec::new();
+        let mut offset = 0;
+        for (id, role, steer) in [
+            (0, "assistant", false),
+            (1, "user", false),
+            (2, "user", true),
+            (3, "user", false),
+        ] {
+            if id == 3 {
+                offset = bytes.len() as u64;
+            }
+            let row = serde_json::json!({"id":id.to_string(),"role":role,"steer":steer,"timestamp":0,
+                "text": if id == 2 { "x".repeat(290_000) } else { String::new() }});
+            bytes.extend(row.to_string().bytes());
+            bytes.push(b'\n');
+        }
+        let plan = |want| {
+            window_start(bytes.len() as u64, want, |out, at| {
+                out.copy_from_slice(&bytes[at as usize..at as usize + out.len()]);
+                Ok(())
+            })
+            .unwrap()
+        };
+        assert_eq!(plan(1), offset);
+        assert_eq!(plan(2), 0);
+    }
+
+    #[test]
+    fn damaged_records_defer_to_the_existing_diagnostic_reader() {
+        let bytes = b"{\"id\":\"x\",\"role\":\"assistant\",\"timestamp\":0,\"text\":7}\n";
+        assert!(
+            window_start(bytes.len() as u64, 1, |out, at| {
+                out.copy_from_slice(&bytes[at as usize..at as usize + out.len()]);
+                Ok(())
+            })
+            .is_err()
+        );
+    }
+}
+
+#[cfg(unix)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_chat_log_window_start(fd: i32, end: i64, want: i32) -> i64 {
+    use std::{
+        fs::File,
+        mem::ManuallyDrop,
+        os::{fd::FromRawFd, unix::fs::FileExt},
+    };
+    if fd < 0 || end < 0 || want < 1 {
+        return -1;
+    }
+    catch_unwind(|| {
+        let file = ManuallyDrop::new(unsafe { File::from_raw_fd(fd) });
+        window_start(end as u64, want as usize, |buffer, at| {
+            file.read_exact_at(buffer, at)
+                .map_err(|_| STATUS_REQUEST_ERROR)
+        })
+        .map_or(-1, |start| start as i64)
+    })
+    .unwrap_or(-1)
+}
 fn flush(
     output: &mut Vec<u8>,
     count: &mut u32,

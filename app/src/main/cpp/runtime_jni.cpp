@@ -10,6 +10,7 @@ int sx_transcript_plan(const std::uint8_t*, std::size_t, SearchBuffer*);
 void sx_transcript_page(const std::uint8_t*, std::size_t, int, int*);
 using LogConsume = int (*)(void*, const std::uint8_t*, std::size_t);
 int sx_chat_log_read(int, std::uint64_t, std::uint64_t, LogConsume, void*);
+std::int64_t sx_chat_log_window_start(int, std::int64_t, int);
 int sx_chat_log_cut(const std::uint8_t*, std::size_t, std::size_t, bool);
 int sx_chat_log_locate(int, std::uint64_t, std::uint64_t, const std::uint8_t*, std::size_t, std::int64_t*);
 int sx_markdown_runtime(std::uint32_t, const std::uint16_t*, std::size_t, std::size_t, bool, SearchBuffer*);
@@ -81,6 +82,11 @@ Java_com_suixing_agent_data_NativeChatLogJni_nativeCut(JNIEnv* env, jobject, jby
     env->GetByteArrayRegion(request, 0, length, reinterpret_cast<jbyte*>(bytes.data()));
     if (env->ExceptionCheck()) return -1;
     return sx_chat_log_cut(bytes.data(), bytes.size(), want, atStart);
+}
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_suixing_agent_data_NativeChatLogJni_nativeWindowStart(JNIEnv* env, jobject, jobject file, jlong end, jint turns) {
+    const auto fd = descriptor(env, file);
+    return env->ExceptionCheck() ? -1 : sx_chat_log_window_start(fd, end, turns);
 }
 extern "C" JNIEXPORT jlong JNICALL
 Java_com_suixing_agent_data_NativeChatLogJni_nativeLocate(JNIEnv* env, jobject, jobject file, jlong start, jlong end, jbyteArray request) {

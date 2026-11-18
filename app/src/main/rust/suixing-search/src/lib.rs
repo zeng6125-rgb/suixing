@@ -669,7 +669,7 @@ mod file_find;
 mod json_document;
 mod json_encode;
 mod loop_policy;
-mod markdown_native;
+pub mod markdown_native;
 mod memory_prompt;
 #[cfg(target_os = "android")]
 mod pty_android;
@@ -678,7 +678,22 @@ mod skill_catalog;
 mod sse_stream;
 mod text_read;
 mod terminal;
+#[cfg(any(target_os = "android", test))]
+mod terminal_output;
 mod transcript_plan;
 mod usage_aggregation;
 mod usage_projection;
+
+#[cfg(feature = "rust-app")]
+pub mod data_plan;
+#[cfg(feature = "rust-app")]
+pub mod run_ledger;
+#[cfg(feature = "rust-app")]
+pub mod rust_protocol;
+#[cfg(all(feature = "rust-app", target_os = "android"))]
+pub mod rust_terminal;
+#[cfg(feature = "rust-app")]
+pub mod text_parsers;
+#[cfg(feature = "rust-app")]
+pub mod tool_plan;
 mod wire_text;

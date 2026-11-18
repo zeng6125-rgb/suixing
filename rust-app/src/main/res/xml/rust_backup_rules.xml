@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Used on Android 11 and below (android:fullBackupContent), where cloud backup and
+  device transfer share one rule set. The API key lives in the same DataStore file
+  as every other setting, so the whole `datastore` directory stays out of backups.
+
+  `chats` is deliberately **not** excluded here, unlike in `data_extraction_rules.xml` (Android 12+,
+  where the two rule sets are separate): this one file governs both cloud backup *and* the local
+  device transfer, so excluding the conversations would also take them away from a phone swap — and
+  keeping them across a swap is worth more to the user than keeping them out of a cloud copy. The
+  cloud side of the privacy rule lives in `data_extraction_rules.xml`; do not "fix" the missing
+  exclude here without also giving up old-device transfer.
+-->
+<full-backup-content>
+    <exclude domain="file" path="linux" />
+    <exclude domain="file" path="datastore" />
+    <!-- issue #58 #2：API ≤30 只有这一份规则，且**云备份与换机迁移共用**。
+         这里排除的是「凭据与诊断」，不动 `chats`：会话留在换机迁移里是刻意的
+         （见上面注释），而凭据不该进云端副本。 -->
+    <exclude domain="file" path="plugins" />
+    <exclude domain="file" path="toolout" />
+    <exclude domain="file" path="mcp.json" />
+    <exclude domain="file" path="last-http-error.json" />
+    <exclude domain="file" path="retry-trace.log" />
+    <exclude domain="file" path="fx-trace.log" />
+    <exclude domain="file" path="voice-trace.log" />
+    <exclude domain="file" path="scroll-diag.log" />
+    <exclude domain="file" path="console-trace.log" />
+    <exclude domain="file" path="settings.json" />
+    <exclude domain="file" path="rust-state/linux-operations" />
+    <exclude domain="file" path="rust-state/toolout" />
+</full-backup-content>

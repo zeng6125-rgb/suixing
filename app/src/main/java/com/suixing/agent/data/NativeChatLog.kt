@@ -15,6 +15,7 @@ internal object NativeChatLogJni {
     external fun nativeRead(fd: FileDescriptor, from: Long, end: Long, sink: NativeChatLogSink): Boolean
     external fun nativeLocate(fd: FileDescriptor, from: Long, end: Long, needle: ByteArray): Long
     external fun nativeCut(turns: ByteArray, want: Int, atStart: Boolean): Int
+    external fun nativeWindowStart(fd: FileDescriptor, end: Long, turns: Int): Long
 }
 
 internal object NativeChatLog {
@@ -26,6 +27,9 @@ internal object NativeChatLog {
 
     fun locate(file: RandomAccessFile, from: Long, end: Long, needle: ByteArray): Long? =
         if (NativeCore.available) NativeChatLogJni.nativeLocate(file.fd, from, end, needle) else null
+
+    fun windowStart(file: RandomAccessFile, end: Long, turns: Int): Long? =
+        if (NativeCore.available) NativeChatLogJni.nativeWindowStart(file.fd, end, turns).takeIf { it >= 0 } else null
 
     fun nextLine(file: RandomAccessFile, from: Long, end: Long, probe: Long): Long? {
         if (!NativeCore.available) return null

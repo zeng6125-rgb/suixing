@@ -79,14 +79,14 @@ internal object NativeMarkdown {
         return intArrayOf(if (bodyLine && relative == 0) from else scanFrom + relative, nextBody)
     }
     fun tableAppend(source: String, from: Int, columns: Int, previousLength: Int, previousCells: List<String>?): NativeTableAppend? {
-        val reader = runtime(6, source, from, columns) ?: return null
-        val last = from + reader.integer()
-        val previousRowUnchanged = from + reader.integer() == previousLength && previousCells != null
-        val completed = List(reader.count()) { index ->
-            val count = reader.count()
-            if (index == 0 && previousRowUnchanged) { repeat(count) { reader.skipString() }; requireNotNull(previousCells) }
-            else List(count) { reader.string() }
-        }
+        val completedRow = previousCells?.takeIf { source.getOrNull(previousLength) == '\n' }
+        val scanFrom = if (completedRow == null) from else previousLength + 1
+        val reader = runtime(6, source, scanFrom, columns) ?: return null
+        val last = scanFrom + reader.integer()
+        val count = reader.count()
+        val completed = ArrayList<List<String>>(count + if (completedRow == null) 0 else 1)
+        if (completedRow != null) completed.add(completedRow)
+        repeat(count) { completed.add(List(reader.count()) { reader.string() }) }
         val partial = if (reader.integer() == 0) null else List(reader.count()) { reader.string() }
         return NativeTableAppend(last, completed, partial)
     }
@@ -209,7 +209,6 @@ internal object NativeMarkdown {
             input.get(bytes)
             return bytes.toString(Charsets.UTF_8)
         }
-        fun skipString() { val size = integer(); input.position(input.position() + size) }
         fun blocks(depth: Int): List<MdBlock> { valid(depth <= 8); return List(count()) { block(depth) } }
         private fun block(depth: Int): MdBlock {
             nodes++

@@ -16,3 +16,7 @@ dependencyResolutionManagement {
 
 rootProject.name = "Suixing"
 include(":app")
+if (providers.gradleProperty("rustApp").orNull == "true") {
+    include(":rustApp")
+    project(":rustApp").projectDir = file("rust-app")
+}

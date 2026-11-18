@@ -46,6 +46,7 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.yield
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -293,6 +294,47 @@ class DrawerPointerLoopTest {
         )) {
             frames(90)
             assertEquals(0f, state.visualProgress.value, 0.0001f)
+        }
+
+    @Test fun `a left swipe on the closed drawer leaves the events and does not open on a recoil`() {
+        val left = change(16L, 140f, 180f)
+        val recoil = change(32L, 156f, 140f)
+        withPointerLoop(DrawerValue.Closed, shield = false, events = listOf(
+            event(change(0L, 180f, 180f, previousPressed = false)),
+            event(left),
+            event(recoil),
+            event(change(48L, 156f, 156f, pressed = false)),
+        )) {
+            assertFalse(left.isConsumed)
+            assertFalse(recoil.isConsumed)
+            assertEquals(0f, state.visualProgress.value, 0f)
+            frames(90)
+            assertEquals(0f, state.visualProgress.value, 0f)
+        }
+    }
+
+    @Test fun `a right swipe on the open shield stays open through a recoil and release`() =
+        withPointerLoop(DrawerValue.Open, shield = true, includeHost = true, events = listOf(
+            event(change(0L, 350f, 350f, previousPressed = false)),
+            event(change(16L, 390f, 350f)),
+            event(change(32L, 374f, 390f)),
+            event(change(48L, 374f, 374f, pressed = false)),
+        )) {
+            assertEquals(1f, state.visualProgress.value, 0f)
+            frames(90)
+            assertEquals(1f, state.visualProgress.value, 0f)
+        }
+
+    @Test fun `an opening drag follows a reversal before release`() =
+        withPointerLoop(DrawerValue.Closed, shield = false, events = listOf(
+            event(change(0L, 100f, 100f, previousPressed = false)),
+            event(change(64L, 180f, 100f)),
+            event(change(128L, 130f, 180f)),
+            event(change(228L, 130f, 130f, pressed = false)),
+        )) {
+            assertEquals(30f * DRAWER_INPUT_GAIN / 300f, state.visualProgress.value, 0.0001f)
+            frames(90)
+            assertEquals(0f, state.visualProgress.value, 0f)
         }
 
     @Test fun `a vertical decision stays with the child when later movement turns horizontal`() {

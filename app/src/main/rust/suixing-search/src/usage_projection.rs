@@ -231,6 +231,7 @@ fn contains_surrogate_escape(bytes: &[u8], cancelled: &AtomicBool) -> Result<boo
 
 struct ProjectedMessage {
     role: String,
+    steer: bool,
     timestamp: i64,
     model: String,
     prompt: i32,
@@ -251,6 +252,7 @@ impl<'de> Deserialize<'de> for ProjectedMessage {
                 let mut id = false;
                 let mut role = None;
                 let mut timestamp = None;
+                let mut steer = false;
                 let mut model = String::new();
                 let (mut prompt, mut completion, mut reasoning, mut cached) = (0, 0, 0, 0);
                 // RawValue borrows each serialized value. Large text/image/tool bodies are scanned
@@ -267,6 +269,7 @@ impl<'de> Deserialize<'de> for ProjectedMessage {
                         "role" => {
                             role = Some(serde_json::from_str(value).map_err(|_| parse_error())?)
                         }
+                        "steer" => steer = value == "true",
                         "timestamp" => {
                             timestamp =
                                 Some(serde_json::from_str(value).map_err(|_| parse_error())?)
@@ -295,6 +298,7 @@ impl<'de> Deserialize<'de> for ProjectedMessage {
                 // A missing timestamp invokes Kotlin's clock-valued default, so defer that record.
                 Ok(ProjectedMessage {
                     role: role.ok_or_else(|| de::Error::custom("missing role"))?,
+                    steer,
                     timestamp: timestamp.ok_or_else(|| de::Error::custom("missing timestamp"))?,
                     model,
                     prompt,
@@ -306,6 +310,16 @@ impl<'de> Deserialize<'de> for ProjectedMessage {
         }
         deserializer.deserialize_map(MessageVisitor)
     }
+}
+
+pub(super) fn message_starts_turn(bytes: &[u8], cancelled: &AtomicBool) -> Result<bool, i32> {
+    let text = std::str::from_utf8(bytes).map_err(|_| STATUS_COMPATIBILITY)?;
+    if contains_surrogate_escape(bytes, cancelled)? {
+        return Err(STATUS_COMPATIBILITY);
+    }
+    let message: ProjectedMessage =
+        serde_json::from_str(text).map_err(|_| STATUS_COMPATIBILITY)?;
+    Ok(message.role == "user" && !message.steer)
 }
 
 fn string(value: &str) -> bool {

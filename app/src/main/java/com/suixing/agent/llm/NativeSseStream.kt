@@ -6,6 +6,8 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.concurrent.atomic.AtomicLong
 import com.suixing.agent.core.NativeJsonTree
+import com.suixing.agent.data.PROTOCOL_ANTHROPIC
+import com.suixing.agent.data.PROTOCOL_RESPONSES
 import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -15,7 +17,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.JsonUnquotedLiteral
 
 internal object NativeSseStreamJni {
-    external fun nativeCreate(): Long
+    external fun nativeCreate(protocol: Int): Long
     external fun nativeCancel(handle: Long)
     external fun nativeRelease(handle: Long)
     external fun nativeFeed(handle: Long, bytes: ByteArray, offset: Int, length: Int, mode: Int): ByteArray
@@ -27,9 +29,11 @@ internal data class NativeSseEvent(
     val compatibilityPayload: String? = null,
     val sawDone: Boolean = false,
     val eof: Boolean = false,
+    val text: String? = null,
+    val reasoning: String? = null,
 )
 
-/** Rust decodes the complete JSON tree; Kotlin only reconstructs elements for StreamTurn. */
+/** Rust projects text and reasoning deltas and decodes other events for StreamTurn. */
 internal class NativeSseStream private constructor(id: Long) : Closeable {
     private val handle = AtomicLong(id)
 
@@ -88,6 +92,7 @@ internal class NativeSseStream private constructor(id: Long) : Closeable {
                     valid(flags == 0 && length <= MAX_SSE_LINE_BYTES)
                     Decoded(base, ByteArray(length).also { input.get(it) })
                 }
+                5 -> Decoded(base.copy(text = NativeJsonTree.string(input), reasoning = NativeJsonTree.string(input)))
                 else -> throw LlmException("原生流式响应事件类型无效")
             }
             valid(!input.hasRemaining())
@@ -115,10 +120,15 @@ internal class NativeSseStream private constructor(id: Long) : Closeable {
         }
 
         /** Fallback is chosen before reading any bytes; a running stream is never replayed. */
-        fun open(): NativeSseStream? {
+        fun open(protocol: String): NativeSseStream? {
             if (!available) return null
+            val nativeProtocol = when (protocol) {
+                PROTOCOL_ANTHROPIC -> 2
+                PROTOCOL_RESPONSES -> 3
+                else -> 1
+            }
             return try {
-                NativeSseStreamJni.nativeCreate().takeIf { it > 0L }?.let(::NativeSseStream)
+                NativeSseStreamJni.nativeCreate(nativeProtocol).takeIf { it > 0L }?.let(::NativeSseStream)
             } catch (_: UnsatisfiedLinkError) {
                 null
             } catch (_: IOException) {

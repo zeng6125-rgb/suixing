@@ -7,7 +7,10 @@ publish = false
 
 [lib]
 name = "suixing_search"
-crate-type = ["staticlib"]
+crate-type = ["staticlib", "rlib"]
+
+[features]
+rust-app = []
 
 [dependencies]
 libc = "=0.2.189"

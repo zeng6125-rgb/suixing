@@ -13,7 +13,7 @@ struct SseBuffer {
     std::size_t len;
     std::size_t capacity;
 };
-std::uint64_t sx_sse_create();
+std::uint64_t sx_sse_create(std::uint8_t protocol);
 void sx_sse_cancel(std::uint64_t handle);
 void sx_sse_release(std::uint64_t handle);
 int sx_sse_feed(std::uint64_t handle, const std::uint8_t* input, std::size_t length,
@@ -76,8 +76,8 @@ void throwStatus(JNIEnv* env, int status) {
 }  // namespace
 
 extern "C" JNIEXPORT jlong JNICALL
-Java_com_suixing_agent_llm_NativeSseStreamJni_nativeCreate(JNIEnv* env, jobject) {
-    const auto handle = sx_sse_create();
+Java_com_suixing_agent_llm_NativeSseStreamJni_nativeCreate(JNIEnv* env, jobject, jint protocol) {
+    const auto handle = sx_sse_create(static_cast<std::uint8_t>(protocol));
     if (handle == 0 || handle > static_cast<std::uint64_t>(std::numeric_limits<jlong>::max())) {
         if (handle != 0) sx_sse_release(handle);
         throwIo(env, "Unable to allocate a native SSE handle.");

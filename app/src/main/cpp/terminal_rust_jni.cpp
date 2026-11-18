@@ -11,7 +11,12 @@
 extern "C" {
 struct SearchBuffer { std::uint8_t* data; std::size_t len; };
 int sx_pty_open(const std::uint8_t*, std::size_t, int*, int*, int*);
-int sx_pty_read(int, int, int, SearchBuffer*, int*);
+int sx_pty_read(int, int, int, std::int64_t, SearchBuffer*, int*);
+int sx_pty_output_create(std::int64_t*, int*);
+void sx_pty_output_release(std::int64_t);
+int sx_pty_output_update(std::int64_t, bool, int*);
+int sx_pty_output_truncated(std::int64_t, bool*, int*);
+int sx_pty_output_read(std::int64_t, bool, std::int64_t*, int, std::uint16_t*, std::size_t*, bool*, int*);
 int sx_pty_begin_write(int, std::uint64_t*, int*);
 void sx_pty_cancel_write(std::uint64_t);
 void sx_pty_release_write(std::uint64_t);
@@ -122,15 +127,51 @@ Java_com_suixing_agent_terminal_TerminalNative_nativeOpenProcess(JNIEnv* env, jo
     return nullptr;
 }
 extern "C" JNIEXPORT jbyteArray JNICALL
-Java_com_suixing_agent_terminal_TerminalNative_nativeRead(JNIEnv* env, jobject, jint handle, jint max, jint timeout) {
+Java_com_suixing_agent_terminal_TerminalNative_nativeReadChunk(JNIEnv* env, jobject, jint handle, jint max, jint timeout, jlong history) {
     Buffer out; int error = 0;
-    const int status = sx_pty_read(handle, max, timeout, &out.value, &error);
+    const int status = sx_pty_read(handle, max, timeout, history, &out.value, &error);
     if (status == 1) return nullptr;
     if (!succeeded(env, status, error, "pty read")) return nullptr;
     if (out.value.len > 16384 || (out.value.len > 0 && out.value.data == nullptr)) { throwJava(env, "java/io/IOException", "Invalid PTY response."); return nullptr; }
     jbyteArray result = env->NewByteArray(static_cast<jsize>(out.value.len));
     if (result != nullptr && out.value.len > 0) env->SetByteArrayRegion(result, 0, static_cast<jsize>(out.value.len), reinterpret_cast<const jbyte*>(out.value.data));
     return env->ExceptionCheck() ? nullptr : result;
+}
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_suixing_agent_terminal_TerminalNative_nativeCreateOutput(JNIEnv* env, jobject) {
+    std::int64_t id = 0; int error = 0;
+    const int status = sx_pty_output_create(&id, &error);
+    return succeeded(env, status, error, "create terminal output") ? id : 0;
+}
+extern "C" JNIEXPORT void JNICALL
+Java_com_suixing_agent_terminal_TerminalNative_nativeReleaseOutput(JNIEnv*, jobject, jlong id) {
+    sx_pty_output_release(id);
+}
+extern "C" JNIEXPORT void JNICALL
+Java_com_suixing_agent_terminal_TerminalNative_nativeUpdateOutput(JNIEnv* env, jobject, jlong id, jboolean clear) {
+    int error = 0;
+    const int status = sx_pty_output_update(id, clear == JNI_TRUE, &error);
+    succeeded(env, status, error, "update terminal output");
+}
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_suixing_agent_terminal_TerminalNative_nativeOutputTruncated(JNIEnv* env, jobject, jlong id) {
+    bool truncated = false; int error = 0;
+    const int status = sx_pty_output_truncated(id, &truncated, &error);
+    return succeeded(env, status, error, "inspect terminal output") && truncated;
+}
+extern "C" JNIEXPORT jobject JNICALL
+Java_com_suixing_agent_terminal_TerminalNative_nativeReadOutput(JNIEnv* env, jobject, jlong id, jboolean hasCursor, jlong cursor, jint budget) {
+    jchar units[16384]{};
+    std::int64_t next = cursor; std::size_t count = 0; bool truncated = false; int error = 0;
+    const int status = sx_pty_output_read(id, hasCursor == JNI_TRUE, &next, budget, units, &count, &truncated, &error);
+    if (!succeeded(env, status, error, "read terminal output")) return nullptr;
+    jstring text = env->NewString(units, static_cast<jsize>(count));
+    if (text == nullptr) return nullptr;
+    jclass type = env->FindClass("com/suixing/agent/terminal/TerminalRead");
+    if (type == nullptr) return nullptr;
+    jmethodID constructor = env->GetMethodID(type, "<init>", "(Ljava/lang/String;JZ)V");
+    if (constructor == nullptr) return nullptr;
+    return env->NewObject(type, constructor, text, static_cast<jlong>(next), static_cast<jboolean>(truncated));
 }
 extern "C" JNIEXPORT jlong JNICALL
 Java_com_suixing_agent_terminal_TerminalNative_nativeBeginWrite(JNIEnv* env, jobject, jint handle) {
