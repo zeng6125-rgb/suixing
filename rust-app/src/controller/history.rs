@@ -548,13 +548,16 @@ impl HistoryRuntime {
                         .window(&source, &request, || false)
                         .map_err(|e| e.to_string())?;
                     if let Ok(zone) = crate::platform::calendar::zone_id() {
+                        let now = now_millis();
                         for row in &mut page.rows {
                             if row.info.timestamp > 0 {
-                                row.info.timestamp_label = crate::platform::calendar::time_label(
-                                    row.info.timestamp,
-                                    &zone,
-                                )
-                                .ok();
+                                row.info.timestamp_label =
+                                    crate::platform::calendar::chat_time_label(
+                                        row.info.timestamp,
+                                        &zone,
+                                        now,
+                                    )
+                                    .ok();
                             }
                         }
                     }

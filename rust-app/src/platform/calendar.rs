@@ -93,6 +93,19 @@ pub fn day_for(epoch_ms: i64, zone_id: &str) -> Result<Stamp, String> {
     }
 }
 pub fn time_label(epoch_ms: i64, zone_id: &str) -> Result<String, String> {
+    format_time_label(epoch_ms, zone_id, "uuuu-MM-dd HH:mm:ss VV")
+}
+
+pub fn chat_time_label(epoch_ms: i64, zone_id: &str, now_ms: i64) -> Result<String, String> {
+    let pattern = if now_ms.saturating_sub(epoch_ms) >= 24 * 60 * 60 * 1000 {
+        "M月d日 HH:mm"
+    } else {
+        "HH:mm"
+    };
+    format_time_label(epoch_ms, zone_id, pattern)
+}
+
+fn format_time_label(epoch_ms: i64, zone_id: &str, pattern: &str) -> Result<String, String> {
     validate(epoch_ms, zone_id)?;
     if epoch_ms == 0 {
         return Ok("从未整理".into());
@@ -126,7 +139,7 @@ pub fn time_label(epoch_ms: i64, zone_id: &str) -> Result<String, String> {
                     &[JValue::Object(&zone)],
                 )?
                 .l()?;
-            let pattern = env.new_string("uuuu-MM-dd HH:mm:ss VV")?;
+            let pattern = env.new_string(pattern)?;
             let formatter = env
                 .call_static_method(
                     jni_str!("java/time/format/DateTimeFormatter"),
@@ -148,6 +161,7 @@ pub fn time_label(epoch_ms: i64, zone_id: &str) -> Result<String, String> {
     }
     #[cfg(not(target_os = "android"))]
     {
+        let _ = pattern;
         Err("当前平台未接入实际本地时间显示".into())
     }
 }

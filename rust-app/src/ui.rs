@@ -2378,6 +2378,7 @@ impl RustApplication {
                             == Some(self.state.goal.chat_id.as_str()));
                 if let Some(skin) = skin {
                     mobile_chat::composer_frame(skin).show(ui, |ui| {
+                        ui.spacing_mut().item_spacing.y = 0.0;
                         self.composer_input(ui, configured, can_start_goal, Some(skin));
                     });
                 } else {

@@ -1203,15 +1203,14 @@ impl ComposerPlatform {
                         .color(chrome.skin.ink),
                 )
                 .font(chrome.skin.font(16.0))
-                .frame(egui::Frame::NONE)
-                .margin(egui::Margin {
+                .frame(egui::Frame::NONE.inner_margin(egui::Margin {
                     left: 20,
                     right: 20,
-                    top: 14,
+                    top: 19,
                     bottom: 4,
-                })
+                }))
                 .desired_rows(1)
-                .min_size(egui::vec2(0.0, 30.0))
+                .min_size(egui::vec2(0.0, 48.0))
         } else {
             field
                 .hint_text("输入消息，也可以只发送图片")
@@ -1311,12 +1310,14 @@ impl ComposerPlatform {
         let toolbar = chrome.as_mut().map(|chrome| {
             let (full, _) = ui
                 .allocate_exact_size(egui::vec2(ui.available_width(), 48.0), egui::Sense::hover());
-            // Compose's row: 10dp on the left, 12dp on the right, 48dp tall.
             let row = egui::Rect::from_min_max(
                 egui::pos2(full.left() + 10.0, full.top()),
-                egui::pos2(full.right() - 12.0, full.bottom()),
+                egui::pos2(full.right() - 16.0, full.bottom()),
             );
-            let plus = egui::Rect::from_min_size(row.min, egui::Vec2::splat(36.0));
+            let plus = egui::Rect::from_min_size(
+                egui::pos2(row.left(), row.center().y - 18.0),
+                egui::Vec2::splat(36.0),
+            );
             let permissions = plus.translate(egui::vec2(36.0, 0.0));
             let response = chrome.icons.button(
                 ui,
@@ -1368,13 +1369,15 @@ impl ComposerPlatform {
                 )
                 .clicked();
             let submit = egui::Rect::from_min_size(
-                egui::pos2(row.right() - 40.0, row.top()),
+                egui::pos2(row.right() - 40.0, row.center().y - 20.0),
                 egui::Vec2::splat(40.0),
             );
-            // Compose: the context ring sits left of a 4dp gap and the mic, then the button.
             let mic_width = if flags.voice_input { 30.0 } else { 0.0 };
             let ring = egui::Rect::from_min_size(
-                egui::pos2(submit.left() - 4.0 - mic_width - 26.0, row.center().y - 13.0),
+                egui::pos2(
+                    submit.left() - 8.0 - mic_width - 26.0,
+                    row.center().y - 13.0,
+                ),
                 egui::Vec2::splat(26.0),
             );
             if flags.voice_input && self.drafts[&current].voice.is_none() {
@@ -1397,7 +1400,7 @@ impl ComposerPlatform {
             }
             chrome.model = Some(egui::Rect::from_min_max(
                 egui::pos2(permissions.right(), row.top()),
-                egui::pos2(ring.left(), row.bottom()),
+                egui::pos2((ring.left() - 4.0).max(permissions.right()), row.bottom()),
             ));
             chrome.context = Some(ring);
             submit

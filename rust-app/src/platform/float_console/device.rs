@@ -399,7 +399,7 @@ fn reconcile() -> Result<(), String> {
     }
     if !wanted {
         remove()?;
-        if let Some(service) = service {
+        if confirmed && let Some(service) = service {
             state()
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -468,16 +468,7 @@ pub(crate) fn handle_service(request: android::ServiceRequest) -> Result<i32, St
         }
         2 => {
             let service = Arc::new(request.instance);
-            let wanted = state()
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .snapshot
-                .as_ref()
-                .is_some_and(|snapshot| desired(snapshot));
-            if !wanted {
-                framework::stop_instance(service.as_ref())?;
-                return Ok(2);
-            }
+            // Complete the foreground start before reconcile can stop a finished run's service.
             let notification = framework::invoke(|env| {
                 let context = android::application_context()
                     .map_err(|_| jni::errors::Error::NullPtr("console context"))?;

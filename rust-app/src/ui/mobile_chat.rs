@@ -255,12 +255,28 @@ fn capsule(ui: &egui::Ui, rect: Rect, fill: Color32) {
 }
 
 pub(super) fn single_line(ui: &egui::Ui, text: &str, bounds: Rect, font: FontId, color: Color32) {
+    paint_line(ui, text, bounds, font, color, false);
+}
+
+fn paint_line(
+    ui: &egui::Ui,
+    text: &str,
+    bounds: Rect,
+    font: FontId,
+    color: Color32,
+    centered: bool,
+) {
     let mut job =
         egui::text::LayoutJob::simple(text.to_owned(), font, color, bounds.width().max(0.0));
     job.wrap.max_rows = 1;
     job.break_on_newline = false;
     let galley = ui.fonts_mut(|fonts| fonts.layout_job(job));
-    let pos = pos2(bounds.left(), bounds.center().y - galley.size().y * 0.5);
+    let x = if centered {
+        bounds.center().x - galley.size().x * 0.5
+    } else {
+        bounds.left()
+    };
+    let pos = pos2(x, bounds.center().y - galley.size().y * 0.5);
     ui.painter().galley(pos, galley, color);
 }
 
@@ -464,10 +480,10 @@ impl RustApplication {
         }
         ui.add_space(14.0);
         divider(ui, 16.0, skin.divider);
-        ui.add_space(6.0);
+        ui.add_space(8.5);
         self.drawer_delete_confirmation(ui, &mut navigation);
-        // Compose leaves 6dp, a divider, 6dp and five 50.2dp entries below the list.
-        let list_height = (ui.available_height() - 263.0).max(24.0);
+        let footer_height = 13.0 + 5.0 * DRAWER_ENTRY_PITCH + 18.0;
+        let list_height = (ui.available_height() - footer_height).max(24.0);
         let order = self
             .state
             .conversation_preferences
@@ -614,7 +630,7 @@ impl RustApplication {
             self.mobile_icons.draw(
                 ui,
                 pos2(row.left() + 24.0, row.center().y),
-                25.0,
+                20.0,
                 icon,
                 skin.ink,
             );
@@ -662,15 +678,10 @@ impl RustApplication {
     }
 
     pub(super) fn mobile_empty_chat(&mut self, ui: &mut egui::Ui, skin: Skin, configured: bool) {
-        // Compose's hero column: a 92dp mark, 6dp, the 34dp title line, 6dp, the 24dp
-        // subtitle line, 24dp, four 40dp chips 16dp apart, 16dp and the 18dp tip.
-        let content_height = 438.0;
-        // Compose centres the hero between the status bar plus 60dp and the composer.
-        let top_lift = 28.0;
-        let bottom_pad = 12.0;
-        let space = ((ui.available_height() + top_lift - bottom_pad - content_height) * 0.5
-            - top_lift)
-            .max(0.0);
+        // Compose's column: 92dp mark, 6, headlineSmall 31, 6, bodyMedium 24, 24,
+        // four 48dp chip boxes 8dp apart, 16 and the bodySmall 18 line.
+        let content_height = 433.0;
+        let space = ((ui.available_height() - content_height) * 0.5 + 15.0).max(0.0);
         ui.add_space(space);
         ui.vertical_centered(|ui| {
             ui.spacing_mut().item_spacing = vec2(8.0, 0.0);
@@ -679,31 +690,33 @@ impl RustApplication {
                 self.mobile_icons.brand(ui, rect);
             }
             ui.add_space(6.0);
-            let (title, _) = ui.allocate_exact_size(vec2(ui.available_width(), 34.0), Sense::hover());
-            single_line(
-                ui,
-                "我们开始吧",
-                title,
-                skin.font(24.0),
-                skin.text,
-            );
+            let (title, _) =
+                ui.allocate_exact_size(vec2(ui.available_width(), 31.0), Sense::hover());
+            paint_line(ui, "我们开始吧", title, skin.font(24.0), skin.text, true);
             ui.add_space(6.0);
             let (subtitle, _) =
                 ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::hover());
-            single_line(
+            paint_line(
                 ui,
                 "说一句话，它就能读屏、点击、翻文件、跑命令。",
                 subtitle,
                 skin.font(15.0),
                 skin.ink,
+                true,
             );
             ui.add_space(24.0);
-            for suggestion in [
+            for (index, suggestion) in [
                 "看看现在屏幕上是什么",
                 "把下载目录里最新的三个文件列出来",
                 "搜一下今天有什么科技新闻",
                 "打开设置看看还剩多少存储空间",
-            ] {
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                if index > 0 {
+                    ui.add_space(8.0);
+                }
                 let enabled = !self.state.run_pending && !self.state.conversation_pending;
                 let font = skin.font(14.0);
                 let text_width = ui
@@ -711,28 +724,27 @@ impl RustApplication {
                     .layout_no_wrap(suggestion.to_owned(), font.clone(), skin.ink)
                     .size()
                     .x;
-                let (rect, response) = ui.allocate_exact_size(
-                    vec2(text_width + 30.0, 40.0),
+                // The Material surface keeps a 48dp touch box around the 38dp pill.
+                let (row, response) = ui.allocate_exact_size(
+                    vec2(text_width + 28.0, 48.0),
                     if enabled {
                         Sense::click()
                     } else {
                         Sense::hover()
                     },
                 );
-                ui.painter().rect_filled(rect, 20.0, skin.high);
-                ui.painter()
-                    .rect_stroke(rect, 20.0, Stroke::new(1.0, skin.divider), egui::StrokeKind::Middle);
-                single_line(
-                    ui,
-                    suggestion,
-                    rect.shrink2(vec2(14.0, 0.0)),
-                    font,
-                    skin.ink,
+                let pill = Rect::from_center_size(row.center(), vec2(row.width(), 38.0));
+                ui.painter().rect_filled(pill, 19.0, skin.high);
+                ui.painter().rect_stroke(
+                    pill,
+                    19.0,
+                    Stroke::new(1.0, skin.divider),
+                    egui::StrokeKind::Middle,
                 );
+                single_line(ui, suggestion, pill.shrink2(vec2(14.0, 0.0)), font, skin.ink);
                 if response.clicked() {
                     self.composer_platform.fill_suggestion(suggestion);
                 }
-                ui.add_space(16.0);
             }
             ui.add_space(16.0);
             let tip = if configured {
@@ -742,7 +754,7 @@ impl RustApplication {
             };
             let (tip_rect, _) =
                 ui.allocate_exact_size(vec2(ui.available_width(), 18.0), Sense::hover());
-            single_line(ui, tip, tip_rect, skin.font(13.0), skin.ink);
+            paint_line(ui, tip, tip_rect, skin.font(13.0), skin.ink, true);
             if !configured
                 && ui
                     .add(

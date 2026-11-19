@@ -72,12 +72,14 @@ val nativeHost = if (isWindows) "windows-x86_64" else if (OperatingSystem.curren
 val rustSource = layout.projectDirectory.file("Cargo.toml")
 val rustOutput = layout.buildDirectory.dir("cargo")
 val sdkRoot = androidComponents.sdkComponents.sdkDirectory
+// `-PrustAbi=x86_64` builds one ABI only; emulator iteration does not need the other three.
+val rustAbi = providers.gradleProperty("rustAbi").orNull
 val targets = linkedMapOf(
     "arm64-v8a" to ("aarch64-linux-android" to "aarch64-linux-android"),
     "armeabi-v7a" to ("armv7-linux-androideabi" to "armv7a-linux-androideabi"),
     "x86" to ("i686-linux-android" to "i686-linux-android"),
     "x86_64" to ("x86_64-linux-android" to "x86_64-linux-android"),
-)
+).filterKeys { rustAbi == null || it == rustAbi }
 val compileRustLibraries = tasks.register<RustAndroidCompile>("compileRustLibrariesRelease") {
     group = "build"
     description = "Compile and link the Rust application for the four Android ABIs."
