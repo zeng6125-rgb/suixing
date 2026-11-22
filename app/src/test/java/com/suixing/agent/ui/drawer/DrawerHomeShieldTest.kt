@@ -1,6 +1,8 @@
 package com.suixing.agent.ui.drawer
 
 import androidx.compose.material3.DrawerValue
+import androidx.compose.runtime.snapshots.Snapshot
+import androidx.compose.runtime.snapshots.SnapshotStateObserver
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -8,6 +10,28 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class DrawerHomeShieldTest {
+    @Test
+    fun `backing and chat cache only invalidate when the drawer crosses zero`() {
+        val state = SuixingDrawerState(DrawerValue.Closed)
+        val session = state.beginGesture()
+        val changes = mutableListOf<Boolean>()
+        val observer = SnapshotStateObserver { it() }
+        // A layer re-reads its state after each invalidation.
+        lateinit var onChange: (Unit) -> Unit
+        onChange = { observer.observeReads(Unit, onChange) { changes += state.isHomeExposed } }
+        observer.start()
+        try {
+            observer.observeReads(Unit, onChange) { assertFalse(state.isHomeExposed) }
+            for (progress in listOf(0.1f, 0.4f, 0.9f, 1f, 0.6f, 0f)) {
+                state.applyGestureFrame(session, progress)
+                Snapshot.sendApplyNotifications()
+            }
+            assertEquals(listOf(true, false), changes)
+        } finally {
+            observer.stop()
+            observer.clear()
+        }
+    }
 
     @Test
     fun `opening and open both shield home`() {

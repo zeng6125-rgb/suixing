@@ -219,10 +219,9 @@ internal sealed interface Part {
         val sourceVersion: Int = -1,
         /** 来源缓冲的实例标识；0 = 没有可信来源。换缓冲 ⇒ 游标作废。 */
         val sourceId: Int = 0,
-    ) : Part {
         // Live projections run on Default; stored rows keep their detection lazy.
-        val hasImageMarker = if (sourceVersion >= 0) text.contains("![") else null
-    }
+        val hasImageMarker: Boolean? = if (sourceVersion >= 0) text.contains("![") else null,
+    ) : Part
 
     /**
      * A line the user typed mid-answer.

@@ -531,8 +531,8 @@ private class InlineScanner(
     private val linkColor: Color,
     private val baseWeight: FontWeight?,
     private val onUrlClick: ((String) -> Unit)?,
-    // 文件路径的点击回调（LINK-CLICK-SPEC §3.2）。与 onUrlClick 分开：URL 恒走默认浏览器，
-    // 路径才弹菜单。null 时路径只是带色文本、不可点（避免「看着能点却没反应」）。
+    // 文件路径由调用方分发，URL 由 onUrlClick / LocalUriHandler 处理。
+    // null 时路径只是带色文本、不可点。
     private val onPathClick: ((String) -> Unit)? = null,
     // Inline code's size. Unspecified inherits the text around it, which is what the pure
     // entry point wants; the renderer passes the 13sp body slot instead.
@@ -714,7 +714,7 @@ private class InlineScanner(
         if (link.startsWith("file:")) {
             // 文件路径（LINK-CLICK-SPEC §1.3/§3.2）：只在有 onPathClick 回调时才可点 —— 没有回调的
             // Clickable 会「看着能点、点了没反应」，比不加更糟。回调解掉 `file:` 前缀后拿到路径，
-            // 调用方弹菜单（复制 / 让JAgent读取）。URL 与路径分属两个回调：URL 恒走默认浏览器。
+            // 调用方分发网页文件或文件菜单。URL 由 onUrlClick / LocalUriHandler 处理。
             val path = link.removePrefix("file:")
             val pathClick = onPathClick
             if (pathClick != null) {
@@ -729,7 +729,7 @@ private class InlineScanner(
             }
         } else {
             // URL **恒挂** annotation：有回调用回调，没回调时 listener=null，Compose 的 Text 用
-            // LocalUriHandler 默认开浏览器（spec §2.1「Text itself wires the click handling」）。
+            // LocalUriHandler 分发，软件内由内置浏览器接管网页链接。
             // 旧代码只在有回调时才挂，而四个调用点都没传回调 ⇒ URL 有下划线却点不动，这是 bug。
             out.addLink(
                 LinkAnnotation.Url(
@@ -990,30 +990,21 @@ internal class LiveBlocks {
      * 时，`next` 一定是"旧文本 + 新尾巴"，前缀不可能被改过 —— 这次就不必再做
      * `regionMatches(0, …, stableEnd)` 的 O(稳定前缀) 全量校验。
      *
-     * 版本倒退、等于上次、或压根没有来源（历史消息 / 测试，传 -1）时，一律回落到原来的
-     * 全量校验 —— 中段重写、切会话换文本、typewriter 归零重播都走那条路，
-     * 绝不能靠"看起来像追加"就把稳定块冻结住。
+     * 同版本也可继续揭示同一缓冲的更长前缀。版本倒退、文本变短或换来源时检查原始前缀。
      */
     private var lastVersion = -1
 
     /** 上一次的来源实例；与 [lastVersion] 一起判"还是同一份文本在长"。 */
     private var lastSourceId = 0
     private var stableEnd = 0
-    private var prefixBlocks: List<MdBlock> = emptyList()
+    private var prefixBlocks = CompletedMarkdownPrefix()
     private var result: List<MdBlock> = emptyList()
     @Volatile private var completed = CompletedMarkdownParse("", result)
     private var appendableTail: AppendableMarkdownTail? = null
     private var appendPrefix: List<MdBlock> = emptyList()
     private val inlineStates = HashMap<String, InlineMarkdownState>()
 
-    /**
-     * 上一次的文本里出现过 `\r` 吗。
-     *
-     * 流式文本只会**追加**，所以「有没有回车」只需要在**新来的那一段**里查（issue #59 A1）。
-     * 原来每次发布都对整段文本做一次全量扫描，50k 字时是每 16ms 一次。
-     * 一旦见过就记住，之后可能整段都有，必须走 replace 归一化。
-     * 文本被**改写变短**时下标从 0 重扫 —— 那种情况下"只追加"的前提不成立。
-     */
+    // Whether the previous raw source needed newline normalization.
     private var sawCarriageReturn = false
 
     fun cachedBlocksFor(source: String): List<MdBlock>? = completed.let { if (source == it.source) it.blocks else null }
@@ -1040,44 +1031,31 @@ internal class LiveBlocks {
         checkpoint: (() -> Unit)? = null,
     ): List<MdBlock> {
         checkpoint?.invoke()
+        val previous = completed.source
         val sameSource = sourceId != 0 && sourceId == lastSourceId
-        val trustedAppend = sameSource && appendFrom >= 0 && next.length >= text.length &&
-            (appendFrom > lastVersion || (appendFrom == lastVersion && next.length >= text.length))
-        val keepsPrefix = next.length >= text.length && (trustedAppend || next.startsWith(text))
-        if (!keepsPrefix || sourceId != lastSourceId) sawCarriageReturn = false
-        if (!sawCarriageReturn) {
-            // A rewrite of the same/larger length may introduce CR in the old range.
-            // Only an actual append is allowed to skip scanning that range.
-            val from = if (keepsPrefix) text.length else 0
-            var i = from
-            while (i < next.length) {
-                if (next[i] == '\r') { sawCarriageReturn = true; break }
-                i++
+        val trustedAppend = sameSource && appendFrom >= 0 && appendFrom >= lastVersion
+        val keepsPrefix = next.length >= previous.length && (trustedAppend || next.startsWith(previous))
+        val from = if (keepsPrefix) previous.length else 0
+        val hasCarriageReturn = keepsPrefix && sawCarriageReturn || next.indexOf('\r', from) >= 0
+        val normalized = when {
+            !hasCarriageReturn -> next
+            !keepsPrefix -> next.replace("\r\n", "\n").replace('\r', '\n')
+            else -> {
+                // A trailing CR has already become LF. Skip its partner if it arrived in this batch.
+                val start = if (previous.endsWith('\r') && next.getOrNull(from) == '\n') from + 1 else from
+                if (start == next.length) text
+                else text + next.substring(start).replace("\r\n", "\n").replace('\r', '\n')
             }
         }
-        val normalized =
-            if (sawCarriageReturn) next.replace("\r\n", "\n").replace('\r', '\n') else next
-        if (normalized == text) {
-            completed = CompletedMarkdownParse(next, result)
-            lastVersion = appendFrom
-            lastSourceId = sourceId
-            return result
+        if (normalized != text) {
+            val tail = appendableTail
+            val extended = if (tail != null && keepsPrefix)
+                tail.append(normalized, text.length, checkpoint) else null
+            result = if (extended != null) JoinedMarkdownBlocks(appendPrefix, listOf(extended)) else
+                parseWithPrefix(normalized, keepsPrefix, checkpoint)
+            text = normalized
         }
-        // The CR-free source is already proven above. Once CR normalization is involved,
-        // verify the normalized prefix once and share that proof with both continuation paths.
-        val keepsNormalizedPrefix = if (!sawCarriageReturn) keepsPrefix else
-            normalized.length >= text.length && (trustedAppend || normalized.startsWith(text))
-        // 可信游标的两种形态（都在"同一份来源"前提下）：
-        //  · 版本递增 —— 来源缓冲又追加了；
-        //  · 版本不变但文本变长 —— 打字机在揭示同一份文本的更长前缀。
-        // 换来源（实例不同 / 没有来源）一律回落全量校验。
-        val tail = appendableTail
-        val extended = if (tail != null && normalized.length > text.length &&
-            keepsNormalizedPrefix
-        ) tail.append(normalized, text.length, checkpoint) else null
-        result = if (extended != null) JoinedMarkdownBlocks(appendPrefix, listOf(extended)) else
-            parseWithPrefix(normalized, keepsNormalizedPrefix, checkpoint)
-        text = normalized
+        sawCarriageReturn = hasCarriageReturn
         completed = CompletedMarkdownParse(next, result)
         lastVersion = appendFrom
         lastSourceId = sourceId
@@ -1095,7 +1073,7 @@ internal class LiveBlocks {
             (!keepsPreviousPrefix && !normalized.regionMatches(0, text, 0, stableEnd))
         ) {
             stableEnd = 0
-            prefixBlocks = emptyList()
+            prefixBlocks = CompletedMarkdownPrefix()
         }
         // The parser itself reports completed blocks, so fence-looking table rows
         // and blank lines inside code cannot incorrectly freeze a partial result.
@@ -1116,19 +1094,49 @@ internal class LiveBlocks {
             completed = offset
             completedBlocks = count
         }
-        val result = if (prefixBlocks.isEmpty()) parsed else JoinedMarkdownBlocks(prefixBlocks, parsed)
+        val previousPrefix = prefixBlocks
+        val result = if (previousPrefix.isEmpty()) parsed else JoinedMarkdownBlocks(previousPrefix, parsed)
         if (completed > 0) {
-            if (completedBlocks > 0) prefixBlocks = prefixBlocks + parsed.take(completedBlocks)
+            if (completedBlocks > 0) prefixBlocks = previousPrefix.append(parsed, completedBlocks)
             stableEnd += completed
         }
-        if (appendableTail != null) appendPrefix = result.dropLast(1)
+        if (appendableTail != null) {
+            appendPrefix = when {
+                parsed.size == 1 -> previousPrefix
+                completed > 0 && completedBlocks == parsed.lastIndex -> prefixBlocks
+                else -> JoinedMarkdownBlocks(previousPrefix, parsed.dropLast(1))
+            }
+        }
         return result
     }
 }
 
+/** Each published prefix exposes only the slots written before that snapshot was created. */
+internal class CompletedMarkdownPrefix(
+    private val blocks: Array<MdBlock?> = emptyArray(),
+    override val size: Int = 0,
+) : AbstractList<MdBlock>() {
+    fun append(parsed: List<MdBlock>, count: Int): CompletedMarkdownPrefix {
+        val nextSize = size + count
+        val next = if (nextSize <= blocks.size) blocks else blocks.copyOf(maxOf(nextSize, blocks.size * 2))
+        // Only LiveBlocks' current prefix can append. Readers of an older snapshot
+        // never access these new slots, and resetting the parser starts a fresh array.
+        for (index in 0 until count) next[size + index] = parsed[index]
+        return CompletedMarkdownPrefix(next, nextSize)
+    }
+
+    fun sharedSize(other: CompletedMarkdownPrefix): Int =
+        if (blocks === other.blocks) minOf(size, other.size) else 0
+
+    override fun get(index: Int): MdBlock {
+        if (index !in 0 until size) throw IndexOutOfBoundsException("index=$index, size=$size")
+        return blocks[index]!!
+    }
+}
+
 /** Both lists are immutable snapshots; appending a tail needn't copy settled references. */
-private class JoinedMarkdownBlocks(
-    private val prefix: List<MdBlock>,
+internal class JoinedMarkdownBlocks(
+    val prefix: List<MdBlock>,
     private val tail: List<MdBlock>,
 ) : AbstractList<MdBlock>() {
     override val size: Int get() = prefix.size + tail.size

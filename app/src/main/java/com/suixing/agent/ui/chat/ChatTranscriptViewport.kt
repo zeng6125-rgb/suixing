@@ -28,6 +28,7 @@ import androidx.compose.ui.unit.dp
 import com.suixing.agent.data.AppSettings
 import com.suixing.agent.data.StoredMessage
 import com.suixing.agent.ui.components.bottomInsetPadding
+import com.suixing.agent.ui.drawer.LocalDrawerGestureState
 
 /** The existing transcript layout, with gestures and data preparation supplied separately. */
 @OptIn(ExperimentalFoundationApi::class)
@@ -170,7 +171,7 @@ internal fun ChatTranscriptViewport(
                     // 手指按下只干两件事：通知外壳冻结 IME clamp（选择期间键盘别收）；
 
                     .chatTranscriptGesture(state.conversationId, gesture, navigationJob, scroll,
-                        selectionTracker, viewConfig, selectionFocus, setSelectionActive),
+                        selectionTracker, viewConfig, selectionFocus, setSelectionActive, LocalDrawerGestureState.current),
                 contentPadding = PaddingValues(
                     start = 16.dp,
                     end = 16.dp,

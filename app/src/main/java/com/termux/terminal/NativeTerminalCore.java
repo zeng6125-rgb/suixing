@@ -20,7 +20,9 @@ final class NativeTerminalCore implements AutoCloseable {
         if (op != 6 && op != 7 && op != 10) revision++;
         owner.applyNativeState(ByteBuffer.wrap(result).order(ByteOrder.LITTLE_ENDIAN));
     }
-    synchronized byte[] rows(boolean alternate, int from, int count) { return handle == 0 ? null : nativeRows(handle, alternate, from, count); }
+    synchronized byte[] rows(boolean alternate, int from, int count, boolean full) {
+        return handle == 0 ? null : nativeRows(handle, alternate, from, count, full);
+    }
     synchronized String selected(boolean alternate, int x1, int y1, int x2, int y2, boolean joined, boolean full) {
         return handle == 0 ? null : nativeSelected(handle, alternate, x1, y1, x2, y2, joined, full);
     }
@@ -39,7 +41,7 @@ final class NativeTerminalCore implements AutoCloseable {
     private static native void nativeRelease(long handle);
     private static native byte[] nativeStep(long handle, int op, byte[] source, int count, int a, int b, int c, int d,
         int foreground, int background, int cursor);
-    private static native byte[] nativeRows(long handle, boolean alternate, int from, int count);
+    private static native byte[] nativeRows(long handle, boolean alternate, int from, int count, boolean full);
     private static native String nativeSelected(long handle, boolean alternate, int x1, int y1, int x2, int y2, boolean joined, boolean full);
     private static native String nativeWord(long handle, boolean alternate, int x, int y);
     private static native int nativeValidCursor(long handle, boolean alternate, int x, int y);

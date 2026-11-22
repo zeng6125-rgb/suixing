@@ -12,6 +12,37 @@ import org.junit.Test
  * 改完输出一不一样"可以在 JVM 上量清楚。数字只作趋势参考（JVM ≠ ART）。
  */
 class ChatHotPathMicrobenchTest {
+    @Test fun `incremental image marker scan matches a full scan through a long reply`() {
+        val buffer = GrowableText("plain content ".repeat(2_000))
+        val snapshots = List(500) {
+            buffer.append("next words with no image in this chunk. ")
+            buffer.toString()
+        }
+        fun full() = snapshots.count { it.contains("![") }
+        fun incremental() = GrowableText(snapshots.last()).let { scan ->
+            snapshots.count { scan.hasImageMarkerIn(it) }
+        }
+        assertEquals(full(), incremental())
+        repeat(5) { full(); incremental() }
+        fun measure(scan: () -> Int): Long {
+            val start = System.nanoTime()
+            repeat(10) { sink += scan() }
+            return System.nanoTime() - start
+        }
+        val fullTimes = LongArray(7)
+        val incrementalTimes = LongArray(7)
+        for (round in fullTimes.indices) {
+            if (round % 2 == 0) {
+                fullTimes[round] = measure(::full)
+                incrementalTimes[round] = measure(::incremental)
+            } else {
+                incrementalTimes[round] = measure(::incremental)
+                fullTimes[round] = measure(::full)
+            }
+        }
+        println("Image marker scan ns/trajectory: full=${fullTimes.sorted()[3] / 10} incremental=${incrementalTimes.sorted()[3] / 10}")
+    }
+
 
     /**
      * A2：打字机每帧 `text.take(revealed)` vs 追平后直接返回原串。

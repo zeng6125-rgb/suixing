@@ -5,20 +5,12 @@ import com.suixing.agent.core.NativeCore
 import com.suixing.agent.core.NativeCoreJni
 import kotlin.math.abs
 
-/** A quarter-width deliberate swipe leaves either anchor; quick flings follow their velocity. */
-internal fun drawerDragTarget(
-    wasOpen: Boolean,
-    progress: Float,
-    velocityPx: Float,
-    startProgress: Float = if (wasOpen) 1f else 0f,
-): DrawerValue {
+/** A fling overrides the distance target at the AndroidX DrawerLayout velocity threshold. */
+internal fun drawerDragTarget(openByDistance: Boolean, velocityDpPerSecond: Float): DrawerValue {
     val open = when {
-        NativeCore.available -> NativeCoreJni.nativeDrawerReleaseOpen(progress, velocityPx, startProgress)
-        abs(velocityPx) > 800f -> velocityPx > 0f
-        startProgress > 0f && startProgress < 1f ->
-            if (progress == startProgress) progress >= 0.5f else progress > startProgress
-        startProgress == 1f -> progress >= 0.75f
-        else -> progress > 0.25f
+        NativeCore.available -> NativeCoreJni.nativeDrawerReleaseOpen(openByDistance, velocityDpPerSecond)
+        abs(velocityDpPerSecond) >= 400f -> velocityDpPerSecond > 0f
+        else -> openByDistance
     }
     return if (open) DrawerValue.Open else DrawerValue.Closed
 }

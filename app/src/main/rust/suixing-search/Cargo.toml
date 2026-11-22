@@ -14,6 +14,7 @@ rust-app = []
 
 [dependencies]
 libc = "=0.2.189"
+memchr = "=2.8.3"
 serde = "=1.0.229"
 serde_json = { version = "=1.0.151", features = ["raw_value", "arbitrary_precision", "preserve_order"] }
 

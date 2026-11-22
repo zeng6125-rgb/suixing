@@ -38,6 +38,8 @@ import com.suixing.agent.core.Core
 import com.suixing.agent.data.AppSettings
 import com.suixing.agent.data.Roles
 import com.suixing.agent.data.StoredMessage
+import com.suixing.agent.ui.browser.LocalOpenBrowser
+import com.suixing.agent.ui.browser.browserDocument
 import com.suixing.agent.ui.chat.markdown.LocalPathClick
 import com.suixing.agent.ui.components.LocalHeldImePx
 import com.suixing.agent.ui.components.LocalSetSelectionActive
@@ -262,11 +264,13 @@ fun ChatScreen(
     }
 
     // 顶部提示条已移除，这里不再需要倒计时收起它的定时器（失败原因画在转录里的红色回执卡上）。
-    // 文件路径点击 → 弹菜单（复制 / 让JAgent读取），LINK-CLICK-SPEC §3.2 一期。回调经 LocalPathClick
-    // 下传，四个 MarkdownText 调用点与中间各层组件都不用加参数。lambda 用 remember 稳定引用：否则
-    // 每次重组新建实例会让 InlineText 的 remember(pathClick) 失效、流式时每帧重排文本。
+    // HTML 路径进入内置浏览器，其余路径保留文件菜单。回调稳定，流式文本不因路由重排。
     var pathMenuPath by dialogs.pathMenuPathState
-    val onPathMenu = remember { { path: String -> pathMenuPath = path } }
+    val openBrowser = LocalOpenBrowser.current
+    val onPathMenu = remember(openBrowser) { { path: String ->
+        val document = browserDocument(path)
+        if (document != null && openBrowser != null) openBrowser(document) else pathMenuPath = path
+    } }
     CompositionLocalProvider(LocalPathClick provides onPathMenu, LocalAccessibleChatActions provides accessibleActions) {
     Scaffold(
         modifier = Modifier.preferredFrameRate(FrameRateCategory.High),

@@ -34,11 +34,19 @@ import kotlinx.coroutines.withContext
 import java.text.NumberFormat
 import java.time.LocalDate
 
-private data class UsageViewData(
-    val snapshot: UsageSnapshot, val windows: Map<Int, UsageWindow>,
+internal data class UsageViewData(
+    val snapshot: UsageSnapshot, val today: LocalDate, val windows: Map<Int, UsageWindow>,
     val heatmap: UsageWindow, val all: UsageBucket,
     val deleted: UsageBucket,
 )
+
+internal fun prepareUsageViewData(
+    snapshot: UsageSnapshot, today: LocalDate, previous: UsageViewData?,
+): UsageViewData {
+    if (previous?.snapshot === snapshot && previous.today == today) return previous
+    val windows = usageWindows(snapshot, listOf(7, 30, 90), today)
+    return UsageViewData(snapshot, today, windows, windows.getValue(90), snapshot.coverage, snapshot.deletedCoverage)
+}
 
 private const val COLLAPSED_MODEL_COUNT = 5
 
@@ -56,10 +64,9 @@ fun UsageScreen(onBack: () -> Unit) {
         error = null
         try {
             val fresh = Core.usage.refresh()
+            val previous = data
             data = withContext(Dispatchers.Default) {
-                val today = LocalDate.now()
-                val windows = listOf(7, 30, 90).associateWith { usageWindow(fresh, it, today) }
-                UsageViewData(fresh, windows, windows.getValue(90), fresh.coverage, fresh.deletedCoverage)
+                prepareUsageViewData(fresh, LocalDate.now(), previous)
             }
         } catch (cancelled: CancellationException) { throw cancelled }
         catch (failure: Exception) { error = failure.message ?: "用量读取失败，请重试。" }

@@ -6,9 +6,12 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import java.io.File
 import java.io.FileOutputStream
+import java.io.IOException
 import java.io.RandomAccessFile
 import java.nio.channels.FileChannel
+import java.nio.file.Files
 import java.nio.file.StandardOpenOption
+import java.nio.file.attribute.BasicFileAttributes
 
 /**
  * 会话存储：每个会话一个 meta + 一份只追加的消息日志（#30/#31）。
@@ -268,18 +271,28 @@ internal class ChatStore(private val root: File) {
     // conversation index. Only fully committed metadata enters this table; bodies are not cached.
     private val committedMetas = java.util.concurrent.ConcurrentHashMap<String, CommittedMeta>()
 
+    private fun metaKey(file: File): MetaKey? {
+        val attributes = try {
+            Files.readAttributes(file.toPath(), BasicFileAttributes::class.java)
+        } catch (_: IOException) {
+            return null
+        }
+        if (!attributes.isRegularFile) return null
+        return MetaKey(file.absolutePath, attributes.size(), attributes.lastModifiedTime().toMillis())
+    }
+
     fun readMeta(id: String): ConversationMeta? {
         val file = metaFile(id)
-        if (!file.isFile) {
+        val key = metaKey(file) ?: run {
             committedMetas.remove(id)
             return null
         }
-        val key = MetaKey(file.absolutePath, file.length(), file.lastModified())
         synchronized(metaCache) { metaCache[key] }?.let {
             committedMetas[id] = CommittedMeta(it, key)
             return it
         }
-        val parsed = chatJson.decodeCoreObject(ConversationMeta.serializer(), file.readText())
+        val text = Files.readAllBytes(file.toPath()).decodeToString()
+        val parsed = chatJson.decodeFromString(ConversationMeta.serializer(), text)
         synchronized(metaCache) { metaCache[key] = parsed }
         committedMetas[id] = CommittedMeta(parsed, key)
         return parsed
@@ -292,17 +305,19 @@ internal class ChatStore(private val root: File) {
      * which is exactly what used to cost a full re-encode of the transcript.
      */
     fun writeMeta(meta: ConversationMeta) {
+        val file = metaFile(meta.id)
         // 写完立刻让该会话的缓存条目失效：长度与 mtime 恰好都没变时，键不会变。
         synchronized(metaCache) {
-            val path = metaFile(meta.id).absolutePath
+            val path = file.absolutePath
             metaCache.keys.removeAll { it.path == path }
         }
         writeAtomically(
-            metaFile(meta.id),
+            file,
             chatJson.encodeCoreBytes(ConversationMeta.serializer(), meta),
         )
-        val file = metaFile(meta.id)
-        committedMetas[meta.id] = CommittedMeta(meta, MetaKey(file.absolutePath, file.length(), file.lastModified()))
+        val key = metaKey(file)
+        if (key == null) committedMetas.remove(meta.id)
+        else committedMetas[meta.id] = CommittedMeta(meta, key)
     }
 
     /**
@@ -548,27 +563,21 @@ internal class ChatStore(private val root: File) {
     fun allSliced(meta: ConversationMeta): List<SlicedMessage> = slicedFrom(meta, 0)
 
     /** Every committed message from [startOffset] on, each with the offset after it. */
-    fun slicedFrom(meta: ConversationMeta, startOffset: Long): List<SlicedMessage> {
-        val log = logFile(meta)
-        if (!log.isFile) throw ConversationLogDamagedException("chat ${meta.id}: no log at ${log.name}")
-        return openRead(meta).use { it.slicedFrom(startOffset) }
-    }
+    fun slicedFrom(meta: ConversationMeta, startOffset: Long): List<SlicedMessage> =
+        openRead(meta).use { it.slicedFrom(startOffset) }
 
     /** Every committed message from the line at [startOffset] to the end. */
-    fun from(meta: ConversationMeta, startOffset: Long): List<StoredMessage> {
-        val log = logFile(meta)
-        if (!log.isFile) throw ConversationLogDamagedException("chat ${meta.id}: no log at ${log.name}")
-        return readEntries(log, startOffset.coerceIn(0, meta.logBytes), meta.logBytes).map { it.message }
-    }
+    fun from(meta: ConversationMeta, startOffset: Long): List<StoredMessage> =
+        openRead(meta).use { it.from(startOffset) }
 
     /** The newest [turns] turns. What opening a conversation reads. */
-    fun tail(meta: ConversationMeta, turns: Int): MessageWindow = window(meta, meta.logBytes, turns)
+    fun tail(meta: ConversationMeta, turns: Int, checkpoint: ChatLogCheckpoint? = null): MessageWindow =
+        window(meta, meta.logBytes, turns, checkpoint)
 
     /** Open the committed generation once. Unlink/rewrite cannot change this open descriptor. */
     internal fun committedRead(id: String): ReadSnapshot? {
         val committed = committedMetas[id] ?: return null
-        val file = metaFile(id)
-        if (!file.isFile || committed.key != MetaKey(file.absolutePath, file.length(), file.lastModified())) {
+        if (committed.key != metaKey(metaFile(id))) {
             // Restores or another store instance must take the ordinary metadata-read path.
             committedMetas.remove(id, committed)
             return null
@@ -578,23 +587,43 @@ internal class ChatStore(private val root: File) {
 
     internal fun retainCommitted(ids: Set<String>) { committedMetas.keys.retainAll(ids) }
 
-    internal fun openRead(meta: ConversationMeta): ReadSnapshot =
-        ReadSnapshot(meta, RandomAccessFile(logFile(meta), "r"), logFile(meta).name)
+    internal fun openRead(meta: ConversationMeta): ReadSnapshot {
+        val log = logFile(meta)
+        if (!log.isFile) throw ConversationLogDamagedException("chat ${meta.id}: no log at ${log.name}")
+        return ReadSnapshot(meta, RandomAccessFile(log, "r"), log.name)
+    }
 
     internal inner class ReadSnapshot(
         val meta: ConversationMeta,
         private val file: RandomAccessFile,
         private val name: String,
     ) : java.io.Closeable {
-        fun tail(turns: Int): MessageWindow = window(meta.logBytes, turns)
-        fun window(endOffset: Long, turns: Int): MessageWindow =
-            windowFrom(file, name, endOffset.coerceIn(0, meta.logBytes), turns)
+        fun tail(turns: Int, checkpoint: ChatLogCheckpoint? = null): MessageWindow =
+            window(meta.logBytes, turns, checkpoint)
+        fun window(endOffset: Long, turns: Int, checkpoint: ChatLogCheckpoint? = null): MessageWindow =
+            windowFrom(file, name, endOffset.coerceIn(0, meta.logBytes), turns, checkpoint)
         /** Both native projection and compatibility fallback read this exact open generation. */
         internal suspend fun usageProjection(startOffset: Long): UsageProjection? =
             NativeUsageProjection.project(file.fd, startOffset.coerceIn(0, meta.logBytes), meta.logBytes)
 
+        fun offsetOf(messageId: String): Long? = offsetOf(file, meta.logBytes, messageId)
+
+        /** Find both anchors in the same committed range. Negative offsets are missing. */
+        fun checkpointOffsets(first: String, last: String): LongArray {
+            val firstNeedle = messageNeedle(first)
+            val lastNeedle = messageNeedle(last)
+            return NativeChatLog.locatePair(file, meta.logBytes, firstNeedle, lastNeedle)
+                ?: locateLines(file, meta.logBytes, listOf(firstNeedle, lastNeedle))
+        }
+
+        fun from(startOffset: Long): List<StoredMessage> =
+            entriesFrom(startOffset).map { it.message }
+
+        private fun entriesFrom(startOffset: Long): List<Entry> =
+            readEntries(file, name, startOffset.coerceIn(0, meta.logBytes), meta.logBytes)
+
         fun slicedFrom(startOffset: Long): List<SlicedMessage> {
-            val entries = readEntries(file, name, startOffset.coerceIn(0, meta.logBytes), meta.logBytes)
+            val entries = entriesFrom(startOffset)
             return entries.mapIndexed { index, entry ->
                 // Blank lines are excluded; the watermark is the next nonempty line's start.
                 val end = entries.getOrNull(index + 1)?.offset ?: meta.logBytes
@@ -614,19 +643,22 @@ internal class ChatStore(private val root: File) {
      * when the answer carried screenshots, so the window is measured in what it found, not in a
      * fixed size.
      */
-    fun window(meta: ConversationMeta, endOffset: Long, turns: Int): MessageWindow {
+    fun window(meta: ConversationMeta, endOffset: Long, turns: Int, checkpoint: ChatLogCheckpoint? = null): MessageWindow {
         require(turns >= 1) { "turns must be at least 1, was $turns" }
         val log = logFile(meta)
         if (!log.isFile) throw ConversationLogDamagedException("chat ${meta.id}: no log at ${log.name}")
         val end = endOffset.coerceIn(0, meta.logBytes)
-        return RandomAccessFile(log, "r").use { windowFrom(it, log.name, end, turns) }
+        return RandomAccessFile(log, "r").use { windowFrom(it, log.name, end, turns, checkpoint) }
     }
 
-    private fun windowFrom(file: RandomAccessFile, name: String, end: Long, turns: Int): MessageWindow {
+    private fun windowFrom(
+        file: RandomAccessFile, name: String, end: Long, turns: Int, checkpoint: ChatLogCheckpoint?,
+    ): MessageWindow {
         require(turns >= 1) { "turns must be at least 1, was $turns" }
+        checkpoint?.check()
         if (end == 0L) return MessageWindow(emptyList(), 0, atStart = true)
-        NativeChatLog.windowStart(file, end, turns)?.takeIf { end - it <= Int.MAX_VALUE }?.let { start ->
-            val entries = readEntries(file, name, start, end)
+        NativeChatLog.windowStart(file, end, turns, checkpoint)?.takeIf { end - it <= Int.MAX_VALUE }?.let { start ->
+            val entries = readEntries(file, name, start, end, checkpoint)
             return MessageWindow(entries.map { it.message }, entries.firstOrNull()?.offset ?: start, atStart = start == 0L)
         }
 
@@ -634,13 +666,14 @@ internal class ChatStore(private val root: File) {
         var parsedFrom = end
         var entries = emptyList<Entry>()
         while (true) {
+            checkpoint?.check()
             val rawFrom = (end - budget).coerceAtLeast(0)
             val atStart = rawFrom == 0L
             // A window that starts mid-line would decode a truncated message: skip to the next
             // line boundary. It costs one partial turn, which the cut below drops anyway.
             val from = if (atStart) 0 else minOf(parsedFrom, startOfNextLine(file, rawFrom, end))
             // Each complete line is decoded once, even when a huge turn requires expansion.
-            val prefix = readEntries(file, name, from, parsedFrom)
+            val prefix = readEntries(file, name, from, parsedFrom, checkpoint)
             if (prefix.isNotEmpty()) entries = prefix + entries
             parsedFrom = from
             val cut = NativeChatLog.cut(entries, turns, atStart) ?: run {
@@ -707,42 +740,46 @@ internal class ChatStore(private val root: File) {
     fun offsetOf(meta: ConversationMeta, messageId: String): Long? {
         val log = logFile(meta)
         if (!log.isFile || messageId.isEmpty()) return null
-        val needle = "{\"id\":\"$messageId\"".toByteArray(Charsets.UTF_8)
-        val limit = meta.logBytes
-        RandomAccessFile(log, "r").use { raf ->
-            NativeChatLog.locate(raf, 0, limit, needle)?.let { return it.takeIf { offset -> offset >= 0 } }
-            // **从尾部往前倒扫**（issue #38 第 2 项）：needle 几乎总是**最近**的一条
-            // （`readWire` 找的是最后一个 checkpoint 那条，而 checkpoint 由压缩生成、位于末尾附近），
-            // 从 0 正扫要读完整份日志（32MB 会话 = 每轮发送扫 32MB）。
-            //
-            // 两处必须注意：
-            //  · 要的是**该 id 的第一条**（消息在正文里被引用也会命中同一个 needle）⇒
-            //    倒扫命中后要**继续往前找**，直到没有更早的命中；
-            //  · 命中处必须是**行首**（`{"id":` 只会出现在行首，因为 id 是消息的第一个字段）⇒
-            //    往前一个字节必须是换行，或就是文件开头。
-            var end = limit
-            while (end > 0) {
-                val want = minOf(SEARCH_CHUNK.toLong(), end).toInt()
-                val from = end - want
-                // Prefix supplies the real preceding byte; suffix overlaps the next chunk
-                // so a message id starting in the last few bytes cannot be missed.
-                val readFrom = (from - 1).coerceAtLeast(0)
-                val readEnd = minOf(limit, end + needle.size - 1)
-                val buf = ByteArray((readEnd - readFrom).toInt())
-                raf.seek(readFrom)
-                raf.readFully(buf)
-                var i = minOf((end - readFrom - 1).toInt(), buf.size - needle.size)
-                val first = (from - readFrom).toInt()
-                while (i >= first) {
-                    if (buf[i] == needle[0] && regionMatches(buf, i, needle)) {
-                        if (isLineStart(readFrom, i, buf, null)) return readFrom + i
+        return RandomAccessFile(log, "r").use { offsetOf(it, meta.logBytes, messageId) }
+    }
+
+    private fun offsetOf(raf: RandomAccessFile, end: Long, messageId: String): Long? {
+        if (messageId.isEmpty()) return null
+        val needle = messageNeedle(messageId)
+        val found = NativeChatLog.locate(raf, 0, end, needle) ?: locateLines(raf, end, listOf(needle))[0]
+        return found.takeIf { it >= 0 }
+    }
+
+    private fun messageNeedle(messageId: String) =
+        "{\"id\":\"$messageId\"".toByteArray(Charsets.UTF_8)
+
+    private fun locateLines(raf: RandomAccessFile, limit: Long, needles: List<ByteArray>): LongArray {
+        val found = LongArray(needles.size) { -1 }
+        val overlap = needles.maxOf { it.size } - 1
+        var pending = found.size
+        var end = limit
+        while (end > 0) {
+            val from = (end - SEARCH_CHUNK).coerceAtLeast(0)
+            // Preserve the preceding byte for the line-start check and overlap split IDs.
+            val readFrom = (from - 1).coerceAtLeast(0)
+            val readEnd = minOf(limit, end + overlap)
+            val buf = ByteArray((readEnd - readFrom).toInt())
+            raf.seek(readFrom)
+            raf.readFully(buf)
+            val first = (from - readFrom).toInt()
+            for (i in (end - readFrom - 1).toInt() downTo first) {
+                if (buf[i] != '{'.code.toByte() || !isLineStart(readFrom, i, buf, null)) continue
+                for (slot in needles.indices) {
+                    val needle = needles[slot]
+                    if (found[slot] < 0 && i <= buf.size - needle.size && regionMatches(buf, i, needle)) {
+                        found[slot] = readFrom + i
+                        if (--pending == 0) return found
                     }
-                    i--
                 }
-                end = from
             }
+            end = from
         }
-        return null
+        return found
     }
 
     /**
@@ -876,11 +913,10 @@ internal class ChatStore(private val root: File) {
     }
 
     /** Parses the committed lines in `[from, end)`. Never crosses the commit boundary. */
-    private fun readEntries(log: File, from: Long, end: Long): List<Entry> {
-        return RandomAccessFile(log, "r").use { readEntries(it, log.name, from, end) }
-    }
-
-    private fun readEntries(file: RandomAccessFile, name: String, from: Long, end: Long): List<Entry> {
+    private fun readEntries(
+        file: RandomAccessFile, name: String, from: Long, end: Long, checkpoint: ChatLogCheckpoint? = null,
+    ): List<Entry> {
+        checkpoint?.check()
         if (end <= from) return emptyList()
         if (file.length() < end) {
             throw ConversationLogDamagedException(
@@ -889,16 +925,26 @@ internal class ChatStore(private val root: File) {
         }
         val span = end - from
         require(span <= Int.MAX_VALUE) { "window of $span bytes is too large to read at once" }
-        NativeChatLog.read(file, name, from, end, chatJson)?.let { return it }
+        NativeChatLog.read(file, name, from, end, chatJson, checkpoint)?.let { return it }
         val bytes = ByteArray(span.toInt())
         file.seek(from)
-        file.readFully(bytes)
+        if (checkpoint == null) file.readFully(bytes) else {
+            var offset = 0
+            while (offset < bytes.size) {
+                checkpoint.check()
+                val length = minOf(64 * 1024, bytes.size - offset)
+                file.readFully(bytes, offset, length)
+                offset += length
+            }
+            checkpoint.check()
+        }
         val entries = ArrayList<Entry>()
         var start = 0
         var index = 0
         while (index <= bytes.size) {
             if (index == bytes.size || bytes[index] == NEWLINE) {
                 if (index > start) {
+                    checkpoint?.check()
                     val line = String(bytes, start, index - start, Charsets.UTF_8)
                     val message = runCatching {
                         chatJson.decodeCoreObject(StoredMessage.serializer(), line)

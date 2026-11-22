@@ -54,6 +54,40 @@ class DrawerProjectionBenchmarkTest {
     }
 
     @Test
+    fun `projection cost for repository order without manual ordering`() {
+        val order = DrawerOrder()
+        for (n in intArrayOf(20, 200, 2000)) {
+            val list = conversations(n).asReversed()
+            repeat(1000) { drawerSections(list, order) }
+            val elapsed = LongArray(5) {
+                val start = System.nanoTime()
+                repeat(500) { drawerSections(list, order) }
+                (System.nanoTime() - start) / 500
+            }
+            elapsed.sort()
+            val sections = drawerSections(list, order)
+            assertEquals(list.filter { it.pinned && !it.archived }, sections.pinned)
+            assertEquals(list.filter { !it.pinned && !it.archived }, sections.normal)
+            println("repository order n=$n: ${elapsed[2]} ns per projection")
+        }
+    }
+
+    @Test
+    fun `default ordering sorts unsorted sections and keeps timestamp ties stable`() {
+        val source = listOf(
+            Conversation(id = "p-old", title = "p-old", updatedAt = 10, pinned = true),
+            Conversation(id = "n-first", title = "n-first", updatedAt = 30),
+            Conversation(id = "p-new", title = "p-new", updatedAt = 30, pinned = true),
+            Conversation(id = "n-second", title = "n-second", updatedAt = 30),
+            Conversation(id = "archived", title = "archived", updatedAt = 40, archived = true),
+            Conversation(id = "n-new", title = "n-new", updatedAt = 50),
+        )
+        val sections = drawerSections(source, DrawerOrder())
+        assertEquals(listOf("p-new", "p-old"), sections.pinned.map { it.id })
+        assertEquals(listOf("n-new", "n-first", "n-second"), sections.normal.map { it.id })
+    }
+
+    @Test
     fun `an unrelated settings change does not change the projection`() {
         val list = conversations(200)
         val ord = order(200)

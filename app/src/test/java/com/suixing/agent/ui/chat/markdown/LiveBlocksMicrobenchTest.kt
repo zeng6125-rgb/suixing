@@ -1,5 +1,7 @@
 package com.suixing.agent.ui.chat.markdown
 
+import com.sun.management.ThreadMXBean
+import java.lang.management.ManagementFactory
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
@@ -84,6 +86,78 @@ class LiveBlocksMicrobenchTest {
     }
 
     @Volatile private var sink = 0
+
+    @Test fun appendingManyCompletedParagraphs() {
+        val text = StringBuilder("Paragraph 0 begins here")
+        val frames = (1..1_500).map {
+            text.append(" and is complete.\n\nParagraph ").append(it).append(" begins here").toString()
+        }
+        val expected = parseMarkdown(frames.last())
+        val parseTimes = ArrayList<Long>()
+        val keyTimes = ArrayList<Long>()
+        val allocations = ArrayList<Long>()
+        val memory = ManagementFactory.getPlatformMXBean(ThreadMXBean::class.java)
+        val thread = Thread.currentThread().id
+        repeat(8) { round ->
+            val live = LiveBlocks()
+            val keys = MarkdownBlockKeyCache()
+            var blocks = emptyList<MdBlock>()
+            var parsing = 0L
+            var keying = 0L
+            val before = memory?.getThreadAllocatedBytes(thread) ?: -1L
+            for ((index, frame) in frames.withIndex()) {
+                val started = System.nanoTime()
+                blocks = live.blocksFor(frame, appendFrom = index, sourceId = 4242)
+                val parsed = System.nanoTime()
+                val renderedKeys = keys.keysFor(blocks)
+                keying += System.nanoTime() - parsed
+                parsing += parsed - started
+                sink = sink xor renderedKeys.size
+            }
+            val after = memory?.getThreadAllocatedBytes(thread) ?: -1L
+            assertEquals(expected, blocks)
+            if (round >= 3) {
+                parseTimes.add(parsing)
+                keyTimes.add(keying)
+                if (before >= 0 && after >= before) allocations.add(after - before)
+            }
+        }
+        fun List<Long>.medianMs() = sorted()[size / 2] / 1_000_000.0
+        val bytes = allocations.sorted().let { it.getOrNull(it.size / 2) }
+        println("native=${NativeMarkdown.runtimeAvailable} updates=${frames.size} final_blocks=${expected.size} " +
+            "parse_median_ms=${parseTimes.medianMs()} keys_median_ms=${keyTimes.medianMs()} allocated_bytes=$bytes")
+    }
+
+    @Test fun growingAReplyAfterALongSettledCodeBlock() {
+        for (newline in listOf("\n", "\r\n")) {
+            val prefix = buildString {
+                append("```text").append(newline)
+                repeat(2_400) { line ->
+                    append("example log line ").append(line).append(" contains settled text and code").append(newline)
+                }
+                append("```").append(newline).append(newline).append("Recap")
+            }
+            val growth = " progress"
+            val frames = (1..144).map { prefix + growth.repeat(it) }
+            val expected = parseMarkdown(frames.last())
+            val measurements = ArrayList<Long>()
+            repeat(9) { round ->
+                val live = LiveBlocks()
+                val original = live.blocksFor(prefix, appendFrom = 0, sourceId = 700)
+                var rendered = original
+                val start = System.nanoTime()
+                for ((index, frame) in frames.withIndex()) {
+                    rendered = live.blocksFor(frame, appendFrom = index + 1, sourceId = 700)
+                }
+                val elapsed = System.nanoTime() - start
+                assertEquals(expected, rendered)
+                org.junit.Assert.assertSame(original.first(), rendered.first())
+                if (round >= 3) measurements.add(elapsed)
+            }
+            println("newline=${if (newline.length == 1) "LF" else "CRLF"} native=${NativeMarkdown.runtimeAvailable} " +
+                "bytes=${prefix.length} frames=${frames.size} median_ms=${measurements.sorted()[measurements.size / 2] / 1_000_000.0}")
+        }
+    }
 
     private val N1 = 10.toChar().toString()
     private val N2 = run { val lf = 10.toChar().toString(); lf + lf }

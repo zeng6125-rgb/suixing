@@ -1,10 +1,21 @@
 package com.suixing.agent.ui.chat
 
 import java.io.File
+import java.util.PriorityQueue
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 
 internal data class FileReference(val start: Int, val end: Int, val path: String)
 internal data class FileReferenceQuery(val start: Int, val end: Int, val query: String)
 internal data class FileReferenceSuggestion(val path: String, val name: String, val directory: Boolean)
+
+private data class FileReferenceCandidate(
+    val file: File,
+    val name: String,
+    val directory: Boolean,
+    val sortName: String,
+    val order: Int,
+)
 
 /** Quotes keep spaces and punctuation inside one reference; the draft retains the full path. */
 internal fun fileReferenceToken(path: String): String =
@@ -104,7 +115,7 @@ internal fun fileReferenceLabel(path: String, maxCodePoints: Int = 32): String {
 }
 
 /** Browse only the queried directory, on the caller's IO dispatcher, without a whole-disk scan. */
-internal fun fileReferenceSuggestions(root: File, query: String): List<FileReferenceSuggestion> {
+internal suspend fun fileReferenceSuggestions(root: File, query: String): List<FileReferenceSuggestion> {
     val slash = query.lastIndexOf('/')
     val directoryPath = if (slash >= 0) query.substring(0, slash + 1) else ""
     val name = if (slash >= 0) query.substring(slash + 1) else query
@@ -113,13 +124,28 @@ internal fun fileReferenceSuggestions(root: File, query: String): List<FileRefer
         absoluteReferencePath(directoryPath) -> File(directoryPath)
         else -> File(root, directoryPath)
     }
-    return directory.listFiles().orEmpty()
-        .asSequence()
-        .filter { it.name.contains(name, ignoreCase = true) }
-        .map { FileReferenceSuggestion(it.absolutePath, it.name, it.isDirectory) }
-        .sortedWith(compareBy({ !it.directory }, { it.name.lowercase() }))
-        .take(24)
-        .toList()
+    val ranking = compareBy<FileReferenceCandidate>({ !it.directory }, { it.sortName }, { it.order })
+    val best = PriorityQueue(24, ranking.reversed())
+    val context = currentCoroutineContext()
+    for ((order, file) in directory.listFiles().orEmpty().withIndex()) {
+        context.ensureActive()
+        val fileName = file.name
+        if (!fileName.contains(name, ignoreCase = true)) continue
+        val sortName = fileName.lowercase()
+        val last = if (best.size == 24) best.element() else null
+        // With 24 directories selected, a later name cannot enter the result as either kind.
+        if (last?.directory == true && sortName >= last.sortName) continue
+        val isDirectory = file.isDirectory
+        if (last != null) {
+            val comparison = if (isDirectory != last.directory) {
+                if (isDirectory) -1 else 1
+            } else sortName.compareTo(last.sortName)
+            if (comparison >= 0) continue
+            best.remove()
+        }
+        best.add(FileReferenceCandidate(file, fileName, isDirectory, sortName, order))
+    }
+    return best.sortedWith(ranking).map { FileReferenceSuggestion(it.file.absolutePath, it.name, it.directory) }
 }
 
 internal fun Draft.withFileReference(path: String): Draft =

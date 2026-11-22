@@ -12,24 +12,34 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.decodeFromJsonElement
 
 internal object NativeChatLogJni {
-    external fun nativeRead(fd: FileDescriptor, from: Long, end: Long, sink: NativeChatLogSink): Boolean
+    external fun nativeRead(
+        fd: FileDescriptor, from: Long, end: Long, sink: NativeChatLogSink, checkpoint: ChatLogCheckpoint?,
+    ): Boolean
     external fun nativeLocate(fd: FileDescriptor, from: Long, end: Long, needle: ByteArray): Long
+    external fun nativeLocatePair(fd: FileDescriptor, end: Long, first: ByteArray, last: ByteArray): LongArray
     external fun nativeCut(turns: ByteArray, want: Int, atStart: Boolean): Int
-    external fun nativeWindowStart(fd: FileDescriptor, end: Long, turns: Int): Long
+    external fun nativeWindowStart(fd: FileDescriptor, end: Long, turns: Int, checkpoint: ChatLogCheckpoint?): Long
 }
 
 internal object NativeChatLog {
-    fun read(file: RandomAccessFile, name: String, from: Long, end: Long, json: Json): List<ChatStore.Entry>? {
+    fun read(
+        file: RandomAccessFile, name: String, from: Long, end: Long, json: Json,
+        checkpoint: ChatLogCheckpoint? = null,
+    ): List<ChatStore.Entry>? {
         if (!NativeCore.available) return null
-        val sink = NativeChatLogSink(name, json)
-        return if (NativeChatLogJni.nativeRead(file.fd, from, end, sink)) sink.entries else null
+        val sink = NativeChatLogSink(name, json, checkpoint)
+        return if (NativeChatLogJni.nativeRead(file.fd, from, end, sink, checkpoint)) sink.entries else null
     }
 
     fun locate(file: RandomAccessFile, from: Long, end: Long, needle: ByteArray): Long? =
         if (NativeCore.available) NativeChatLogJni.nativeLocate(file.fd, from, end, needle) else null
 
-    fun windowStart(file: RandomAccessFile, end: Long, turns: Int): Long? =
-        if (NativeCore.available) NativeChatLogJni.nativeWindowStart(file.fd, end, turns).takeIf { it >= 0 } else null
+    fun windowStart(file: RandomAccessFile, end: Long, turns: Int, checkpoint: ChatLogCheckpoint? = null): Long? =
+        if (NativeCore.available) NativeChatLogJni.nativeWindowStart(file.fd, end, turns, checkpoint).takeIf { it >= 0 }
+        else null
+
+    fun locatePair(file: RandomAccessFile, end: Long, first: ByteArray, last: ByteArray): LongArray? =
+        if (NativeCore.available) NativeChatLogJni.nativeLocatePair(file.fd, end, first, last) else null
 
     fun nextLine(file: RandomAccessFile, from: Long, end: Long, probe: Long): Long? {
         if (!NativeCore.available) return null
@@ -45,13 +55,21 @@ internal object NativeChatLog {
 }
 
 @Keep
-internal class NativeChatLogSink(private val name: String, private val json: Json) {
+internal class ChatLogCheckpoint(private val ensureActive: () -> Unit) {
+    @Keep fun check() = ensureActive()
+}
+
+@Keep
+internal class NativeChatLogSink(
+    private val name: String, private val json: Json, private val checkpoint: ChatLogCheckpoint?,
+) {
     val entries = ArrayList<ChatStore.Entry>()
 
     @Keep
     fun accept(bytes: ByteArray) {
         val input = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
         repeat(input.int) {
+            checkpoint?.check()
             val offset = input.long
             val lineBytes = input.int
             val raw = input.int != 0

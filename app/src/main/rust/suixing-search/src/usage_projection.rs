@@ -1,6 +1,7 @@
 //! Read-only projection of a pinned, committed JSONL range. No transcript mutation or cache rules.
 
 use crate::{STATUS_OK, STATUS_PANIC, STATUS_REQUEST_ERROR, SearchBuffer, check_cancelled, task};
+use memchr::memchr_iter;
 use serde::de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 use serde_json::value::RawValue;
@@ -212,21 +213,40 @@ impl ProjectionResponse {
 }
 
 fn contains_surrogate_escape(bytes: &[u8], cancelled: &AtomicBool) -> Result<bool, i32> {
-    for (index, part) in bytes.windows(6).enumerate() {
-        if index % READ_BYTES == 0 {
-            check_cancelled(cancelled)?;
-        }
-        if part[0] == b'\\'
-            && part[1] == b'u'
-            && part[2].eq_ignore_ascii_case(&b'd')
-            && matches!(part[3].to_ascii_lowercase(), b'8'..=b'f')
-            && part[4].is_ascii_hexdigit()
-            && part[5].is_ascii_hexdigit()
-        {
-            return Ok(true);
+    let starts = &bytes[..bytes.len().saturating_sub(5)];
+    for (index, chunk) in starts.chunks(READ_BYTES).enumerate() {
+        check_cancelled(cancelled)?;
+        let start = index * READ_BYTES;
+        for slash in memchr_iter(b'\\', chunk) {
+            let part = &bytes[start + slash + 1..][..5];
+            if part[0] == b'u'
+                && part[1].eq_ignore_ascii_case(&b'd')
+                && matches!(part[2].to_ascii_lowercase(), b'8'..=b'f')
+                && part[3].is_ascii_hexdigit()
+                && part[4].is_ascii_hexdigit()
+            {
+                return Ok(true);
+            }
         }
     }
     Ok(false)
+}
+
+#[cfg(test)]
+#[test]
+fn surrogate_scan_covers_chunk_boundaries_and_tail() {
+    for start in [0, READ_BYTES - 5, READ_BYTES - 1, READ_BYTES, READ_BYTES + 1] {
+        let mut bytes = vec![b'x'; start];
+        bytes.extend_from_slice(br"\udB03");
+        let cancelled = AtomicBool::new(false);
+        assert_eq!(contains_surrogate_escape(&bytes, &cancelled), Ok(true));
+        assert_eq!(
+            contains_surrogate_escape(&bytes[..bytes.len() - 1], &cancelled),
+            Ok(false)
+        );
+        bytes[start + 2] = b'c';
+        assert_eq!(contains_surrogate_escape(&bytes, &cancelled), Ok(false));
+    }
 }
 
 struct ProjectedMessage {

@@ -58,7 +58,7 @@ class ChatRepositoryColdReadTest {
         seed(store)
         val (repository, lock) = repositoryWithLockedWriter()
         try {
-            // 对照断言：readWire 只走 lock.withLock ⇒ 占锁期间必然拿不到结果。
+            // 对照断言：readWire 要先拿锁固定日志快照 ⇒ 占锁期间必然拿不到结果。
             // 这条若不成立，下面那句「通过」就说明不了任何事（锁其实没挡住任何路径）。
             assertNull(withTimeoutOrNull(300) { repository.readWire("chat") })
             val window = withTimeout(5_000) { repository.readTailWindow("chat", 1) }

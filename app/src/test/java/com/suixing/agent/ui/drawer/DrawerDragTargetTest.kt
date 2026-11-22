@@ -5,39 +5,23 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 
 class DrawerDragTargetTest {
-    @Test fun `a closed visual endpoint opens even when the settled anchor was open`() {
-        assertEquals(DrawerValue.Open, drawerDragTarget(true, 0.4f, 0f, startProgress = 0f))
-    }
-
-    @Test fun `an open visual endpoint closes even when the settled anchor was closed`() {
-        assertEquals(DrawerValue.Closed, drawerDragTarget(false, 0.6f, 0f, startProgress = 1f))
-    }
-
-    @Test fun `an open drawer closes after a deliberate slow swipe past a quarter of its width`() {
-        assertEquals(DrawerValue.Closed, drawerDragTarget(true, 0.6f, 0f))
-        assertEquals(DrawerValue.Closed, drawerDragTarget(true, 0.6f, -400f))
-    }
-
-    @Test fun `opening and closing have mirrored distance thresholds`() {
+    @Test fun `a drag caught mid-animation settles at the visible midpoint at low speed`() {
         for (percent in 0..100) {
-            val travel = percent / 100f
-            val closes = drawerDragTarget(true, 1f - travel, 0f) == DrawerValue.Closed
-            val opens = drawerDragTarget(false, travel, 0f) == DrawerValue.Open
-            assertEquals("equal travel $travel must have equal intent in both directions", opens, closes)
+            val drag = DrawerDragAccumulator()
+            val generation = drag.begin(0.5f, 100f)
+            drag.dragBy(generation, percent - 50f)
+            val release = drag.finish(generation)!!
+            for (speed in listOf(-399f, 0f, 399f)) {
+                val expected = if (percent > 50) DrawerValue.Open else DrawerValue.Closed
+                assertEquals(expected, drawerDragTarget(release.openByDistance, speed))
+            }
         }
     }
 
-    @Test fun `small swipes and exact threshold retain the current anchor`() {
-        assertEquals(DrawerValue.Open, drawerDragTarget(true, 0.9f, 0f))
-        assertEquals(DrawerValue.Open, drawerDragTarget(true, 0.75f, 0f))
-        assertEquals(DrawerValue.Closed, drawerDragTarget(false, 0.1f, 0f))
-        assertEquals(DrawerValue.Closed, drawerDragTarget(false, 0.25f, 0f))
-    }
-
-    @Test fun `a fast swipe keeps priority over distance and the old anchor`() {
-        for (wasOpen in listOf(false, true)) {
-            assertEquals(DrawerValue.Closed, drawerDragTarget(wasOpen, 0.9f, -1_000f))
-            assertEquals(DrawerValue.Open, drawerDragTarget(wasOpen, 0.1f, 1_000f))
+    @Test fun `a fling at or above the threshold takes priority over distance`() {
+        for (speed in listOf(400f, 1000f)) {
+            assertEquals(DrawerValue.Closed, drawerDragTarget(true, -speed))
+            assertEquals(DrawerValue.Open, drawerDragTarget(false, speed))
         }
     }
 }

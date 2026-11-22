@@ -44,7 +44,7 @@ internal fun markdownTextsToPrepare(
 ): List<String>? {
     val texts = buildList {
         for (part in parts) if (part is Part.Text) {
-            if (!part.text.contains("![")) add(part.text) else {
+            if (!(part.hasImageMarker ?: part.text.contains("!["))) add(part.text) else {
                 val segments = imageSegments[part.text] ?: splitImageSegments(part.text)
                 if (segments.any { it is MessageSegment.Image }) {
                     segments.forEach { if (it is MessageSegment.Text && it.text.isNotBlank()) add(it.text) }
@@ -59,7 +59,7 @@ internal fun imageSegmentsToPrepare(
     parts: List<Part>,
     current: Map<String, List<MessageSegment>> = emptyMap(),
 ): Map<String, List<MessageSegment>> = buildMap {
-    for (part in parts) if (part is Part.Text && part.text.contains("![")) {
+    for (part in parts) if (part is Part.Text && (part.hasImageMarker ?: part.text.contains("!["))) {
         put(part.text, current[part.text] ?: splitImageSegments(part.text))
     }
 }

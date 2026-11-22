@@ -57,6 +57,52 @@ fn writes(emulator: &Emulator) -> String {
         .collect()
 }
 
+fn row_delta(emulator: &mut Emulator, from: i32, full: bool) -> (i32, i32) {
+    let mut output = crate::SearchBuffer {
+        data: std::ptr::null_mut(),
+        len: 0,
+    };
+    // SAFETY: the emulator and output stay alive for the call; the returned buffer is freed below.
+    assert_eq!(
+        0,
+        unsafe {
+            super::sx_terminal_rows(
+                (emulator as *mut Emulator).cast(),
+                false,
+                from,
+                emulator.rows,
+                full,
+                &mut output,
+            )
+        }
+    );
+    // SAFETY: sx_terminal_rows returned the initialized byte buffer and its length.
+    let bytes = unsafe { std::slice::from_raw_parts(output.data, output.len) };
+    let header = (
+        i32::from_le_bytes(bytes[..4].try_into().unwrap()),
+        i32::from_le_bytes(bytes[4..8].try_into().unwrap()),
+    );
+    // SAFETY: this buffer was allocated by sx_terminal_rows and is freed exactly once.
+    unsafe { crate::sx_search_free(output.data, output.len) };
+    header
+}
+
+#[test]
+fn viewport_scrolling_reuses_rows_in_both_directions() {
+    let mut emulator = emulator();
+    for row in 0..80 {
+        emulator.append(format!("entry {row}\r\n").as_bytes());
+    }
+    assert_eq!((24, 0), row_delta(&mut emulator, 0, true));
+    assert_eq!((1, 23), row_delta(&mut emulator, -1, false));
+    assert_eq!((1, 23), row_delta(&mut emulator, -2, false));
+    assert_eq!((1, 1), row_delta(&mut emulator, -1, false));
+    assert_eq!((1, 1), row_delta(&mut emulator, 0, false));
+    assert_eq!((0, 0), row_delta(&mut emulator, 0, false));
+    emulator.append(b"entry 80\r\n");
+    assert_eq!((1, 0), row_delta(&mut emulator, -1, false));
+}
+
 #[test]
 fn sgr_never_appears_as_literal_text() {
     let mut emulator = emulator();

@@ -38,6 +38,26 @@ class LiveBlocksTest {
         assertSame(first.first(), next.first())
     }
 
+    @Test fun `past block snapshots survive additional completions and a rewritten prefix`() {
+        val live = LiveBlocks()
+        val retained = ArrayList<Pair<String, List<MdBlock>>>()
+        val source = StringBuilder("first paragraph")
+        for (step in 1..65) {
+            source.append(" complete.\n\nParagraph ").append(step)
+            val text = source.toString()
+            val blocks = live.blocksFor(text, step, 41)
+            if (step in listOf(3, 7, 19, 33, 65)) retained.add(text to blocks)
+        }
+        val appended = source.append(" continues").toString()
+        val grown = live.blocksFor(appended, 66, 41)
+        assertEquals(parseMarkdown(appended), grown)
+        assertSame(retained.first().second.first(), grown.first())
+
+        val rewritten = "rewritten start\n\nnew tail"
+        assertEquals(parseMarkdown(rewritten), live.blocksFor(rewritten, 0, 41))
+        for ((text, snapshot) in retained) assertEquals(parseMarkdown(text), snapshot)
+    }
+
     @Test fun `completing a fenced block retains earlier prose and all internal blank lines`() {
         val parser = LiveBlocks()
         val first = parser.blocksFor("intro\n\n```kt\na\n\nb")
@@ -186,6 +206,38 @@ class LiveBlocksTest {
                 parseMarkdown(prefix),
                 live.blocksFor(prefix, appendFrom = 7, sourceId = sourceId),
             )
+        }
+    }
+
+    @Test fun `mixed newlines match a full parse at every streamed prefix`() {
+        val fixtures = listOf(
+            "第一段\r\n\r\nNext\rline\n\n收尾",
+            "```log\r\nexample output\r\nsecond line\r\n```\r\n\r\nFinished",
+            "| Name | Value |\r\n| --- | --- |\r\n| one | 1 |\r| two | 2 |\n\nEnd",
+        )
+        for (source in fixtures) {
+            val streamed = LiveBlocks()
+            val unversioned = LiveBlocks()
+            val revealed = LiveBlocks()
+            for (length in 1..source.length) {
+                val prefix = source.take(length)
+                val expected = parseMarkdown(prefix)
+                assertEquals("append at $length", expected, streamed.blocksFor(prefix, length, 19))
+                assertEquals("reveal at $length", expected, revealed.blocksFor(prefix, 7, 23))
+                assertEquals("unversioned at $length", expected, unversioned.blocksFor(prefix))
+            }
+        }
+    }
+
+    @Test fun `rewriting a CRLF source refreshes the raw prefix and the parser`() {
+        val live = LiveBlocks()
+        val before = "intro\r\n\r\nold content"
+        assertEquals(parseMarkdown(before), live.blocksFor(before, 5, 13))
+        val edited = "new intro\n\nreplaced content"
+        assertEquals(parseMarkdown(edited), live.blocksFor(edited, 2, 13))
+        for ((index, tail) in listOf("\r", "\r\n", "\r\n\r", "\r\n\r\n", "\r\n\r\nlast").withIndex()) {
+            val source = edited + tail
+            assertEquals(parseMarkdown(source), live.blocksFor(source, index + 3, 13))
         }
     }
 }

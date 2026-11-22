@@ -13,7 +13,39 @@ pub(super) struct Row {
     pub complex: bool,
 }
 
+impl Clone for Row {
+    fn clone(&self) -> Self {
+        Self {
+            columns: self.columns,
+            text: self.text.clone(),
+            used: self.used,
+            wrap: self.wrap,
+            styles: self.styles.clone(),
+            uniform_style: self.uniform_style,
+            complex: self.complex,
+        }
+    }
+
+    fn clone_from(&mut self, source: &Self) {
+        self.columns = source.columns;
+        self.text.clone_from(&source.text);
+        self.used = source.used;
+        self.wrap = source.wrap;
+        self.styles.clone_from(&source.styles);
+        self.uniform_style = source.uniform_style;
+        self.complex = source.complex;
+    }
+}
+
 impl Row {
+    pub fn same_rendering(&self, other: &Self) -> bool {
+        self.wrap == other.wrap
+            && self.complex == other.complex
+            && self.text[..self.used] == other.text[..other.used]
+            && self.styles == other.styles
+            && (!self.styles.is_empty() || self.uniform_style == other.uniform_style)
+    }
+
     pub fn new(columns: i32, style: i64) -> Self {
         Self {
             columns,

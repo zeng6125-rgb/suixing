@@ -2,13 +2,12 @@
 
 package com.suixing.agent.ui
 
-import android.content.Intent
 import android.graphics.drawable.ColorDrawable
 import android.net.Uri
-import android.widget.Toast
 import androidx.activity.compose.LocalActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
@@ -30,17 +29,18 @@ import com.suixing.agent.ui.drawer.SuixingDrawer
 import com.suixing.agent.ui.drawer.rememberSuixingDrawerState
 import androidx.compose.material3.Scaffold
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.State
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.key
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.snapshotFlow
-import androidx.compose.runtime.structuralEqualityPolicy
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.drawWithCache
@@ -48,6 +48,7 @@ import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.TransformOrigin
@@ -60,11 +61,16 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavGraph.Companion.findStartDestination
+import androidx.navigation.NavType
+import androidx.navigation.navArgument
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
@@ -78,6 +84,14 @@ import com.suixing.agent.service.ChatCompletionNotifications
 import com.suixing.agent.ui.assistant.AssistantEditor
 import com.suixing.agent.ui.assistant.AssistantSheet
 import com.suixing.agent.ui.capability.CapabilityScreen
+import com.suixing.agent.ui.browser.BROWSER_ROUTE
+import com.suixing.agent.ui.browser.BrowserOpenRequest
+import com.suixing.agent.ui.browser.BrowserScreen
+import com.suixing.agent.ui.browser.BrowserTarget
+import com.suixing.agent.ui.browser.BrowserUriHandler
+import com.suixing.agent.ui.browser.LocalOpenBrowser
+import com.suixing.agent.ui.browser.browserRoute
+import com.suixing.agent.ui.browser.browserOpenRequests
 import com.suixing.agent.ui.automation.UI_AUTOMATION_ROUTE
 import com.suixing.agent.ui.automation.UiAutomationScreen
 import com.suixing.agent.ui.chat.ChatScreen
@@ -140,7 +154,7 @@ import androidx.compose.runtime.setValue
  */
 private const val SCREEN_CORNER_DP = 57.33f
 
-/** 顶栏「打开浏览器」的目的地；与关于页的源码入口一致。 */
+/** 内置浏览器入口沿用原来的初始网页。 */
 private const val BROWSER_HOME_URL = "https://github.com/zeng6125-rgb/suixing"
 
 
@@ -292,18 +306,29 @@ fun SuixingApp() {
     // pop 到透明的 "empty" 就等于"什么都没有在盖着 chat"。
     val showChat: () -> Unit = { navController.popBackStack("empty", inclusive = false) }
 
-    // 顶栏溢出菜单：浏览器交给系统默认浏览器（不内嵌 WebView）；终端走覆盖层路由。
-    // 关于页用同一个仓库地址，保持一致。
-    val openBrowser: () -> Unit = {
-        runCatching {
-            context.startActivity(
-                Intent(Intent.ACTION_VIEW, Uri.parse(BROWSER_HOME_URL))
-                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-            )
-        }.onFailure {
-            Toast.makeText(context, "打不开链接：设备上没有可用的浏览器", Toast.LENGTH_SHORT).show()
+    val openBrowserTarget: (BrowserTarget) -> Unit = remember(navController, switchIntents) { { target ->
+        switchIntents.invalidate()
+        navController.navigate(browserRoute(target)) { launchSingleTop = true }
+    } }
+    val browserLifecycle = LocalLifecycleOwner.current.lifecycle
+    DisposableEffect(browserLifecycle, navController, switchIntents) {
+        val navigate: (BrowserOpenRequest) -> Boolean = { request ->
+            if (browserLifecycle.currentState != Lifecycle.State.RESUMED) false else {
+                switchIntents.invalidate()
+                navController.navigate(browserRoute(request.target, request.id)) { launchSingleTop = true }
+                true
+            }
+        }
+        browserOpenRequests.navigate = navigate
+        onDispose {
+            if (browserOpenRequests.navigate === navigate) browserOpenRequests.navigate = null
         }
     }
+    val externalUriHandler = LocalUriHandler.current
+    val browserUriHandler = remember(openBrowserTarget, externalUriHandler) {
+        BrowserUriHandler(openBrowserTarget, externalUriHandler)
+    }
+    val openBrowser: () -> Unit = remember(openBrowserTarget) { { openBrowserTarget(BrowserTarget.Web(BROWSER_HOME_URL)) } }
     val openTerminal: () -> Unit = { open("terminal") }
     LaunchedEffect(Unit) {
         Core.terminals.openRequested.collect { requested ->
@@ -442,6 +467,8 @@ fun SuixingApp() {
     val setSelectionActive: (Boolean) -> Unit = remember { { selectionActive = it } }
     CompositionLocalProvider(
         LocalDrawerBusy provides drawerBusyState,
+        LocalOpenBrowser provides openBrowserTarget,
+        LocalUriHandler provides browserUriHandler,
         // 用户自己拉开抽屉（聊天页那个汉堡键，也是全仓唯一的正常开抽屉路径）：演库自己那
         // 一段滑入——用户反对的从来是「返回时把它重放一遍」，不是手动打开时的动画。
         // 只在会话页可用（抽屉只属于会话页，见 SuixingDrawer）：子页没有汉堡入口，
@@ -530,10 +557,6 @@ fun SuixingApp() {
                 androidx.compose.ui.graphics.lerp(surfaceColor, drawerSurfaceColor, 1f)
             }
             val drawerProgress = drawerState.visualProgress
-            // The solid backing only changes at closed/exposed, not on every drag pixel.
-            val drawerExposed = remember(drawerProgress) {
-                derivedStateOf(structuralEqualityPolicy()) { drawerProgress.value > 0f }
-            }
             Box(
                 Modifier
                     .matchParentSize()
@@ -545,7 +568,7 @@ fun SuixingApp() {
                         // p*4 在起始阶段仍然很白（p=0.02 → 8%），所以看上去"刚滑时一点不融合"。
                         // 改成阈值：只要抽屉动了一点，底色立刻就是侧边栏色。
                         // 判 p=0 时页面完全盖住，切换看不出来；关闭动画回到 0 时同理。
-                        val bg = if (drawerExposed.value) exposedBackgroundColor else closedBackgroundColor
+                        val bg = if (drawerState.isHomeExposed) exposedBackgroundColor else closedBackgroundColor
                         drawRect(color = bg, size = androidx.compose.ui.geometry.Size(size.width, h))
                     },
             )
@@ -586,7 +609,7 @@ fun SuixingApp() {
                     runningId = runningIds,
                     // Motion state is read by the mark/rows, not by the whole drawer content.
                     runningAnimationActive = remember(drawerState, route) {
-                        { route == "empty" && drawerState.homeShieldActive }
+                        { route == "empty" && drawerState.homeShieldActive && !drawerState.isMoving }
                     },
                     onNew = {
                         switchIntents.invalidate()
@@ -652,23 +675,11 @@ fun SuixingApp() {
                     modifier = Modifier
                         .fillMaxSize()
                         .graphicsLayer {
-                            // 主页浮在侧边栏之上：右移 + 轻微缩放 + 恒定圆角裁剪 + 淡投影。
-                            // 全部在绘制期做，不改布局尺寸，也不在组合作用域里读进度。
                             val progress = drawerProgress.value
-                            // 自建宿主只平移侧边栏本体，主页这一层得自己跟上进度，否则会露出
-                            // 一块没动的内容。位移 = 面板宽 × 进度，与面板的 translationX 互补。
                             translationX = panelWidthPx * progress
-                            // 缩放：关 1.0 → 开 0.95。端点必须写对，否则关着时整页常年缩小。
-                            val s = 1f - 0.05f * progress
-                            scaleX = s
-                            scaleY = s
-                            // 从中心缩放，读成"整块浮起来"；从左拉伸会像贴纸。
+                            scaleX = 1f - 0.05f * progress
+                            scaleY = scaleX
                             transformOrigin = TransformOrigin(0.5f, 0.5f)
-                        }
-                        .graphicsLayer {
-                            // Keep shadow geometry in unscaled page coordinates. The outer layer
-                            // moves the page, while opacity changes leave this mask reusable.
-                            val progress = drawerProgress.value
                             shadowElevation = if (progress > 0f) 16.dp.toPx() else 0f
                             spotShadowColor = Color.Black.copy(alpha = 0.24f * progress)
                             ambientShadowColor = Color.Black.copy(alpha = 0.24f * progress)
@@ -687,7 +698,16 @@ fun SuixingApp() {
                 // 连同它们的布局修饰符链一起被重新测量（不重组 ≠ 不重测）。
                 // 现在整页保持满高，IME 只在聊天内部被消费一次：
                 // 输入框按 IME 做放置偏移，列表/空状态在**布局期**把键盘那一截让出来。
-                Box(Modifier.fillMaxSize()) {
+                Box(
+                    Modifier.fillMaxSize().graphicsLayer {
+                        // Reuse the chat raster without caching the animated outer shadow.
+                        compositingStrategy = if (drawerState.isHomeExposed) {
+                            CompositingStrategy.Offscreen
+                        } else {
+                            CompositingStrategy.Auto
+                        }
+                    },
+                ) {
                 Box(Modifier.fillMaxSize().drawWithContent {
                     conversationHandoff.draw(
                         content = { this@drawWithContent.drawContent() },
@@ -784,6 +804,23 @@ fun SuixingApp() {
                         ) {
                             // 栈底那一层：透明，什么都不画（chat 就在它下面）。
                                 composable("empty") { }
+                                 composable(
+                                     BROWSER_ROUTE,
+                                     arguments = listOf("url", "path", "query", "fragment", "request").map { name ->
+                                         navArgument(name) { type = NavType.StringType; nullable = true; defaultValue = null }
+                                     },
+                                     enterTransition = { EnterTransition.None },
+                                 ) { entry ->
+                                     val path = entry.arguments?.getString("path")
+                                     val target = if (path != null) BrowserTarget.Document(path,
+                                         entry.arguments?.getString("query"), entry.arguments?.getString("fragment"))
+                                     else BrowserTarget.Web(entry.arguments?.getString("url") ?: BROWSER_HOME_URL)
+                                     val requestId = entry.arguments?.getString("request")
+                                     val request = remember(requestId) { browserOpenRequests.find(requestId) }
+                                     key(target, requestId) {
+                                         BrowserScreen(target, onBack = goBack, toolRequest = request)
+                                     }
+                                 }
                                 composable("subagents/{chatId}") { entry ->
                                     val parentId = checkNotNull(entry.arguments?.getString("chatId"))
                                     SubagentListScreen(parentId, goBack, { id -> openSubagents(parentId, id) })

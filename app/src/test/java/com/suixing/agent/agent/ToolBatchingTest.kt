@@ -33,6 +33,12 @@ class ToolBatchingTest {
     }
 
     @Test
+    fun `打开浏览器时先完成上一组并让后续界面操作等待`() {
+        val groups = batchGroups(listOf("web_fetch", "browser_open", "ui_dump", "ui_tap"), parallel = 4)
+        assertEquals(listOf(listOf(0), listOf(1), listOf(2), listOf(3)), groups)
+    }
+
+    @Test
     fun `shell 与特权写操作串行`() {
         val groups = batchGroups(listOf("run_shell", "bash", "app_action", "read_file"), parallel = 4)
         assertEquals(listOf(listOf(0), listOf(1), listOf(2), listOf(3)), groups)

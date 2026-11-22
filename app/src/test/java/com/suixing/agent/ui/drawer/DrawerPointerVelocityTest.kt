@@ -5,13 +5,38 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.pointer.HistoricalChange
 import androidx.compose.ui.input.pointer.PointerId
 import androidx.compose.ui.input.pointer.PointerInputChange
+import androidx.compose.ui.input.pointer.util.VelocityTracker1D
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class DrawerPointerVelocityTest {
+    @Test fun `velocity matches Compose when the history ring wraps`() {
+        val tracker = DrawerPointerVelocity(touchSlop = 8f)
+        val compose = VelocityTracker1D(isDataDifferential = false)
+        var x = 0f
+        for (index in 0..45) {
+            val previousX = x
+            x += if (index == 0) 0f else (1 + index % 5).toFloat()
+            val time = index * 2L
+            tracker.trackDrawerPointer(pointerChange(1L, time, x, previousX, previousPressed = index != 0))
+            compose.addDataPoint(time, x)
+        }
+        assertEquals(compose.calculateVelocity(), tracker.calculateVelocity().x, 0.001f)
+    }
+
+    @Test fun `holding after a small recoil releases without the old fling velocity`() {
+        val tracker = DrawerPointerVelocity(touchSlop = 8f)
+        tracker.trackDrawerPointer(pointerChange(1L, 0L, 100f, 100f, previousPressed = false))
+        tracker.trackDrawerPointer(pointerChange(1L, 16L, 140f, 100f))
+        tracker.trackDrawerPointer(pointerChange(1L, 32L, 180f, 140f))
+        tracker.trackDrawerPointer(pointerChange(1L, 48L, 177f, 180f))
+        tracker.trackDrawerPointer(pointerChange(1L, 112L, 176f, 177f, pressed = false))
+        assertEquals(0f, tracker.calculateVelocity().x, 0f)
+    }
+
     @Test fun `a reversal decision discards the earlier opening impulse`() {
-        val tracker = DrawerPointerVelocity()
+        val tracker = DrawerPointerVelocity(touchSlop = 8f)
         val positions = listOf(100f, 140f, 180f, 220f, 216f, 212f, 208f, 204f)
         positions.forEachIndexed { index, x ->
             tracker.trackDrawerPointer(pointerChange(1L, index * 16L, x,
@@ -39,7 +64,7 @@ class DrawerPointerVelocityTest {
     }
 
     @Test fun `a surviving pointer does not inherit the distance between two fingers`() {
-        val tracker = DrawerPointerVelocity()
+        val tracker = DrawerPointerVelocity(touchSlop = 8f)
         tracker.trackDrawerPointer(pointerChange(1L, 0L, 300f, 300f, previousPressed = false))
         tracker.trackDrawerPointer(pointerChange(1L, 16L, 280f, 300f))
         tracker.trackDrawerPointer(pointerChange(1L, 32L, 260f, 280f))
@@ -50,9 +75,20 @@ class DrawerPointerVelocityTest {
             tracker.calculateVelocity().x < -800f)
     }
 
+    @Test fun `drawer takeover uses the movement after the horizontal scroller yields`() {
+        val tracker = DrawerPointerVelocity(touchSlop = 8f)
+        tracker.trackDrawerPointer(pointerChange(1L, 0L, 100f, 100f, previousPressed = false))
+        tracker.trackDrawerPointer(pointerChange(1L, 16L, 180f, 100f))
+        tracker.resetTracking(pointerChange(1L, 32L, 188f, 180f))
+        tracker.trackDrawerPointer(pointerChange(1L, 48L, 196f, 188f))
+
+        assertEquals(500f, tracker.calculateVelocity().x, 0.01f)
+        assertEquals(300f, tracker.calculateVelocity(300f).x, 0.01f)
+    }
+
     @OptIn(ExperimentalComposeUiApi::class)
     @Test fun `batched motion retains the final acceleration`() {
-        val tracker = DrawerPointerVelocity()
+        val tracker = DrawerPointerVelocity(touchSlop = 8f)
         tracker.trackDrawerPointer(pointerChange(1L, 0L, 100f, 100f, previousPressed = false))
         tracker.trackDrawerPointer(pointerChange(1L, 32L, 140f, 100f).copy(
             historical = listOf(HistoricalChange(16L, Offset(100f, 0f))),
@@ -63,7 +99,7 @@ class DrawerPointerVelocityTest {
     }
 
     @Test fun `stationary horizontal moves discard the old fling on release`() {
-        val tracker = DrawerPointerVelocity()
+        val tracker = DrawerPointerVelocity(touchSlop = 8f)
         tracker.trackDrawerPointer(pointerChange(1L, 0L, 100f, 100f, previousPressed = false))
         tracker.trackDrawerPointer(pointerChange(1L, 16L, 120f, 100f))
         for (time in listOf(32L, 48L, 64L)) {
@@ -94,7 +130,7 @@ class DrawerPointerVelocityTest {
     )
 
     private fun sampleSwipe(localStep: Float, pointerStep: Float): Float {
-        val tracker = DrawerPointerVelocity()
+        val tracker = DrawerPointerVelocity(touchSlop = 8f)
         for (sample in 0..5) {
             val position = Offset(50f + localStep * sample, 0f)
             // Compose expresses both positions in the node's current coordinate system. The

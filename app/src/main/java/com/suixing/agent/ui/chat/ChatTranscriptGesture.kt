@@ -7,6 +7,7 @@ import androidx.compose.ui.focus.FocusManager
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.ViewConfiguration
+import com.suixing.agent.ui.drawer.SuixingDrawerState
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.first
 
@@ -20,7 +21,8 @@ internal fun Modifier.chatTranscriptGesture(
     viewConfig: ViewConfiguration,
     selectionFocus: FocusManager,
     setSelectionActive: ((Boolean) -> Unit)?,
-): Modifier = pointerInput(conversationId) {
+    drawer: SuixingDrawerState?,
+): Modifier = pointerInput(conversationId, drawer) {
     with(gestureState) {
 
             try {
@@ -56,26 +58,24 @@ internal fun Modifier.chatTranscriptGesture(
                         var released = false
                         while (!released) {
                             val next = awaitPointerEvent(PointerEventPass.Initial)
-                            val change = next.changes.firstOrNull()
-                            // **任一方向**越过 4px 都算拖动。只认"手指上移"是错的：顶锚列表里
-                            // 读上面的内容是**手指下移**（把内容拉下来），纵向判定必须覆盖两个方向。
-                            val pos = change?.position
-                            val dy = (pos?.y ?: downY) - downY
-                            val dx = (pos?.x ?: downX) - downX
-                            // **两件事分开**（§131）：
-                            //   · 任一方向越阈值 ⇒ 手指在拖，取消长按/点击并解除 reveal 拦截；
-                            //   · 只有纵向主导才取消追底 —— 侧滑抽屉时的手指抖动不该让内容停跟。
-                            // 两个 one-shot 标记彼此独立：先横后竖仍要在首次纵向时停跟（#73）。
-                            val intent = dragIntent(dx, dy)
-                            val isPressed = change?.pressed == true
-                            if (gesture.markMoved(intent, isPressed)) {
-                                pressMoved = true
-                                revealBlocked.value = false
-                            }
-                            // 每次手势只写一次：setter 不做等值短路，逐事件写会让本组合体反复失效。
-                            if (gesture.markFollowCancelled(intent, isPressed)) {
-                                scroll.allowBottomResume = true
-                                scroll.stickToBottom = false
+                            if (!gesture.followCancelled) {
+                                val change = next.changes.firstOrNull()
+                                if (change?.pressed == true) {
+                                    val intent = dragIntent(change.position.x - downX, change.position.y - downY)
+                                    if (gesture.markMoved(intent, pressed = true)) {
+                                        pressMoved = true
+                                        revealBlocked.value = false
+                                    }
+                                    if (!change.isConsumed && gesture.markFollowCancelled(intent, pressed = true)) {
+                                        scroll.allowBottomResume = true
+                                        scroll.stickToBottom = false
+                                    } else if (!change.isConsumed && intent == DragIntent.Moved &&
+                                        drawer != null && drawer.rejectedLeftSwipePointer == change.id &&
+                                        drawer.priorityPointerId != change.id
+                                    ) {
+                                        change.consume()
+                                    }
+                                }
                             }
                             released = next.changes.none { it.pressed }
                         }

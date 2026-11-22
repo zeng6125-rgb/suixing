@@ -26,9 +26,9 @@ import com.suixing.agent.core.Core
 import com.suixing.agent.data.Roles
 import com.suixing.agent.data.ViewportBookmark
 import com.suixing.agent.ui.components.LocalDrawerBusy
+import com.suixing.agent.ui.drawer.LocalDrawerGestureState
 import kotlin.math.abs
-import kotlinx.coroutines.flow.conflate
-import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeoutOrNull
@@ -85,6 +85,29 @@ internal class ConversationViewport(val conversationId: String, var bookmark: Vi
     var prepared by mutableStateOf(false)
     var presented by mutableStateOf(false)
     var followOverride by mutableStateOf(false)
+
+    var transcriptRows: ViewportTranscriptRows? = null
+
+    fun projectRows(state: ChatUiState, from: Int): ViewportTranscriptRows =
+        transcriptRows?.takeIf { it.matches(state, from) }
+            ?: ViewportTranscriptRows(state, from)
+}
+
+/** Keeps the grouped rows with the viewport that displays this immutable message snapshot. */
+internal class ViewportTranscriptRows(state: ChatUiState, private val from: Int) {
+    private val chatId = state.conversationId
+    private val messages = state.messages
+    private val runs = state.activeRuns
+    private val running = state.runningHere
+    private val liveRun = state.liveRunId
+
+    val rows = groupRows(messages.subList(from, messages.size), runs, running, liveRun.ifEmpty { null })
+    val keys = presentationKeys(chatId, rows)
+    val keyIndices = keys.withIndex().associate { it.value to it.index }
+
+    fun matches(state: ChatUiState, start: Int): Boolean =
+        chatId == state.conversationId && messages === state.messages && from == start &&
+            runs == state.activeRuns && running == state.runningHere && liveRun == state.liveRunId
 }
 
 /** Restore the reading position before a brief fade, with no additional vertical travel. */
@@ -152,6 +175,7 @@ internal fun BindConversationViewport(
     val expectedWidth = with(LocalDensity.current) { LocalConfiguration.current.screenWidthDp.dp.roundToPx() }
     val owner = LocalLifecycleOwner.current
     val drawerBusy = LocalDrawerBusy.current
+    val drawer = LocalDrawerGestureState.current
     val drawerSwitch = remember(viewport) { drawerBusy.value }
     val mountingPosition = remember(contentReadiness) {
         viewport.listState.firstVisibleItemIndex to viewport.listState.firstVisibleItemScrollOffset
@@ -203,7 +227,11 @@ internal fun BindConversationViewport(
     DisposableEffect(viewport, owner, actions) {
         actions.bindViewport(viewport.conversationId, capture)
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_PAUSE || event == Lifecycle.Event.ON_STOP) capture()
+            if (event == Lifecycle.Event.ON_PAUSE || event == Lifecycle.Event.ON_STOP) {
+                // A covering page may change IME geometry while the reader is away.
+                if (!scroll.stickToBottom) scroll.allowBottomResume = false
+                capture()
+            }
         }
         owner.lifecycle.addObserver(observer)
         onDispose {
@@ -349,20 +377,23 @@ internal fun BindConversationViewport(
             if (idlePosition != null) capture()
         }
     }
-    LaunchedEffect(viewport) {
+    LaunchedEffect(viewport, drawer) {
         snapshotFlow {
-            val items = viewport.listState.layoutInfo.visibleItemsInfo
-            if (!viewport.presented || items.isEmpty()) null else NearbyPreparation(
-                rowsNow.value, revisionNow.value, prefixNow.value, items.first().index, items.last().index,
-            )
-        }.filterNotNull().conflate().collect { request ->
-                // Finish at most one bounded parse, retaining only the newest pending
-                // window. collectLatest used to restart work at every item boundary.
-                // Disposal of this viewport still cancels the entire operation.
-                if (request.rows !== rowsNow.value || request.revision != revisionNow.value ||
-                    request.prefix != prefixNow.value) return@collect
-                prepareNow.value(nearbyViewportRows(request.rows, request.prefix, request.first, request.last,
-                    reverseLayout = false))
+            // Start nearby preparation from the settled viewport. A gesture cancels work
+            // already in flight and stops subscribing to per-frame list geometry.
+            if (!viewport.presented || drawer?.homeShieldActive == true || viewport.listState.isScrollInProgress) {
+                null
+            } else {
+                val items = viewport.listState.layoutInfo.visibleItemsInfo
+                if (items.isEmpty()) null else NearbyPreparation(
+                    rowsNow.value, revisionNow.value, prefixNow.value, items.first().index, items.last().index,
+                )
             }
+        }.collectLatest { request ->
+            if (request == null || request.rows !== rowsNow.value || request.revision != revisionNow.value ||
+                request.prefix != prefixNow.value) return@collectLatest
+            prepareNow.value(nearbyViewportRows(request.rows, request.prefix, request.first, request.last,
+                reverseLayout = false))
+        }
     }
 }

@@ -65,6 +65,9 @@ import com.suixing.agent.capability.allFilesAccessIntents
 import com.suixing.agent.tools.humanSize
 import com.suixing.agent.tools.workspaceDir
 import com.suixing.agent.ui.components.PageTopBar
+import com.suixing.agent.ui.browser.BrowserTarget
+import com.suixing.agent.ui.browser.LocalOpenBrowser
+import com.suixing.agent.ui.browser.browserDocument
 import com.suixing.agent.ui.components.PageTopBarAction
 import com.suixing.agent.ui.components.RowChevron
 import com.suixing.agent.ui.components.SettingRow
@@ -74,32 +77,86 @@ import com.suixing.agent.ui.theme.FileTypeColors
 import com.suixing.agent.ui.theme.MonoStyle
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.io.IOException
+import java.nio.file.Files
+import java.nio.file.attribute.BasicFileAttributes
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-/**
- * 一行文件。[isDirectory] / [iconRes] / [tint] / [size] 都在列目录的 IO 循环里算好：
- * `File.isDirectory` 与 `File.length` 是系统调用，落在组合期就是每行每帧一次主线程 stat。
- * 图标只存资源 id —— `ImageVector.vectorResource` 是 @Composable，取不出来。
- */
-private class Entry(
+internal class FileListingEntry(
     val file: File,
-    val name: String,
-    val size: String,
-    val modified: String,
-    val isDirectory: Boolean,
-    val iconRes: Int,
-    val tint: Color,
+    private val metadata: FileListingMetadata,
+) {
+    val name = file.name
+    val sortName = name.lowercase()
+    val isDirectory get() = metadata.directory
+    fun sizeLabel(): String = if (isDirectory) "文件夹" else humanSize(metadata.size)
+    fun modifiedLabel(format: SimpleDateFormat): String = format.format(Date(metadata.modified))
+}
+
+internal class FileListing(
+    val entries: List<FileListingEntry>,
+    val timeFormat: SimpleDateFormat,
 )
+
+internal data class FileListingMetadata(val directory: Boolean, val size: Long, val modified: Long)
+
+internal fun File.readListingMetadata(): FileListingMetadata = try {
+    val attributes = Files.readAttributes(toPath(), BasicFileAttributes::class.java)
+    FileListingMetadata(attributes.isDirectory, attributes.size(), attributes.lastModifiedTime().toMillis())
+} catch (_: IOException) {
+    // Keep the listing usable when an entry disappears between enumeration and attribute lookup.
+    val directory = isDirectory
+    FileListingMetadata(directory, if (directory) 0L else length(), lastModified())
+}
+
+private const val FILE_ATTRIBUTE_WORKERS = 4
+private const val PARALLEL_LISTING_MIN_FILES = 512
+private val fileAttributeDispatcher = Dispatchers.IO.limitedParallelism(FILE_ATTRIBUTE_WORKERS)
+
+internal suspend fun readFileListing(directory: File): FileListing? {
+    val files = directory.listFiles() ?: return null
+    val timeFormat = SimpleDateFormat("M月d日 HH:mm", Locale.getDefault())
+    suspend fun readRange(start: Int, end: Int): ArrayList<FileListingEntry> {
+        val context = currentCoroutineContext()
+        val entries = ArrayList<FileListingEntry>(end - start)
+        for (index in start until end) {
+            context.ensureActive()
+            val file = files[index]
+            entries.add(FileListingEntry(file, file.readListingMetadata()))
+        }
+        return entries
+    }
+    val entries = if (files.size < PARALLEL_LISTING_MIN_FILES) readRange(0, files.size) else coroutineScope {
+        val ranges = List(FILE_ATTRIBUTE_WORKERS) { worker ->
+            async(fileAttributeDispatcher) {
+                readRange(
+                    files.size * worker / FILE_ATTRIBUTE_WORKERS,
+                    files.size * (worker + 1) / FILE_ATTRIBUTE_WORKERS,
+                )
+            }
+        }.awaitAll()
+        ArrayList<FileListingEntry>(files.size).apply { ranges.forEach { addAll(it) } }
+    }
+    currentCoroutineContext().ensureActive()
+    // A stable sort keeps the original enumeration order of equal names.
+    entries.sortWith(compareBy({ !it.isDirectory }, { it.sortName }))
+    return FileListing(entries, timeFormat)
+}
 
 @Composable
 fun FilesScreen(onBack: () -> Unit, onReference: (File) -> Unit) {
     val context = LocalContext.current
+    val openBrowser = LocalOpenBrowser.current
     // Two roots, and the app's own working directory stays the default: it is where the model
     // reads and writes by relative path. /sdcard is the second one, and it only opens after the
     // user grants 「所有文件访问权限」 — without it the listing above it is invisible to us.
@@ -132,11 +189,12 @@ fun FilesScreen(onBack: () -> Unit, onReference: (File) -> Unit) {
         externalRoot -> "/sdcard"
         else -> "插件目录"
     }
-    var entries by remember { mutableStateOf<List<Entry>>(emptyList()) }
+    var fileListing by remember { mutableStateOf<FileListing?>(null) }
+    val entries = fileListing?.entries.orEmpty()
     var listError by remember { mutableStateOf<String?>(null) }
     var listing by remember { mutableStateOf(true) }
     var reload by remember { mutableIntStateOf(0) }
-    var preview by remember { mutableStateOf<Pair<Entry, String>?>(null) }
+    var preview by remember { mutableStateOf<Pair<FileListingEntry, String>?>(null) }
     var loading by remember { mutableStateOf(false) }
     // 预览读取是异步的，连点两个文件会起两个协程；只认最后一次点击，否则先点的那次
     // 晚回来会把弹窗改成不是用户最后选的文件。
@@ -164,41 +222,10 @@ fun FilesScreen(onBack: () -> Unit, onReference: (File) -> Unit) {
         val listed = withContext(Dispatchers.IO) {
             // 插件根是应用私有目录，首次进入时创建；文件操作也留在 IO 线程。
             if (current == pluginRoot) pluginRoot.mkdirs()
-            val children = current.listFiles() ?: return@withContext null
-            // 每次列目录独占 formatter，避免取消中的旧读取与新读取共用非线程安全对象。
-            val timeFormat = SimpleDateFormat("M月d日 HH:mm", Locale.getDefault())
-            // 只取一次目录类型，排序、图标和大小复用同一份元数据；切目录后及时停止旧目录
-            // 的逐文件 stat，避免大目录的废弃读取继续占 IO 工作线程。
-            val keyed = children.map { file ->
-                ensureActive()
-                val isDir = file.isDirectory
-                val (iconRes, tint) = iconFor(isDir, file.extension)
-                val entry = Entry(
-                    file = file,
-                    name = file.name,
-                    size = if (isDir) "文件夹" else humanSize(file.length()),
-                    modified = timeFormat.format(Date(file.lastModified())),
-                    isDirectory = isDir,
-                    iconRes = iconRes,
-                    tint = tint,
-                )
-                entry to entry.name.lowercase()
-            }
-            ensureActive()
-            // 稳定排序：文件夹优先、名称忽略大小写，同名排序键保持原枚举顺序。
-            keyed.sortedWith(compareBy({ !it.first.isDirectory }, { it.second }))
-                .map {
-                    ensureActive()
-                    it.first
-                }
+            readFileListing(current)
         }
-        if (listed == null) {
-            listError = "无法读取该目录，可能缺少「所有文件访问权限」"
-            entries = emptyList()
-        } else {
-            listError = null
-            entries = listed
-        }
+        listError = if (listed == null) "无法读取该目录，可能缺少「所有文件访问权限」" else null
+        fileListing = listed
         listing = false
     }
 
@@ -356,19 +383,26 @@ fun FilesScreen(onBack: () -> Unit, onReference: (File) -> Unit) {
             )
         }
 
+        val visibleListing = fileListing
         LazyColumn(Modifier.fillMaxSize()) {
-            items(
-                entries,
+            if (visibleListing != null) items(
+                visibleListing.entries,
                 key = { it.file.absolutePath },
                 contentType = { "file-row" },
             ) { entry ->
-                EntryRow(entry) {
+                EntryRow(entry, visibleListing.timeFormat) {
                     if (entry.isDirectory) {
                         // 换目录：旧预览的结果不再有意义，取消在途读取
                         previewJob?.cancel()
                         previewJob = null
                         loading = false
                         current = entry.file
+                    } else if (openBrowser != null && browserDocument(entry.file.path) != null) {
+                        previewRequest++
+                        previewJob?.cancel()
+                        previewJob = null
+                        loading = false
+                        openBrowser(BrowserTarget.Document(entry.file.absolutePath))
                     } else {
                         val mine = ++previewRequest
                         // 连点 A/B/A：只有最后一次显示，且 loading 只会被**当前**请求清掉
@@ -394,7 +428,7 @@ fun FilesScreen(onBack: () -> Unit, onReference: (File) -> Unit) {
         PreviewDialog(
             name = entry.name,
             // 大小是列目录时算好的那一份：弹窗里再问一次 `File.length()` 又是一次主线程 stat。
-            size = entry.size,
+            size = remember(entry) { entry.sizeLabel() },
             content = content,
             onDismiss = {
                 previewJob?.cancel()
@@ -478,17 +512,19 @@ private fun Breadcrumbs(root: File, current: File, rootLabel: String, onJump: (F
 }
 
 @Composable
-private fun EntryRow(entry: Entry, onClick: () -> Unit) {
-    // 图标的选择、颜色、是否目录都是列目录时在 IO 线程上定好的；这里只按资源 id 查一次
-    // Compose 的矢量图缓存（同一个 id 只解析一次），不再碰 `File`。
-    val icon = ImageVector.vectorResource(entry.iconRes)
+private fun EntryRow(entry: FileListingEntry, timeFormat: SimpleDateFormat, onClick: () -> Unit) {
+    val (iconRes, tint) = remember(entry) { iconFor(entry.isDirectory, entry.file.extension) }
+    val subtitle = remember(entry, timeFormat) {
+        "${entry.sizeLabel()} · ${entry.modifiedLabel(timeFormat)}"
+    }
+    val icon = ImageVector.vectorResource(iconRes)
     // 行本身只有一份实现（Common.SettingRow）。横向 16dp 放进点击区内的 contentPadding，
     // 保留图标和文字的缩进，同时让涟漪铺到列表左右边缘；纵向 12dp、标题 bodyLarge、
     // 副标题 bodySmall 都是全站统一值。
     SettingRow(
         title = entry.name,
-        subtitle = "${entry.size} · ${entry.modified}",
-        leading = { SoftIcon(icon, size = 36.dp, tint = entry.tint) },
+        subtitle = subtitle,
+        leading = { SoftIcon(icon, size = 36.dp, tint = tint) },
         control = if (entry.isDirectory) ({ RowChevron() }) else null,
         onClick = onClick,
         contentPadding = PaddingValues(horizontal = SettingsStyle.PageMargin),
@@ -553,13 +589,8 @@ private fun PreviewDialog(
     )
 }
 
-/**
- * Extension-driven icon and colour, so the list is scannable without reading names.
- *
- * 纯函数，只返回 drawable 资源 id 与颜色：这条规则在列目录的 IO 线程上就要用，不能是
- * @Composable。判断顺序与配色跟以前逐条相同。
- */
-private fun iconFor(isDirectory: Boolean, extension: String): Pair<Int, Color> {
+/** Extension-driven icon and colour for file-list rows. */
+internal fun iconFor(isDirectory: Boolean, extension: String): Pair<Int, Color> {
     if (isDirectory) return R.drawable.ic_folder to FileTypeColors.folder
     return when (extension.lowercase(Locale.ROOT)) {
         "png", "jpg", "jpeg", "webp", "gif", "bmp", "heic" -> R.drawable.ic_image to FileTypeColors.image

@@ -133,6 +133,8 @@ data class Compress(val checkpoint: ContextCheckpoint) : LivePart
 class GrowableText(initial: String = "") {
     private val buf = StringBuilder(initial)
     private var snapshot: String? = initial
+    private var imageScannedLength = 0
+    private var firstImageMarker = -1
 
     @Synchronized
     fun append(delta: String) {
@@ -143,6 +145,17 @@ class GrowableText(initial: String = "") {
 
     @Synchronized
     fun length(): Int = buf.length
+
+    /** Check successive immutable snapshots of this append-only buffer. */
+    @Synchronized
+    internal fun hasImageMarkerIn(snapshot: String): Boolean {
+        if (firstImageMarker < 0 && snapshot.length > imageScannedLength) {
+            // Include the last character of the previous snapshot for a split "!" and "[".
+            firstImageMarker = snapshot.indexOf("![", (imageScannedLength - 1).coerceAtLeast(0))
+            imageScannedLength = snapshot.length
+        }
+        return firstImageMarker >= 0 && firstImageMarker < snapshot.length - 1
+    }
 
     @Synchronized
     override fun toString(): String = snapshot ?: buf.toString().also { snapshot = it }

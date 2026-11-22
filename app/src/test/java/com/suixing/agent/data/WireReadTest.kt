@@ -3,7 +3,13 @@ package com.suixing.agent.data
 import android.content.Context
 import io.mockk.every
 import io.mockk.mockk
+import io.mockk.mockkObject
+import io.mockk.unmockkObject
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -11,6 +17,8 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import java.io.File
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 /**
  * `readWire` 在**有 checkpoint** 时的行为（0.8.359 给它加了字节偏移缓存）。
@@ -71,6 +79,41 @@ class WireReadTest {
     }
 
     @Test
+    fun `a stalled wire read leaves the repository free to save another chat`() = runBlocking {
+        val repository = repository()
+        val (chat, checkpoint) = chatWithCheckpoint("stalled-wire")
+        store.append(store.newMeta(chat).copy(checkpoints = listOf(checkpoint)), chat.messages)
+        val (otherChat, _) = chatWithCheckpoint("another-chat")
+        val reading = CountDownLatch(1)
+        val resumeRead = CountDownLatch(1)
+        mockkObject(NativeChatLog)
+        try {
+            every {
+                NativeChatLog.read(any(), match { it.startsWith("stalled-wire.") }, any(), any(), any(), any())
+            } answers {
+                reading.countDown()
+                check(resumeRead.await(15, TimeUnit.SECONDS))
+                callOriginal()
+            }
+            val wire = async { repository.readWire(chat.id) }
+            try {
+                withContext(Dispatchers.IO) {
+                    check(reading.await(5, TimeUnit.SECONDS))
+                }
+                val saved = withTimeout(2_000) { repository.save(otherChat) }
+                assertEquals(ChatRepository.SaveResult.Written, saved)
+            } finally {
+                resumeRead.countDown()
+                val history = wire.await()
+                assertEquals(checkpoint, history.checkpoint)
+                assertEquals(chat.messages.dropWhile { it.id != checkpoint.toMessageId }, history.messages)
+            }
+        } finally {
+            unmockkObject(NativeChatLog)
+        }
+    }
+
+    @Test
     fun `reading twice returns the same list`() = runBlocking {
         val repository = repository()
         val (chat, checkpoint) = chatWithCheckpoint("w2")
@@ -80,6 +123,24 @@ class WireReadTest {
         val first = repository.readWire(chat.id)
         val second = repository.readWire(chat.id)
         assertEquals("缓存不能改变结果", first, second)
+    }
+
+    @Test
+    fun `cold checkpoint anchors use the same committed offsets when searched together`() = runBlocking {
+        val (chat, checkpoint) = chatWithCheckpoint("paired")
+        val prefix = chat.messages.take(2).map { it.copy(text = "x".repeat(600_000)) }
+        val messages = prefix + chat.messages.drop(2)
+        val meta = store.append(store.newMeta(chat).copy(checkpoints = listOf(checkpoint)), messages)
+        val from = store.offsetOf(meta, checkpoint.fromMessageId)!!
+        val to = store.offsetOf(meta, checkpoint.toMessageId)!!
+        store.openRead(meta).use { snapshot ->
+            assertEquals(listOf(from, to), snapshot.checkpointOffsets(checkpoint.fromMessageId, checkpoint.toMessageId).toList())
+            assertEquals(listOf(from, from), snapshot.checkpointOffsets(checkpoint.fromMessageId, checkpoint.fromMessageId).toList())
+            assertEquals(listOf(-1L, to), snapshot.checkpointOffsets("missing", checkpoint.toMessageId).toList())
+        }
+        val wire = repository().readWire(chat.id)
+        assertEquals(checkpoint, wire.checkpoint)
+        assertEquals(messages.dropWhile { it.id != checkpoint.toMessageId }, wire.messages)
     }
 
     @Test

@@ -160,23 +160,6 @@ internal fun rememberChatTranscriptProjection(
         state.runningHere,
         state.liveRunId,
     ) { Any() }
-    val visible = remember(visibleShape) {
-        // `drop()` 每次都把窗口内的引用复制成新 List；流式期这条路径每 16ms 跑一次，
-        // 长会话（上千条）就是每秒几十万次引用拷贝。`subList` 是视图，零拷贝。
-        val pageMessages = state.messages.subList(page.from.coerceIn(0, state.messages.size), state.messages.size)
-        groupRows(
-            pageMessages,
-            state.activeRuns,
-            state.runningHere,
-            // 空串要变 null：`liveRunId` 用空串表示"没有在跑"。
-            state.liveRunId.ifEmpty { null },
-        )
-    }
-    // Long settled bodies are parsed only for the next mount batch. Those rows consume the
-    // returned blocks directly; there is no competing full-page parse or global cache prewarm.
-    // The physical feed uses the same old-to-new order as this projection.
-    val rowKeys = remember(visibleShape) { presentationKeys(state.conversationId, visible) }
-    val rowKeyIndices = remember(rowKeys) { rowKeys.withIndex().associate { it.value to it.index } }
     val viewportCache = remember { ConversationViewportCache() }
     val geometry = Triple(
         LocalConfiguration.current.screenWidthDp,
@@ -185,12 +168,19 @@ internal fun rememberChatTranscriptProjection(
     )
     val viewport = viewportCache.get(state, openingBookmark, shownTurns, geometry, positionStorageReady)
     val listState = viewport.listState
+    val projected = remember(visibleShape) {
+        viewport.projectRows(state, page.from.coerceIn(0, state.messages.size))
+    }
+    val visible = projected.rows
+    val rowKeys = projected.keys
+    val rowKeyIndices = projected.keyIndices
 
     // Markdown preparation is cached by message; navigation reads LazyList's own layout.
     // Per-row state publishes preparation without invalidating unrelated messages.
     val rowDocuments = viewport.rowDocuments
     val visibleIds = remember(visibleShape) { visible.mapTo(HashSet()) { it.message.id } }
     SideEffect {
+        viewport.transcriptRows = projected
         rowDocuments.retainRows(visibleIds)
     }
     val navigationToken = remember(state.conversationId) { intArrayOf(0) }

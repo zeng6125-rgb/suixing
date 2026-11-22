@@ -374,18 +374,20 @@ private fun readTailText(file: java.io.File, maxChars: Int = TAIL_MAX_CHARS): St
         id: String,
         turns: Int = OPEN_TURNS,
     ): Triple<Conversation, Long, Int>? = withContext(Dispatchers.IO) {
+        val context = currentCoroutineContext()
+        val checkpoint = ChatLogCheckpoint { context.ensureActive() }
         readCommitted(id) { snapshot ->
-            val window = snapshot.tail(turns)
+            val window = snapshot.tail(turns, checkpoint)
             Triple(snapshot.meta.toConversation(window.messages), window.startOffset, snapshot.meta.gen)
         }?.let { return@withContext it }
         // 冷读：不拿仓库锁，直接读已提交代次（R3）。
         readCommittedCold(id) { snapshot ->
-            val window = snapshot.tail(turns)
+            val window = snapshot.tail(turns, checkpoint)
             Triple(snapshot.meta.toConversation(window.messages), window.startOffset, snapshot.meta.gen)
         }?.let { return@withContext it }
         lock.withLock {
             val meta = store.readMeta(id) ?: return@withLock null
-            val window = store.tail(meta, turns)
+            val window = store.tail(meta, turns, checkpoint)
             Triple(meta.toConversation(window.messages), window.startOffset, meta.gen)
         }
     }
@@ -435,22 +437,30 @@ private fun readTailText(file: java.io.File, maxChars: Int = TAIL_MAX_CHARS): St
      * A supplied checkpoint list limits reuse to summaries retained by the request snapshot.
      */
     suspend fun readWire(id: String, checkpoints: List<ContextCheckpoint>? = null): WireHistory = withContext(Dispatchers.IO) {
-        lock.withLock {
-            val meta = store.readMeta(id) ?: return@withLock WireHistory(emptyList())
+        // Pin the committed generation and byte range before releasing other writers.
+        val snapshot = lock.withLock { store.readMeta(id)?.let(store::openRead) }
+            ?: return@withContext WireHistory(emptyList())
+        snapshot.use {
+            val meta = snapshot.meta
             val anchored = meta.checkpoints.asReversed().firstNotNullOfOrNull { checkpoint ->
                 if (checkpoint.summary.isBlank() || (checkpoints != null && checkpoint !in checkpoints))
                     return@firstNotNullOfOrNull null
-                val start = checkpointStartOffsets.get(meta.id, meta.gen, checkpoint.fromMessageId)
-                    ?: store.offsetOf(meta, checkpoint.fromMessageId)?.also {
-                        checkpointStartOffsets.put(meta.id, meta.gen, checkpoint.fromMessageId, it)
-                    } ?: return@firstNotNullOfOrNull null
-                val end = checkpointOffsets.get(meta.id, meta.gen, checkpoint.toMessageId)
-                    ?: store.offsetOf(meta, checkpoint.toMessageId)?.also {
-                        checkpointOffsets.put(meta.id, meta.gen, checkpoint.toMessageId, it)
-                    } ?: return@firstNotNullOfOrNull null
+                val cachedStart = checkpointStartOffsets.get(meta.id, meta.gen, checkpoint.fromMessageId)
+                val cachedEnd = checkpointOffsets.get(meta.id, meta.gen, checkpoint.toMessageId)
+                val found = if (cachedStart == null && cachedEnd == null &&
+                    checkpoint.fromMessageId.isNotEmpty() && checkpoint.toMessageId.isNotEmpty()
+                ) snapshot.checkpointOffsets(checkpoint.fromMessageId, checkpoint.toMessageId) else null
+                val start = cachedStart ?: (if (found == null) snapshot.offsetOf(checkpoint.fromMessageId)
+                    else found[0].takeIf { it >= 0 })?.also {
+                    checkpointStartOffsets.put(meta.id, meta.gen, checkpoint.fromMessageId, it)
+                } ?: return@firstNotNullOfOrNull null
+                val end = cachedEnd ?: (if (found == null) snapshot.offsetOf(checkpoint.toMessageId)
+                    else found[1].takeIf { it >= 0 })?.also {
+                    checkpointOffsets.put(meta.id, meta.gen, checkpoint.toMessageId, it)
+                } ?: return@firstNotNullOfOrNull null
                 if (start <= end) checkpoint to end else null
-            } ?: return@withLock WireHistory(store.all(meta))
-            WireHistory(store.from(meta, anchored.second), anchored.first)
+            } ?: return@use WireHistory(snapshot.from(0))
+            WireHistory(snapshot.from(anchored.second), anchored.first)
         }
     }
 

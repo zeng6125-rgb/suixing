@@ -15,6 +15,8 @@ import java.time.LocalDate
 import com.suixing.agent.agent.SubagentRecords
 import java.io.IOException
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 
 /**
  * The four token buckets the endpoint reports per assistant message, summed. Long
@@ -239,9 +241,12 @@ class UsageStore(private val context: Context) {
             // **没有变化就不重写缓存**（优化清单 data-P2）：`writeCache` 会把整份快照
             // prettyPrint 成 JSON 再落盘；定时刷新时绝大多数次扫描都没有新消息。
             // 比较的是值相等（data class），结果与"总是写"完全一致 —— 只是少一次写盘。
-            if (next != cache) writeCache(next)
-            snapshot = next
-            next
+            val refreshed = if (next == cache) cache else {
+                writeCache(next)
+                next
+            }
+            snapshot = refreshed
+            refreshed
         }
     }
 
@@ -280,9 +285,11 @@ class UsageStore(private val context: Context) {
     /** 每个会话**尚未计数**的那部分（#30）：只从上次数到的字节偏移续读、只解析新增。 */
     private suspend fun loadSlices(snapshot: UsageSnapshot, metaFiles: Array<File>, issues: MutableList<String>): List<UsageSlice> {
         val out = ArrayList<UsageSlice>()
+        val context = currentCoroutineContext()
         // 旧格式 `<id>.json` 已随 #40 删除（loadConversations 全量解析路径是死代码，一并删了），
         // 这里只扫 store 的 meta；增量续扫见下面的 slicedFrom。
         metaFiles.forEach { file ->
+                context.ensureActive()
                 val id = file.name.removeSuffix(META_SUFFIX)
                 runCatching {
                     val meta = store.readMeta(id) ?: throw IOException("无法读取会话信息")
@@ -296,6 +303,8 @@ class UsageStore(private val context: Context) {
                     val offset = if (resumable) previous.scannedBytes else 0L
                     val base = if (resumable) previous.scanned else 0
                     store.openRead(meta).use { read ->
+                        // The open still checks that the committed log exists.
+                        if (resumable && offset == meta.logBytes && base == meta.messageCount) return@use
                         val projection = read.usageProjection(offset)
                         if (projection != null) {
                             out += UsageSlice(id, emptyList(), base, null, meta.gen, projection = projection)
@@ -494,11 +503,39 @@ fun usageWindow(snapshot: UsageSnapshot, count: Int, end: LocalDate = LocalDate.
     require(count in 1..366)
     val dates = (count - 1 downTo 0).map { end.minusDays(it.toLong()).toString() }
     NativeUsageAggregation.window(snapshot.chats.values, dates)?.let { return it }
+    return foldUsageWindow(snapshot.chats.values.asSequence().map { it.dailyModels }.asIterable(), dates)
+}
+
+/** Share the date/model fold across the usage screen's overlapping ranges. */
+internal fun usageWindows(snapshot: UsageSnapshot, counts: List<Int>, end: LocalDate): Map<Int, UsageWindow> {
+    require(counts.all { it in 1..366 })
+    val longest = counts.maxOrNull() ?: return emptyMap()
+    val dates = (longest - 1 downTo 0).map { end.minusDays(it.toLong()).toString() }
+    val selected = dates.toHashSet()
+    val byDate = HashMap<String, MutableMap<String, UsageBucket>>()
+    for (chat in snapshot.chats.values) {
+        for ((date, dailyModels) in chat.dailyModels) {
+            if (date !in selected || dailyModels.isEmpty()) continue
+            val totals = byDate.getOrPut(date) { HashMap() }
+            for ((model, bucket) in dailyModels) {
+                val old = totals[model]
+                totals[model] = if (old == null) bucket else old + bucket
+            }
+        }
+    }
+    val merged = listOf(byDate)
+    return counts.associateWith { count -> foldUsageWindow(merged, dates.takeLast(count)) }
+}
+
+private fun foldUsageWindow(
+    sources: Iterable<Map<String, Map<String, UsageBucket>>>,
+    dates: List<String>,
+): UsageWindow {
     val dateSet = dates.toHashSet()
     val daily = mutableMapOf<String, UsageBucket>()
     val models = mutableMapOf<String, UsageBucket>()
-    snapshot.chats.values.forEach { chat ->
-        chat.dailyModels.forEach { (date, byModel) ->
+    sources.forEach { dailyModels ->
+        dailyModels.forEach { (date, byModel) ->
             if (date in dateSet) byModel.forEach { (model, bucket) ->
                 daily[date] = (daily[date] ?: UsageBucket()) + bucket
                 models[model] = (models[model] ?: UsageBucket()) + bucket

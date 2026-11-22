@@ -95,7 +95,9 @@ public final class TerminalEmulator implements AutoCloseable {
         mMainBuffer.configureNative(input.getInt(), input.getInt(), input.getInt(), input.getInt());
         mAltBuffer.configureNative(input.getInt(), input.getInt(), input.getInt(), input.getInt());
         mScreen = alternate ? mAltBuffer : mMainBuffer;
-        for (int i=0; i<mColors.mCurrentColors.length; i++) mColors.mCurrentColors[i] = input.getInt();
+        if (input.getInt() != 0) {
+            for (int i = 0; i < mColors.mCurrentColors.length; i++) mColors.mCurrentColors[i] = input.getInt();
+        }
         int events = input.getInt();
         for (int i=0; i<events; i++) {
             int kind = input.getInt(); String text = nativeString(input); String previous = nativeString(input);

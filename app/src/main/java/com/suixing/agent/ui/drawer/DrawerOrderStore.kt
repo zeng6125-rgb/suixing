@@ -57,6 +57,24 @@ internal fun drawerSections(
     conversations: List<Conversation>,
     order: DrawerOrder,
 ): DrawerSections {
+    if (order.pinned.isEmpty() && order.normal.isEmpty()) {
+        val pinned = ArrayList<Conversation>()
+        val normal = ArrayList<Conversation>()
+        var newestFirst = true
+        var lastUpdatedAt = Long.MAX_VALUE
+        for (conversation in conversations) {
+            if (conversation.archived) continue
+            if (conversation.updatedAt > lastUpdatedAt) newestFirst = false
+            lastUpdatedAt = conversation.updatedAt
+            if (conversation.pinned) pinned.add(conversation) else normal.add(conversation)
+        }
+        // ChatRepository already publishes newest-first. Other callers can provide an unsorted list.
+        if (!newestFirst) {
+            pinned.sortByDescending { it.updatedAt }
+            normal.sortByDescending { it.updatedAt }
+        }
+        return DrawerSections(pinned, normal)
+    }
     NativeDrawerOrder.sections(conversations, order)?.let { return it }
     val pinnedIds = order.pinned.toHashSet()
     val normalIds = order.normal.toHashSet()

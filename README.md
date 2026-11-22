@@ -14,7 +14,7 @@
 - 支持技能（Skill）：把写好的操作手册放进手机，模型需要时自己读
 - 支持插件（Plugin）：安装一个 zip 就能带来新工具、新的上下文注入与新的执行闸门
 - 目标与斜杠指令：输入 `/goal 一句话目标`，助手会在当前会话持续推进并记录进度，直到确认完成、遇到卡点或被停止。`/goal` 查看，`/goal resume` 继续，`/goal clear` 清除。输入 `/` 可找其他工具，直接调用仍受审批档与助手禁用表约束。
-- 当前源码版本：**0.9.7**（`versionCode` 735）
+- 当前源码版本 **0.9.11**（`versionCode` 739）
 
 ## 界面与设计
 
@@ -106,6 +106,7 @@ ARM64 设备可在终端页按需安装实验性的 Alpine 3.22.2 或 Debian 12 
 | 定时提醒 | `schedule_create` `schedule_list` `schedule_update` `schedule_delete` |
 | 技能 | `skill_list` `skill_read` `skill_save` `skill_download` |
 | 网络 | `web_fetch` `web_download` `web_search` |
+| 浏览器 | `browser_open` |
 | 任务清单 | `todo_write` `todo_read` |
 | 目标 | `goal` `goal_read` `goal_resume` `goal_update` |
 | 语音 | `speak` `stop_speaking` |
@@ -130,6 +131,8 @@ ARM64 设备可在终端页按需安装实验性的 Alpine 3.22.2 或 Debian 12 
 - 界面操作类工具走无障碍通道，Shell 类工具走 shell 通道，权限档次见下。
 
 **联网**：`web_fetch` 抓网页（HTML 自动转纯文本，带编码嗅探，1MB 上限）、`web_download` 存文件到本机、`web_search` 搜网页。搜索默认走内置的 DuckDuckGo 抓取，零配置但容易被限流；想要稳定就在「设置 → 网络与语音」里填一个 Tavily 兼容接口（地址 + Key），`web_search` 会自动改走它。
+
+**内置浏览器**使用 Android WebView。可从聊天右上角菜单打开，也可直接打开聊天中的网址或文件页里的 HTML。本地页面支持同目录和子目录下的相对资源。JAgent 在前台时，Agent 可通过 `browser_open` 传入 `target`，值为 HTTP(S) 网址或本地 HTML 文件路径。工具按当前会话的审批规则运行，返回页面地址、标题和最多 12,000 字符的渲染正文。
 
 ### 模型
 

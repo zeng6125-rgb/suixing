@@ -4,6 +4,7 @@ import android.content.res.Configuration
 import androidx.compose.foundation.lazy.LazyListItemInfo
 import androidx.compose.foundation.lazy.LazyListLayoutInfo
 import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.material3.DrawerValue
 import androidx.compose.runtime.AbstractApplier
 import androidx.compose.runtime.BroadcastFrameClock
 import androidx.compose.runtime.Composition
@@ -24,8 +25,12 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.IntSize
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.LifecycleRegistry
+import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.suixing.agent.ui.components.LocalDrawerBusy
+import com.suixing.agent.ui.drawer.LocalDrawerGestureState
+import com.suixing.agent.ui.drawer.SuixingDrawerState
 import com.suixing.agent.core.Core
 import com.suixing.agent.data.StoredMessage
 import com.suixing.agent.data.ViewportBookmark
@@ -42,7 +47,9 @@ import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -56,6 +63,68 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ConversationViewportEntranceTest {
+    @Test fun nearbyPreparationYieldsToScrollAndDrawerMotion() = runBlocking {
+        val batches = mutableListOf<List<String>>()
+        var cancelled = 0
+        val harness = OffsetHarness(this, cached = true, prepare = { rows ->
+            batches += rows.map { it.message.id }
+            try {
+                awaitCancellation()
+            } finally {
+                cancelled++
+            }
+        })
+        try {
+            withTimeout(5_000) {
+                harness.release.countDown()
+                harness.start()
+                harness.await { batches.isNotEmpty() }
+                harness.scrolling = true
+                harness.frames(3)
+                assertEquals("an active scroll must cancel the nearby batch", 1, cancelled)
+
+                harness.drawer.snapTo(DrawerValue.Open)
+                harness.scrolling = false
+                harness.frames(3)
+                assertEquals("the drawer still covers the transcript", 1, batches.size)
+
+                harness.drawer.snapTo(DrawerValue.Closed)
+                harness.await { batches.size == 2 }
+                assertEquals(listOf("target", "next"), batches.last())
+                harness.drawer.snapTo(DrawerValue.Open)
+                harness.frames(3)
+                assertEquals("opening the drawer also cancels an active batch", 2, cancelled)
+            }
+        } finally { harness.close() }
+    }
+
+    @Test fun openingBrowserKeepsTheReaderFromFollowingBackgroundLayoutChanges() = runBlocking {
+        val harness = OffsetHarness(this, cached = true)
+        try {
+            withTimeout(5_000L) {
+                harness.release.countDown()
+                harness.start()
+                harness.await { harness.acknowledgements.isNotEmpty() }
+                val position = TranscriptPosition(harness.list).apply {
+                    following = { harness.scroll.stickToBottom && !harness.scroll.restoring }
+                }
+                harness.hideForBrowser()
+                // A WebView keyboard transition can expose the hidden transcript's end.
+                harness.canScrollForward = false
+                harness.frames(3)
+                delay(460)
+                harness.frames(3)
+                harness.canScrollForward = true
+                harness.frames(3)
+                position.viewportPlaced(mockk<LayoutCoordinates>(relaxed = true))
+
+                assertEquals("returning from the browser must keep the historical row", 0, harness.list.firstVisibleItemIndex)
+                assertEquals(600, harness.list.firstVisibleItemScrollOffset)
+                assertFalse(harness.scroll.stickToBottom)
+            }
+        } finally { harness.close() }
+    }
+
     @Test fun aHistoricalOffsetWaitsForItsTargetBeforeRestoringTheOriginalPosition() = runBlocking {
         val harness = OffsetHarness(this, cached = false)
         try {
@@ -204,7 +273,11 @@ class ConversationViewportEntranceTest {
         }
     }
 
-    private class OffsetHarness(scope: CoroutineScope, cached: Boolean) {
+    private class OffsetHarness(
+        scope: CoroutineScope,
+        cached: Boolean,
+        private val prepare: suspend (List<ChatRow>) -> Unit = {},
+    ) {
         private val ownerThread = Thread.currentThread()
         private val text = "historical **target** message"
         private val rows = listOf(
@@ -224,7 +297,11 @@ class ConversationViewportEntranceTest {
             presented = cached
         }
         val list = mockk<LazyListState>(relaxed = true)
-        val scroll = ChatScroll(list, "chat", initialFollowing = false)
+        lateinit var scroll: ChatScroll
+            private set
+        var canScrollForward by mutableStateOf(true)
+        var scrolling by mutableStateOf(false)
+        val drawer = SuixingDrawerState(DrawerValue.Closed)
         val started = CountDownLatch(1)
         val release = CountDownLatch(1)
         val requests = mutableListOf<Pair<Int, Int>>()
@@ -235,8 +312,9 @@ class ConversationViewportEntranceTest {
         private val layout = mutableStateOf(layout(if (cached) "target" else null, 1_000))
         private val pendingLayout = mutableStateOf<LazyListLayoutInfo?>(null)
         private val actions = mockk<ChatScreenActions>()
-        private val lifecycle = mockk<Lifecycle>(relaxed = true)
-        private val owner = mockk<LifecycleOwner>()
+        private val owner = ChatUiLifecycleOwner(true, { LifecycleRegistry.createUnsafe(it) }).apply {
+            parentChanged(Lifecycle.State.RESUMED)
+        }
         private val readiness = ViewportContentReadiness()
         private val configuration = Configuration().apply { screenWidthDp = 400; screenHeightDp = 800 }
         private val clock = BroadcastFrameClock()
@@ -250,6 +328,8 @@ class ConversationViewportEntranceTest {
         init {
             every { viewport.listState } returns list
             every { list.layoutInfo } answers { layout.value }
+            every { list.canScrollForward } answers { canScrollForward }
+            every { list.isScrollInProgress } answers { scrolling }
             every { list.firstVisibleItemIndex } answers { position.first }
             every { list.firstVisibleItemScrollOffset } answers { position.second }
             every { list.requestScrollToItem(any(), any()) } answers {
@@ -272,7 +352,6 @@ class ConversationViewportEntranceTest {
             every { actions.bindViewport } returns ::bindViewport
             every { actions.unbindViewport } returns ::unbindViewport
             every { actions.presentViewport } returns ::presentViewport
-            every { owner.lifecycle } returns lifecycle
             mockkObject(Core, NativeMarkdown)
             every { Core.conversationViewports } returns mockk(relaxed = true)
             every { Core.startup } returns mockk(relaxed = true)
@@ -287,6 +366,8 @@ class ConversationViewportEntranceTest {
         private fun bindViewport(chatId: String, capture: () -> Unit) = Unit
         private fun unbindViewport(capture: () -> Unit) = Unit
         private fun presentViewport(chatId: String) { acknowledgements += chatId }
+
+        fun hideForBrowser() { owner.visibilityChanged(false) }
 
         fun clearRows() {
             active = false
@@ -315,14 +396,17 @@ class ConversationViewportEntranceTest {
                     LocalDensity provides Density(1f),
                     LocalLifecycleOwner provides owner,
                     LocalDrawerBusy provides remember { mutableStateOf(true) },
+                    LocalDrawerGestureState provides drawer,
                     LocalViewportContentReadiness provides readiness,
                 ) {
                     val screen by states.collectAsState()
+                    scroll = rememberChatScroll(list, true, { false }, { false },
+                        conversationId = "chat", initialFollowing = false)
                     val displayedRows = if (active) rows else emptyList()
                     val keys = displayedRows.map { it.message.id }
                     BindConversationViewport(
                         viewport, actions, scroll, displayedRows, keys, keys.withIndex().associate { it.value to it.index },
-                        0, displayedRows.size, 2, displayedRows.size, 14f, true, screen.messagesRevision, {}, readiness,
+                        0, displayedRows.size, 2, displayedRows.size, 14f, true, screen.messagesRevision, prepare, readiness,
                         hasTranscript = active,
                     )
                     if (active && viewport.prepared) {
@@ -340,7 +424,11 @@ class ConversationViewportEntranceTest {
         }
 
         suspend fun await(condition: () -> Boolean) {
-            while (!condition()) {
+            while (!condition()) frames(1)
+        }
+
+        suspend fun frames(count: Int) {
+            repeat(count) {
                 Snapshot.sendApplyNotifications()
                 repeat(8) { yield() }
                 nanos += 16_000_000L

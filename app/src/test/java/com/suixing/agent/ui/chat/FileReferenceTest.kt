@@ -3,6 +3,15 @@ package com.suixing.agent.ui.chat
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.AnnotatedString
 import java.io.File
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
+import kotlin.random.Random
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -13,6 +22,14 @@ import org.junit.rules.TemporaryFolder
 
 class FileReferenceTest {
     @get:Rule val temporary = TemporaryFolder()
+
+    private fun suggestionRoot(files: List<File>): File = object : File(temporary.root.path) {
+        override fun listFiles(): Array<File> = files.toTypedArray()
+    }
+
+    private fun suggestionFile(name: String, directory: Boolean): File = object : File(temporary.root, name) {
+        override fun isDirectory(): Boolean = directory
+    }
 
     @Test fun draftAppendsQuotedReferenceWithoutReplacingTextOrAttachments() {
         val draft = Draft("请分析这份资料", "content://attachment", "报告.pdf", listOf("photo"))
@@ -57,7 +74,7 @@ class FileReferenceTest {
         assertNull(activeFileReference(completed, end))
     }
 
-    @Test fun directorySuggestionsFilterLocallyAndExposeFoldersForDrilling() {
+    @Test fun directorySuggestionsFilterLocallyAndExposeFoldersForDrilling() = runBlocking {
         val root = temporary.newFolder("workspace")
         val nested = File(root, "reports").apply { mkdir() }
         File(root, "top.txt").writeText("top")
@@ -67,6 +84,72 @@ class FileReferenceTest {
         assertEquals(setOf("reports", "top.txt"), initial.map { it.name }.toSet())
         assertEquals(listOf("daily report.txt"), fileReferenceSuggestions(root, "reports/daily").map { it.name })
         assertFalse(initial.any { it.name == "daily report.txt" })
+    }
+
+    @Test fun suggestionsKeepStableCaseInsensitiveTiesAtTheLimit() = runBlocking {
+        val names = List(32) { mask ->
+            "alpha".mapIndexed { index, char ->
+                if (mask and (1 shl index) != 0) char.uppercaseChar() else char
+            }.joinToString("")
+        }.shuffled(Random(731))
+        for (directory in listOf(false, true)) {
+            val files = (names + "aardvark").map { suggestionFile(it, directory) }
+            val suggestions = fileReferenceSuggestions(suggestionRoot(files), "")
+            assertEquals(listOf("aardvark") + names.take(23), suggestions.map { it.name })
+            assertTrue(suggestions.all { it.directory == directory })
+        }
+    }
+
+    @Test fun suggestionsPreferALateDirectoryEvenWhenItsNameSortsLast() = runBlocking {
+        val first = List(23) { suggestionFile("folder-" + it.toString().padStart(2, '0'), true) }
+        val files = first + suggestionFile("middle-file", false) + suggestionFile("zz-late-folder", true)
+        val suggestions = fileReferenceSuggestions(suggestionRoot(files), "")
+        assertEquals(first.map { it.name } + "zz-late-folder", suggestions.map { it.name })
+        assertTrue(suggestions.all { it.directory })
+    }
+
+    @Test fun suggestionsSkipAttributesForNamesBelowAFullDirectoryCutoff() = runBlocking {
+        var attributeReads = 0
+        val files = List<File>(624) { index ->
+            val name = (if (index < 24) "a-" else "z-") + index.toString().padStart(3, '0')
+            object : File(temporary.root, name) {
+                override fun isDirectory(): Boolean {
+                    attributeReads++
+                    return index < 24 || index % 2 == 0
+                }
+            }
+        }
+        val suggestions = fileReferenceSuggestions(suggestionRoot(files), "")
+        assertEquals(files.take(24).map { it.name }, suggestions.map { it.name })
+        assertEquals(24, attributeReads)
+    }
+
+    @Test fun cancellingAnObsoleteQueryStopsItsRemainingAttributeReads() = runBlocking {
+        val reads = AtomicInteger()
+        val started = CompletableDeferred<Unit>()
+        val release = CountDownLatch(1)
+        val files = List<File>(624) { index ->
+            object : File(temporary.root, "entry-" + index.toString().padStart(3, '0')) {
+                override fun isDirectory(): Boolean {
+                    if (reads.incrementAndGet() == 4) {
+                        started.complete(Unit)
+                        check(release.await(5, TimeUnit.SECONDS))
+                    }
+                    return false
+                }
+            }
+        }
+        val query = async(Dispatchers.IO) { fileReferenceSuggestions(suggestionRoot(files), "") }
+        try {
+            withTimeout(5_000) { started.await() }
+            query.cancel()
+        } finally {
+            release.countDown()
+            query.join()
+        }
+        assertTrue(query.isCancelled)
+        println("attribute_reads_after_cancel=" + reads.get())
+        assertEquals(4, reads.get())
     }
 
     @Test fun visualLabelsKeepFullPathEndpointsAndMonotonicSelectionMappings() {

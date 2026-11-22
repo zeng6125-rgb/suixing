@@ -1,9 +1,13 @@
 package com.suixing.agent.data
 
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.ensureActive
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Rule
@@ -43,6 +47,27 @@ class ChatStoreTest {
         assertEquals(30L, foldTotals(messages).elapsedMs)
     }
 
+    @Test fun `a cancelled window can be retried on the same committed snapshot`() {
+        val repository = store
+        val log = turns(24).map { if (it.role == Roles.ASSISTANT) it.copy(text = "body".repeat(8_000)) else it }
+        val stored = repository.append(emptyMeta(), log)
+        val job = Job()
+        val cancelled = CancellationException("new conversation selected")
+        var checks = 0
+        val checkpoint = ChatLogCheckpoint {
+            if (++checks == 5) job.cancel(cancelled)
+            job.ensureActive()
+        }
+        repository.openRead(stored).use { snapshot ->
+            val interrupted = runCatching { snapshot.tail(12, checkpoint) }.exceptionOrNull()
+            assertSame(cancelled, interrupted)
+            assertEquals(5, checks)
+            val reopened = snapshot.tail(12)
+            assertEquals(log.takeLast(24), reopened.messages)
+            assertTrue(reopened.startOffset > 0)
+        }
+    }
+
     @get:Rule
     val folder = TemporaryFolder()
 
@@ -76,6 +101,27 @@ class ChatStoreTest {
         createdAt = 1_700_000_000_000L,
         updatedAt = 1_700_000_000_500L,
     )
+
+    @Test fun `older metadata retains checkpoint text and default fields`() {
+        storeDir.mkdirs()
+        File(storeDir, "$CHAT$META_SUFFIX").writeText("""
+            {
+              "id":"$CHAT","title":"\u65e7\u4f1a\u8bdd","createdAt":1,"updatedAt":2,
+              "activeRuns":{"run":"working"},"gen":3,"logBytes":128,"messageCount":2,
+              "checkpoints":[{"id":"cp","at":1,"fromMessageId":"u","toMessageId":"a",
+                "summary":"\u6298\u53e0\n\"quote\" \ud83e\udd96","messages":2,"promptTokens":44}],
+              "futureField":{"items":[true,null,{"name":"ignored"}]}
+            }
+        """.trimIndent())
+
+        val restored = checkNotNull(store.readMeta(CHAT))
+        assertEquals(ChatStore.ConversationMeta(
+            id = CHAT, title = "\u65e7\u4f1a\u8bdd", createdAt = 1, updatedAt = 2,
+            activeRuns = mapOf("run" to "working"), gen = 3, logBytes = 128, messageCount = 2,
+            checkpoints = listOf(ContextCheckpoint("cp", 1, "u", "a",
+                "\u6298\u53e0\n\"quote\" \uD83E\uDD96", 2, 44)),
+        ), restored)
+    }
 
     // --- appending ---------------------------------------------------------------------------
 
@@ -478,6 +524,26 @@ class ChatStoreTest {
         store.writeMeta(meta)
 
         assertEquals("every field has to come back", meta, store.readMeta(CHAT))
+    }
+
+    @Test
+    fun `committed metadata follows replacements and removal`() {
+        val reader = store
+        val first = reader.append(emptyMeta(), turns(1))
+        assertEquals(first, reader.committedRead(CHAT)?.use { it.meta })
+
+        val metadata = File(storeDir, "$CHAT$META_SUFFIX")
+        val oldModified = metadata.lastModified()
+        val replacement = first.copy(title = first.title.reversed())
+        store.writeMeta(replacement)
+        assertTrue(metadata.setLastModified(oldModified + 10_000))
+        assertNull(reader.committedRead(CHAT))
+        assertEquals(replacement, reader.readMeta(CHAT))
+        assertEquals(replacement, reader.committedRead(CHAT)?.use { it.meta })
+
+        assertTrue(metadata.delete())
+        assertNull(reader.committedRead(CHAT))
+        assertNull(reader.readMeta(CHAT))
     }
 
     @Test

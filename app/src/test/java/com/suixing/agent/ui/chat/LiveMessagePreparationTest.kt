@@ -27,6 +27,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.ContinuationInterceptor
 import kotlin.coroutines.CoroutineContext
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
@@ -36,6 +37,7 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
@@ -48,6 +50,57 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class LiveMessagePreparationTest {
+    @Test fun aBusyCollectorSkipsMaterializingTheOlderLiveSnapshots() = runBlocking {
+        val actual = GrowableText("initial")
+        val buffer = spyk(actual)
+        val characters = java.util.concurrent.atomic.AtomicLong()
+        val copies = java.util.concurrent.atomic.AtomicInteger()
+        every { buffer.toString() } answers {
+            actual.toString().also { text ->
+                copies.incrementAndGet()
+                characters.addAndGet(text.length.toLong())
+            }
+        }
+        val collectorBusy = CompletableDeferred<Unit>()
+        val producerFinished = CompletableDeferred<Unit>()
+        val releaseCollector = CompletableDeferred<Unit>()
+        val source = flow {
+            emit(LiveContent("chat", "run", listOf(LivePart.Text(buffer, 7L, 0))))
+            collectorBusy.await()
+            for (version in 1..500) {
+                actual.append("a".repeat(100))
+                emit(LiveContent("chat", "run", listOf(LivePart.Text(buffer, 7L, version))))
+            }
+            producerFinished.complete(Unit)
+        }
+        withTimeout(5_000) {
+            val collected = mutableListOf<Part.Text>()
+            val worker = launch {
+                projectLiveContent(source, LivePartProjection("run"), "chat", "run", true).collect { (_, parts) ->
+                    collected += parts.single() as Part.Text
+                    if (collected.size == 1) {
+                        collectorBusy.complete(Unit)
+                        releaseCollector.await()
+                    }
+                }
+            }
+            try {
+                producerFinished.await()
+                println("500 queued live updates: copies while blocked=${copies.get()}, characters=${characters.get()}")
+                assertEquals(1, copies.get())
+                releaseCollector.complete(Unit)
+                worker.join()
+                assertEquals(listOf(0, 500), collected.map { it.sourceVersion })
+                assertEquals(actual.toString(), collected.last().text)
+                assertEquals(2, copies.get())
+                println("After collector resumes: copies=${copies.get()}, characters=${characters.get()}")
+            } finally {
+                releaseCollector.complete(Unit)
+                worker.cancelAndJoin()
+            }
+        }
+    }
+
     @Test fun aNewTextSnapshotIsMaterializedOutsideTheCompositionThread() = runBlocking {
         val ownerThread = Thread.currentThread()
         val materializedOn = CopyOnWriteArrayList<Thread>()

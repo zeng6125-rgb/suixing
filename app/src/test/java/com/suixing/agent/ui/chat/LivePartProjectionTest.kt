@@ -6,6 +6,19 @@ import org.junit.Assert.assertSame
 import org.junit.Test
 
 class LivePartProjectionTest {
+    @Test fun `image syntax can start across two streaming updates`() {
+        val projection = LivePartProjection("run")
+        val source = listOf<LivePart>(LivePart.Text("prefix!"))
+        val before = projection.project(source, true).single() as Part.Text
+        val after = projection.project(source.appendText("[image](example.png)", 0), true).single() as Part.Text
+        val buffer = (source.single() as LivePart.Text).buffer
+
+        assertEquals(false, before.hasImageMarker)
+        assertEquals(true, after.hasImageMarker)
+        assertEquals(false, buffer.hasImageMarkerIn(before.text))
+        assertEquals(false, (projection.project(listOf(LivePart.Text("replacement")), true).single() as Part.Text).hasImageMarker)
+    }
+
     @Test fun `text deltas retain unchanged tool lists without freezing shared text buffers`() {
         val projection = LivePartProjection("run")
         val tools = LivePart.Tools(listOf(LiveTool("run_shell", "id", 0L)))

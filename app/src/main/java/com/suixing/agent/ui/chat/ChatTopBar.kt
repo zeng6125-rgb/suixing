@@ -175,7 +175,7 @@ internal fun ChatTopBar(
             ) {
                 MenuItemRow(
                     icon = ImageVector.vectorResource(R.drawable.ic_globe),
-                    label = "打开浏览器",
+                    label = "内置浏览器",
                     onClick = {
                         menuOpen = false
                         onOpenBrowser()

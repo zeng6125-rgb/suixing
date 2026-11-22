@@ -34,6 +34,9 @@ public final class TerminalRenderer {
     final int mFontLineSpacingAndAscent;
 
     private final float[] asciiMeasures = new float[127];
+    private final int[] measuredGlyphKeys = new int[256];
+    private final float[] measuredGlyphWidths = new float[measuredGlyphKeys.length];
+    private int paintMeasurementStyle;
 
     public TerminalRenderer(int textSize, Typeface typeface) {
         mTextSize = textSize;
@@ -110,8 +113,8 @@ public final class TerminalRenderer {
                 // This could happen for some fonts which are not truly monospace, or for more exotic characters such as
                 // smileys which android font renders as wide.
                 // If this is detected, we draw this code point scaled to match what wcwidth() expects.
-                final float measuredCodePointWidth = (codePoint < asciiMeasures.length) ? asciiMeasures[codePoint] : mTextPaint.measureText(line,
-                    currentCharIndex, charsForCodePoint);
+                final float measuredCodePointWidth = (codePoint < asciiMeasures.length) ? asciiMeasures[codePoint]
+                    : measureGlyph(line, currentCharIndex, charsForCodePoint, codePoint);
                 final boolean fontWidthMismatch = Math.abs(measuredCodePointWidth / mFontWidth - codePointWcWidth) > 0.01;
 
                 if (style != lastRunStyle || insideCursor != lastRunInsideCursor || insideSelection != lastRunInsideSelection || fontWidthMismatch || lastRunFontWidthMismatch) {
@@ -157,6 +160,17 @@ public final class TerminalRenderer {
             drawTextRun(canvas, line, palette, heightOffset, lastRunStartColumn, columnWidthSinceLastRun, lastRunStartIndex, charsSinceLastRun,
                 measuredWidthForRun, cursorColor, cursorShape, lastRunStyle, reverseVideo || invertCursorTextColor || lastRunInsideSelection);
         }
+    }
+
+    private float measureGlyph(char[] text, int index, int length, int codePoint) {
+        // The renderer owns one font and size. Measure with the Paint style left by the last drawn run.
+        int key = (codePoint << 4) | paintMeasurementStyle;
+        int slot = (codePoint + 17 * paintMeasurementStyle) & (measuredGlyphKeys.length - 1);
+        if (measuredGlyphKeys[slot] == key) return measuredGlyphWidths[slot];
+        float width = mTextPaint.measureText(text, index, length);
+        measuredGlyphKeys[slot] = key;
+        measuredGlyphWidths[slot] = width;
+        return width;
     }
 
     private void drawTextRun(Canvas canvas, char[] text, int[] palette, float y, int startColumn, int runWidthColumns,
@@ -233,6 +247,7 @@ public final class TerminalRenderer {
             mTextPaint.setUnderlineText(underline);
             mTextPaint.setTextSkewX(italic ? -0.35f : 0.f);
             mTextPaint.setStrikeThruText(strikeThrough);
+            paintMeasurementStyle = (bold ? 1 : 0) | (italic ? 2 : 0) | (underline ? 4 : 0) | (strikeThrough ? 8 : 0);
             mTextPaint.setColor(foreColor);
 
             // The text alignment is the default Paint.Align.LEFT.

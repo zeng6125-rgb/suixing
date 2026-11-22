@@ -17,7 +17,7 @@ void sx_search_free(std::uint8_t*, std::size_t);
 void* sx_terminal_create(const int*, const int*);
 void sx_terminal_release(void*);
 int sx_terminal_step(void*, int, const std::uint8_t*, std::size_t, const int*, const int*, TerminalCallbacks, SearchBuffer*);
-int sx_terminal_rows(void*, bool, int, int, SearchBuffer*);
+int sx_terminal_rows(void*, bool, int, int, bool, SearchBuffer*);
 int sx_terminal_selected(void*, bool, const int*, bool, bool, SearchBuffer*);
 int sx_terminal_word(void*, bool, int, int, SearchBuffer*);
 int sx_terminal_valid_cursor(void*, bool, int, int);
@@ -118,9 +118,9 @@ Java_com_termux_terminal_NativeTerminalCore_nativeStep(JNIEnv* env, jclass type,
 }
 
 extern "C" JNIEXPORT jbyteArray JNICALL
-Java_com_termux_terminal_NativeTerminalCore_nativeRows(JNIEnv* env, jclass, jlong handle, jboolean alternate, jint from, jint count) {
+Java_com_termux_terminal_NativeTerminalCore_nativeRows(JNIEnv* env, jclass, jlong handle, jboolean alternate, jint from, jint count, jboolean full) {
     SearchBuffer output{};
-    if (sx_terminal_rows(core(handle), alternate, from, count, &output) != 0) { failure(env); return nullptr; }
+    if (sx_terminal_rows(core(handle), alternate, from, count, full, &output) != 0) { failure(env); return nullptr; }
     return resultBytes(env, output);
 }
 

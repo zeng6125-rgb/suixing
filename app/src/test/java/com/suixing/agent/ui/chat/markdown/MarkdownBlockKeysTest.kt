@@ -2,6 +2,7 @@ package com.suixing.agent.ui.chat.markdown
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertSame
 import org.junit.Test
 
 class MarkdownBlockKeysTest {
@@ -108,6 +109,31 @@ class MarkdownBlockKeysTest {
         assertEquals(before[1], after[1])
         assertEquals(before.last(), after.last())
         assertEquals(3, after.toSet().size)
+    }
+
+    @Test fun `published keys survive appending and replacing parser snapshots`() {
+        val parser = LiveBlocks()
+        val cache = MarkdownBlockKeyCache()
+        val text = StringBuilder("Paragraph 0")
+        repeat(80) { index ->
+            text.append("\n\nParagraph ").append(index + 1)
+            cache.keysFor(parser.blocksFor(text.toString(), index, 42))
+        }
+        val beforeBlocks = parser.blocksFor(text.toString(), 80, 42)
+        val beforeKeys = cache.keysFor(beforeBlocks)
+        val originalKeys = beforeKeys.toList()
+
+        text.append("\n\nNew tail")
+        val appended = parser.blocksFor(text.toString(), 81, 42)
+        check(sharedCompletedMarkdownBlocks(beforeBlocks, appended) > 0)
+        val appendedKeys = cache.keysFor(appended)
+        assertSame(beforeKeys.first(), appendedKeys.first())
+
+        val replacement = parser.blocksFor("Replacement\n\nTail")
+        assertEquals(0, sharedCompletedMarkdownBlocks(appended, replacement))
+        assertEquals(2, cache.keysFor(replacement).size)
+        assertEquals(originalKeys, beforeKeys)
+        assertEquals(originalKeys.dropLast(1), appendedKeys.take(originalKeys.size - 1))
     }
 
     private class CountingItems(override val size: Int) : AbstractList<String>() {

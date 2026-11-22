@@ -61,6 +61,8 @@ import com.suixing.agent.ui.components.MenuRippleTextButton
 import com.suixing.agent.ui.components.SettingsStyle
 import com.suixing.agent.ui.components.SuixingDialog
 import com.suixing.agent.ui.files.LocalFilePreview
+import com.suixing.agent.ui.browser.LocalOpenBrowser
+import com.suixing.agent.ui.browser.browserDocument
 import com.suixing.agent.ui.files.launchDeliveryFile
 import com.suixing.agent.ui.files.loadFilePreview
 import com.suixing.agent.ui.files.prepareDeliveryFile
@@ -90,6 +92,7 @@ internal fun ChatFileActivity(activities: List<FileActivity>, modifier: Modifier
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val copyPath = rememberCopyToClipboard()
+    val openBrowser = LocalOpenBrowser.current
     val request = remember { intArrayOf(0) }
     var actionJob by remember { mutableStateOf<Job?>(null) }
     fun act(path: String, action: FileCardAction) {
@@ -97,6 +100,14 @@ internal fun ChatFileActivity(activities: List<FileActivity>, modifier: Modifier
         val mine = ++request[0]
         busyPath = path
         notice = ""
+        if (action != FileCardAction.SHARE) {
+            val document = browserDocument(path)
+            if (document != null && openBrowser != null) {
+                busyPath = null
+                openBrowser(document)
+                return
+            }
+        }
         actionJob = scope.launch {
             try {
                 if (action == FileCardAction.PREVIEW) {

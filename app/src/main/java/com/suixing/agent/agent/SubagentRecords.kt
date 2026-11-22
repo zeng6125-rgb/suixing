@@ -580,7 +580,7 @@ internal object SubagentRecords {
 
     private fun parentDirectory(chatId: String, filesDir: File = Core.appContext.filesDir): File {
         val key = MessageDigest.getInstance("SHA-256").digest(chatId.toByteArray(Charsets.UTF_8))
-            .joinToString("") { "%02x".format(it) }
+            .toHexString()
         return File(filesDir, "subagent_records/$key")
     }
 

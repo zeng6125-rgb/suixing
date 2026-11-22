@@ -6,6 +6,8 @@ import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.lazy.LazyListLayoutInfo
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.runtime.Applier
 import androidx.compose.runtime.BroadcastFrameClock
 import androidx.compose.runtime.Composable
@@ -14,6 +16,7 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.InternalComposeApi
 import androidx.compose.runtime.Recomposer
 import androidx.compose.runtime.currentComposer
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.snapshots.Snapshot
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusDirection
@@ -28,18 +31,34 @@ import androidx.compose.ui.input.pointer.PointerInputChange
 import androidx.compose.ui.input.pointer.PointerInputEventHandler
 import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.LocalViewConfiguration
 import androidx.compose.ui.platform.ViewConfiguration
 import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.LayoutDirection
+import com.suixing.agent.ui.components.LocalDecorationMotion
+import com.suixing.agent.ui.chat.ChatScroll
+import com.suixing.agent.ui.chat.ChatReadingGesture
+import com.suixing.agent.ui.chat.SelectionFocusTracker
+import com.suixing.agent.ui.chat.TranscriptPosition
+import com.suixing.agent.ui.chat.TRANSCRIPT_END_OFFSET
+import com.suixing.agent.ui.chat.chatTranscriptGesture
+import com.suixing.agent.ui.chat.rememberChatScroll
+import io.mockk.every
+import io.mockk.mockk
+import io.mockk.spyk
+import io.mockk.unmockkAll
+import io.mockk.verify
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -48,6 +67,7 @@ import kotlinx.coroutines.yield
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import kotlin.coroutines.Continuation
@@ -59,6 +79,265 @@ import kotlin.coroutines.suspendCoroutine
 
 /** Run the drawer's actual pointerInput handlers with finite events, without Android windows. */
 class DrawerPointerLoopTest {
+    @Test fun `a transcript already following skips the bottom resume timer`() {
+        val traces = mutableListOf<String>()
+        val chat = DrawerChatFixture(initialFollowing = true, trace = traces::add)
+            .apply { tailBottom.value = viewportHeight.value }
+        withPointerLoop(DrawerValue.Closed, shield = false, events = emptyList(), homeContent = { chat.bind() }) {
+            frames(3)
+            delay(460)
+            assertTrue(chat.scroll.stickToBottom)
+            assertTrue("there is no follow state to restore", traces.isEmpty())
+        }
+    }
+
+    @Test fun `a closed drawer left swipe cannot drag an already following transcript vertically`() {
+        val chat = DrawerChatFixture(initialFollowing = true).apply { tailBottom.value = viewportHeight.value }
+        val leftMove = change(16L, 120f, 220f, y = 30f)
+        withPointerLoop(DrawerValue.Closed, shield = false, homeContent = { chat.bind() },
+            homePointerInput = true, includeHost = true, events = listOf(
+                event(change(0L, 220f, 220f, previousPressed = false)),
+                event(leftMove),
+                event(change(32L, 120f, 120f, y = 30f, previousY = 30f, pressed = false)),
+            )) {
+            assertTrue("plain transcript must consume the horizontal move before the list sees it", leftMove.isConsumed)
+            assertFalse(state.homeShieldActive)
+            assertTrue(chat.scroll.stickToBottom)
+            chat.position.viewportPlaced(chat.coordinates)
+            verify(exactly = 0) { chat.list.requestScrollToItem(any(), any()) }
+        }
+    }
+
+    @Test fun `a closed drawer left swipe keeps a horizontal child eligible to move`() {
+        val chat = DrawerChatFixture(initialFollowing = true)
+        val leftMove = change(16L, 120f, 220f, y = 30f)
+        withPointerLoop(DrawerValue.Closed, shield = false, homeContent = { chat.bind() },
+            homePointerInput = true, includeHost = true, events = listOf(
+                event(change(0L, 220f, 220f, previousPressed = false)),
+                event(leftMove),
+            ), beforeInput = {
+                state.priorityPointerId = PointerId(1L)
+                state.priorityCanScroll = { true }
+            }) {
+            assertFalse("the horizontal child needs the original pointer delta", leftMove.isConsumed)
+            assertTrue(chat.scroll.stickToBottom)
+        }
+    }
+
+    @Test fun `a vertical drag at the bottom passes to the list and releases following`() {
+        val chat = DrawerChatFixture(initialFollowing = true).apply { tailBottom.value = viewportHeight.value }
+        val verticalMove = change(16L, 220f, 220f, y = 30f)
+        withPointerLoop(DrawerValue.Closed, shield = false, homeContent = { chat.bind() },
+            homePointerInput = true, includeHost = true, events = listOf(
+                event(change(0L, 220f, 220f, previousPressed = false)),
+                event(verticalMove),
+            )) {
+            assertFalse(verticalMove.isConsumed)
+            assertFalse(chat.scroll.stickToBottom)
+        }
+    }
+
+    @Test fun `near-bottom reading survives rapid drawer reversals and later tail growth`() {
+        val chat = DrawerChatFixture()
+        try {
+            withPointerLoop(DrawerValue.Closed, shield = false, homeContent = { chat.bind() },
+                homePointerInput = true, includeHost = true,
+                events = listOf(
+                    event(change(0L, 100f, 100f, previousPressed = false)),
+                    event(change(16L, 160f, 100f)),
+                    event(change(32L, 200f, 160f, pressed = false)),
+                ), beforeInput = {
+                    frames(3)
+                    assertFalse(chat.scroll.stickToBottom)
+                    assertTrue(chat.list.canScrollForward)
+                }) {
+                // Hiding the keyboard can expose the end without a vertical chat scroll.
+                chat.viewportHeight.value = 800
+                repeat(64) { index ->
+                    scope.launch(clock, CoroutineStart.UNDISPATCHED) {
+                        state.animateTo(if (index % 2 == 0) DrawerValue.Closed else DrawerValue.Open,
+                            DRAWER_SPEC)
+                    }
+                    frames(1 + index % 3)
+                    assertTrue(state.visualProgress.value in 0f..1f)
+                }
+                scope.launch(clock, CoroutineStart.UNDISPATCHED) {
+                    state.animateTo(DrawerValue.Closed, DRAWER_CLOSE_SPEC)
+                }
+                frames(90)
+                assertFalse(state.isOpen)
+                assertFalse(state.isMoving)
+                assertFalse(state.homeShieldActive)
+                assertSame(initialShieldNode, currentShieldNode())
+
+                delay(460)
+                frames(3)
+                chat.tailBottom.value += 200
+                frames(3)
+                chat.position.viewportPlaced(chat.coordinates)
+
+                assertEquals("drawer motion must not create a request to the transcript end",
+                    8, chat.list.firstVisibleItemIndex)
+                assertEquals(30, chat.list.firstVisibleItemScrollOffset)
+                assertFalse("reading must remain reading after the drawer closes", chat.scroll.stickToBottom)
+                verify(exactly = 0) { chat.list.requestScrollToItem(any(), any()) }
+            }
+        } finally { unmockkAll() }
+    }
+
+    @Test fun `a pending bottom resume cannot survive a quick drawer open and close`() {
+        val chat = DrawerChatFixture()
+        try {
+            withPointerLoop(DrawerValue.Closed, shield = false, events = emptyList(),
+                homeContent = { chat.bind() }, beforeInput = {
+                    frames(3)
+                    chat.viewportHeight.value = 800
+                    frames(3)
+                    delay(250)
+                    assertFalse(chat.scroll.stickToBottom)
+                }) {
+                scope.launch(clock, CoroutineStart.UNDISPATCHED) {
+                    state.animateTo(DrawerValue.Open, DRAWER_OPEN_SPEC)
+                }
+                frames(2)
+                scope.launch(clock, CoroutineStart.UNDISPATCHED) {
+                    state.animateTo(DrawerValue.Closed, DRAWER_CLOSE_SPEC)
+                }
+                frames(90)
+                delay(460)
+                frames(3)
+                assertFalse(chat.scroll.stickToBottom)
+                chat.tailBottom.value += 200
+                chat.position.viewportPlaced(chat.coordinates)
+                assertEquals(8, chat.list.firstVisibleItemIndex)
+                verify(exactly = 0) { chat.list.requestScrollToItem(any(), any()) }
+            }
+        } finally { unmockkAll() }
+    }
+
+    @Test fun `drawer reversals before the first frame still preserve near-bottom reading`() {
+        val chat = DrawerChatFixture()
+        try {
+            withPointerLoop(DrawerValue.Closed, shield = false, events = emptyList(),
+                homeContent = { chat.bind() }, beforeInput = { frames(3) }) {
+                repeat(20) {
+                    scope.launch(clock, CoroutineStart.UNDISPATCHED) {
+                        state.animateTo(DrawerValue.Open, DRAWER_OPEN_SPEC)
+                    }
+                    scope.launch(clock, CoroutineStart.UNDISPATCHED) {
+                        state.animateTo(DrawerValue.Closed, DRAWER_CLOSE_SPEC)
+                    }
+                }
+                assertFalse(state.homeShieldActive)
+                chat.viewportHeight.value = 800
+                frames(3)
+                delay(460)
+                frames(3)
+                chat.tailBottom.value += 200
+                chat.position.viewportPlaced(chat.coordinates)
+                assertEquals("coalesced drawer states must not lose the reading interruption",
+                    8, chat.list.firstVisibleItemIndex)
+                assertFalse(chat.scroll.stickToBottom)
+                verify(exactly = 0) { chat.list.requestScrollToItem(any(), any()) }
+            }
+        } finally { unmockkAll() }
+    }
+
+    @Test fun `vertical transcript input can resume following after the drawer closes`() {
+        val chat = DrawerChatFixture()
+        try {
+            withPointerLoop(DrawerValue.Closed, shield = false, homeContent = { chat.bind() },
+                homePointerInput = true, includeHost = true, events = listOf(
+                    event(change(0L, 100f, 100f, previousPressed = false)),
+                    event(change(16L, 100f, 100f, y = -40f)),
+                    event(change(32L, 100f, 100f, y = -80f, previousY = -40f, pressed = false)),
+                ), beforeInput = {
+                    frames(3)
+                    state.snapTo(DrawerValue.Open)
+                    frames(3)
+                    chat.viewportHeight.value = 800
+                    state.snapTo(DrawerValue.Closed)
+                    frames(3)
+                    delay(460)
+                    frames(3)
+                    assertFalse(chat.scroll.stickToBottom)
+                }) {
+                frames(3)
+                assertTrue(chat.scroll.allowBottomResume)
+                delay(460)
+                frames(3)
+                assertTrue("a real vertical gesture can return to normal bottom following", chat.scroll.stickToBottom)
+                chat.tailBottom.value += 200
+                chat.position.viewportPlaced(chat.coordinates)
+                assertEquals(9, chat.list.firstVisibleItemIndex)
+                verify(exactly = 1) { chat.list.requestScrollToItem(9, TRANSCRIPT_END_OFFSET) }
+            }
+        } finally { unmockkAll() }
+    }
+
+    @Test fun `horizontal drawer input keeps an already following transcript following`() {
+        val chat = DrawerChatFixture(initialFollowing = true)
+        try {
+            withPointerLoop(DrawerValue.Closed, shield = false, homeContent = { chat.bind() },
+                homePointerInput = true, includeHost = true, events = listOf(
+                    event(change(0L, 100f, 100f, previousPressed = false)),
+                    event(change(16L, 160f, 100f, y = 4f)),
+                    event(change(32L, 200f, 160f, y = 6f, previousY = 4f, pressed = false)),
+                )) {
+                frames(90)
+                assertTrue(state.isOpen)
+                assertTrue(chat.scroll.stickToBottom)
+                chat.tailBottom.value += 200
+                chat.position.viewportPlaced(chat.coordinates)
+                assertEquals(9, chat.list.firstVisibleItemIndex)
+                verify(exactly = 1) { chat.list.requestScrollToItem(9, TRANSCRIPT_END_OFFSET) }
+            }
+        } finally { unmockkAll() }
+    }
+
+    @Test
+    fun `starting an opening drag reuses the shield already in the layout`() =
+        withPointerLoop(DrawerValue.Closed, shield = false, events = listOf(
+            event(change(0L, 100f, 100f, previousPressed = false)),
+            event(change(16L, 140f, 100f)),
+        )) {
+            frames(1)
+            assertTrue(state.homeShieldActive)
+            assertNotNull(initialShieldNode)
+            assertSame(initialShieldNode, currentShieldNode())
+        }
+
+    @Test
+    fun `changing system back exclusion does not recompose the drawer host`() =
+        withPointerLoop(DrawerValue.Closed, shield = false, events = listOf(
+            event(change(0L, 100f, 100f, previousPressed = false)),
+            event(change(16L, 140f, 100f)),
+        )) {
+            frames(3)
+            assertTrue(state.homeShieldActive)
+            assertEquals(1, panelDensityReads)
+            state.snapTo(DrawerValue.Closed)
+            frames(3)
+            assertFalse(state.homeShieldActive)
+            assertEquals(1, panelDensityReads)
+        }
+
+    @Test
+    fun `home decorations pause during a drag and resume when the drawer stops`() =
+        withPointerLoop(DrawerValue.Closed, shield = false, events = listOf(
+            event(change(0L, 100f, 100f, previousPressed = false)),
+            event(change(16L, 140f, 100f)),
+            event(change(32L, 180f, 140f, pressed = false)),
+        ), beforeInput = {
+            assertTrue(homeDecorationMotion())
+        }) {
+            assertTrue(state.isMoving)
+            assertFalse(homeDecorationMotion())
+            frames(90)
+            assertFalse(state.isMoving)
+            assertTrue(homeDecorationMotion())
+        }
+
     @Test
     fun `the first horizontal segment follows the finger when the drawer takes ownership`() =
         withPointerLoop(DrawerValue.Closed, shield = false, events = listOf(
@@ -67,21 +346,20 @@ class DrawerPointerLoopTest {
         )) {
             assertEquals(
                 "taking ownership must not leave the touch-slop distance behind the finger",
-                40f * DRAWER_INPUT_GAIN / 300f,
+                40f / 300f,
                 state.visualProgress.value,
                 0.0001f,
             )
         }
 
     @Test
-    fun `a deliberate drag uses the responsive input gain`() =
+    fun `a deliberate drag moves the panel by the same distance as the finger`() =
         withPointerLoop(DrawerValue.Closed, shield = false, events = listOf(
             event(change(0L, 100f, 100f, previousPressed = false)),
             event(change(16L, 300f, 100f)),
         )) {
             assertEquals(
-                "the panel should cover 20 percent more distance than the finger",
-                240f / 300f,
+                200f / 300f,
                 state.visualProgress.value,
                 0.0001f,
             )
@@ -100,7 +378,7 @@ class DrawerPointerLoopTest {
             )) {
             assertEquals(0f, childOffset, 0.0001f)
             assertEquals("scrolling must not turn into a long-press owner mid-drag",
-                200f * DRAWER_INPUT_GAIN / 300f, state.visualProgress.value, 0.0001f)
+                200f / 300f, state.visualProgress.value, 0.0001f)
         }
     }
 
@@ -117,7 +395,7 @@ class DrawerPointerLoopTest {
             )) {
             assertEquals(0f, childOffset, 0.0001f)
             assertEquals("the remaining drag at the scroll boundary must reach the drawer",
-                200f * DRAWER_INPUT_GAIN / 300f, state.visualProgress.value, 0.0001f)
+                200f / 300f, state.visualProgress.value, 0.0001f)
         }
     }
 
@@ -132,7 +410,7 @@ class DrawerPointerLoopTest {
             )) {
             assertTrue("initial vertical scrolling must still be delivered", childScroll > 0f)
             assertEquals("later horizontal movement must be able to open the drawer",
-                200f * DRAWER_INPUT_GAIN / 300f, state.visualProgress.value, 0.0001f)
+                200f / 300f, state.visualProgress.value, 0.0001f)
         }
     }
 
@@ -141,8 +419,8 @@ class DrawerPointerLoopTest {
             event(change(0L, 100f, 100f, previousPressed = false)),
             event(change(64L, 140f, 100f)),
             event(change(128L, 180f, 140f)),
-            event(change(192L, 220f, 180f)),
-            event(change(288L, 220f, 220f, pressed = false)),
+            event(change(192L, 280f, 180f)),
+            event(change(288L, 280f, 280f, pressed = false)),
         ), beforeInput = {
             val gesture = state.beginGesture()
             state.applyGestureFrame(gesture, 0f)
@@ -158,8 +436,8 @@ class DrawerPointerLoopTest {
             event(change(0L, 350f, 350f, previousPressed = false)),
             event(change(64L, 310f, 350f)),
             event(change(128L, 270f, 310f)),
-            event(change(192L, 230f, 270f)),
-            event(change(288L, 230f, 230f, pressed = false)),
+            event(change(192L, 170f, 270f)),
+            event(change(288L, 170f, 170f, pressed = false)),
         ), beforeInput = {
             val gesture = state.beginGesture()
             state.applyGestureFrame(gesture, 1f)
@@ -193,7 +471,7 @@ class DrawerPointerLoopTest {
                 event(change(32L, 180f, 140f)),
             )) {
             assertEquals("a non-scrolling code block must not trap the horizontal drag",
-                80f * DRAWER_INPUT_GAIN / 300f, state.visualProgress.value, 0.0001f)
+                80f / 300f, state.visualProgress.value, 0.0001f)
         }
 
     @Test fun `a horizontal scroller at its start yields an outward drag to the drawer`() =
@@ -204,7 +482,7 @@ class DrawerPointerLoopTest {
                 event(change(32L, 180f, 140f)),
             )) {
             assertEquals("pulling past the content's start must reach the drawer",
-                80f * DRAWER_INPUT_GAIN / 300f, state.visualProgress.value, 0.0001f)
+                80f / 300f, state.visualProgress.value, 0.0001f)
         }
 
     @Test fun `a horizontal decision wins a diagonal move before the vertical child`() {
@@ -216,7 +494,7 @@ class DrawerPointerLoopTest {
                 event(change(32L, 180f, 140f, pressed = false, y = 130f, previousY = 120f)),
             )) {
             assertEquals("a mainly horizontal move must reach the drawer",
-                80f * DRAWER_INPUT_GAIN / 300f,
+                80f / 300f,
                 state.visualProgress.value, 0.0001f)
             assertEquals("the vertical child must not steal this drag", 0f, childScroll, 0.0001f)
         }
@@ -229,15 +507,15 @@ class DrawerPointerLoopTest {
             event(change(32L, 140f, 105f, pressed = false)),
         )) {
             assertEquals("UP may be the first event to cross horizontal touch slop",
-                40f * DRAWER_INPUT_GAIN / 300f,
+                40f / 300f,
                 state.visualProgress.value, 0.0001f)
         }
 
     @Test fun `a closing decision follows the finger while opening is interrupted`() =
         withPointerLoop(DrawerValue.Closed, shield = true, includeHost = true, events = listOf(
             event(change(0L, 350f, 350f, previousPressed = false)),
-            event(change(64L, 338f, 350f)),
-            event(change(80L, 338f, 338f, pressed = false)),
+            event(change(64L, 160f, 350f)),
+            event(change(80L, 160f, 160f, pressed = false)),
         ), beforeInput = {
             scope.launch(clock, CoroutineStart.UNDISPATCHED) {
                 state.animateTo(DrawerValue.Open, tween(1_000))
@@ -252,8 +530,8 @@ class DrawerPointerLoopTest {
     @Test fun `an opening decision follows the finger while closing is interrupted`() =
         withPointerLoop(DrawerValue.Open, shield = true, includeHost = true, events = listOf(
             event(change(0L, 350f, 350f, previousPressed = false)),
-            event(change(64L, 362f, 350f)),
-            event(change(80L, 362f, 362f, pressed = false)),
+            event(change(64L, 540f, 350f)),
+            event(change(80L, 540f, 540f, pressed = false)),
         ), beforeInput = {
             scope.launch(clock, CoroutineStart.UNDISPATCHED) {
                 state.animateTo(DrawerValue.Closed, tween(1_000))
@@ -278,8 +556,8 @@ class DrawerPointerLoopTest {
         withPointerLoop(DrawerValue.Closed, shield = false, events = listOf(
             event(change(0L, 100f, 100f, previousPressed = false)),
             event(change(60L, 116f, 100f, y = 18f)),
-            event(change(220L, 200f, 116f, y = 20f, previousY = 18f)),
-            event(change(320L, 200f, 200f, pressed = false, y = 20f, previousY = 20f)),
+            event(change(220L, 280f, 116f, y = 20f, previousY = 18f)),
+            event(change(320L, 280f, 280f, pressed = false, y = 20f, previousY = 20f)),
         )) {
             frames(90)
             assertTrue(state.isOpen)
@@ -289,8 +567,8 @@ class DrawerPointerLoopTest {
         withPointerLoop(DrawerValue.Open, shield = true, includeHost = true, events = listOf(
             event(change(0L, 350f, 350f, previousPressed = false)),
             event(change(60L, 334f, 350f, y = 18f)),
-            event(change(220L, 250f, 334f, y = 20f, previousY = 18f)),
-            event(change(320L, 250f, 250f, pressed = false, y = 20f, previousY = 20f)),
+            event(change(220L, 170f, 334f, y = 20f, previousY = 18f)),
+            event(change(320L, 170f, 170f, pressed = false, y = 20f, previousY = 20f)),
         )) {
             frames(90)
             assertEquals(0f, state.visualProgress.value, 0.0001f)
@@ -332,10 +610,129 @@ class DrawerPointerLoopTest {
             event(change(128L, 130f, 180f)),
             event(change(228L, 130f, 130f, pressed = false)),
         )) {
-            assertEquals(30f * DRAWER_INPUT_GAIN / 300f, state.visualProgress.value, 0.0001f)
+            assertEquals(30f / 300f, state.visualProgress.value, 0.0001f)
             frames(90)
             assertEquals(0f, state.visualProgress.value, 0f)
         }
+
+    @Test fun `a slow deliberate reversal settles in the return direction on both surfaces`() {
+        for (open in listOf(false, true)) {
+            val start = if (open) 350f else 100f
+            val direction = if (open) -1f else 1f
+            val turn = start + direction * 180f
+            val end = turn - direction * 80f
+            withPointerLoop(if (open) DrawerValue.Open else DrawerValue.Closed, shield = open,
+                includeHost = open, events = listOf(
+                    event(change(0L, start, start, previousPressed = false)),
+                    event(change(250L, turn, start)),
+                    event(change(450L, end, turn)),
+                    event(change(550L, end, end, pressed = false)),
+                )) {
+                assertEquals(if (open) 2f / 3f else 1f / 3f, state.visualProgress.value, 0.0001f)
+                frames(90)
+                assertEquals(if (open) 1f else 0f, state.visualProgress.value, 0f)
+            }
+        }
+    }
+
+    @Test fun `a slow quarter-width swipe from either endpoint can finish without crossing halfway`() {
+        for (open in listOf(false, true)) {
+            val start = if (open) 350f else 100f
+            val direction = if (open) -1f else 1f
+            for (travel in listOf(30f, 75f, 76f, 90f)) {
+                val end = start + direction * travel
+                val peak = end + direction * 3f
+                withPointerLoop(if (open) DrawerValue.Open else DrawerValue.Closed,
+                    shield = open, includeHost = open, events = listOf(
+                        event(change(0L, start, start, previousPressed = false)),
+                        event(change(250L, peak, start)),
+                        event(change(270L, end, peak)),
+                        event(change(400L, end, end, pressed = false)),
+                    )) {
+                    val position = if (open) 1f - travel / 300f else travel / 300f
+                    assertEquals(position, state.visualProgress.value, 0.0001f)
+                    frames(90)
+                    assertEquals("open=$open travel=$travel", if (travel > 75f) !open else open, state.isOpen)
+                }
+            }
+        }
+    }
+
+    @Test fun `a deliberate pullback uses release position while a direct drag accepts shorter travel`() {
+        for (open in listOf(false, true)) {
+            val start = if (open) 350f else 100f
+            val direction = if (open) -1f else 1f
+            for (travel in listOf(120f, 180f)) {
+                val end = start + direction * travel
+                for (peak in listOf(end, start + direction * 280f)) {
+                    withPointerLoop(if (open) DrawerValue.Open else DrawerValue.Closed,
+                        shield = open, includeHost = open, events = listOf(
+                            event(change(0L, start, start, previousPressed = false)),
+                            event(change(250L, peak, start)),
+                            event(change(450L, end, peak)),
+                            event(change(600L, end, end, pressed = false)),
+                        )) {
+                        val position = if (open) 1f - travel / 300f else travel / 300f
+                        assertEquals(position, state.visualProgress.value, 0.0001f)
+                        frames(90)
+                        assertEquals(if (peak == end) !open else position > 0.5f, state.isOpen)
+                    }
+                }
+            }
+        }
+    }
+
+    @Test fun `a tiny recoil on lift does not cancel a short fling or reverse a long drag`() {
+        for (open in listOf(false, true)) {
+            val start = if (open) 350f else 100f
+            val direction = if (open) -1f else 1f
+            for (travel in listOf(60f, 180f)) {
+                val half = start + direction * travel / 2f
+                val end = start + direction * travel
+                withPointerLoop(if (open) DrawerValue.Open else DrawerValue.Closed, shield = open,
+                    includeHost = open, events = listOf(
+                        event(change(0L, start, start, previousPressed = false)),
+                        event(change(16L, half, start)),
+                        event(change(32L, end, half)),
+                        event(change(36L, end - direction * 3f, end, previousTime = 32L, pressed = false)),
+                    )) {
+                    frames(90)
+                    assertEquals("initially open=$open, travel=$travel", !open, state.isOpen)
+                }
+            }
+        }
+    }
+
+    @Test fun `a quick reversal before release flings in the new direction`() =
+        withPointerLoop(DrawerValue.Closed, shield = false, events = listOf(
+            event(change(0L, 100f, 100f, previousPressed = false)),
+            event(change(16L, 164f, 100f)),
+            event(change(32L, 228f, 164f)),
+            event(change(48L, 292f, 228f)),
+            event(change(64L, 276f, 292f)),
+            event(change(80L, 276f, 276f, pressed = false)),
+        )) {
+            frames(90)
+            assertEquals(0f, state.visualProgress.value, 0f)
+        }
+
+    @Test fun `holding a partial drag across display frames leaves the panel under the finger`() {
+        for (open in listOf(false, true)) {
+            val start = if (open) 350f else 100f
+            val end = start + if (open) -90f else 90f
+            withPointerLoop(if (open) DrawerValue.Open else DrawerValue.Closed,
+                shield = open, includeHost = open, events = listOf(
+                    event(change(0L, start, start, previousPressed = false)),
+                    event(change(32L, end, start)),
+                )) {
+                repeat(12) {
+                    frames(1)
+                    assertNotNull(state.gestureSession)
+                    assertEquals(if (open) 0.7f else 0.3f, state.visualProgress.value, 0.0001f)
+                }
+            }
+        }
+    }
 
     @Test fun `a vertical decision stays with the child when later movement turns horizontal`() {
         var childScroll = 0f
@@ -348,6 +745,20 @@ class DrawerPointerLoopTest {
             )) {
             assertEquals(0f, state.visualProgress.value, 0.0001f)
             assertEquals(52f, childScroll, 0.0001f)
+        }
+    }
+
+    @Test fun `a vertical child that started scrolling keeps a swipe that turns horizontal`() {
+        var childScroll = 0f
+        withPointerLoop(DrawerValue.Closed, shield = false, includeHost = true,
+            childOrientation = Orientation.Vertical, childDrag = { childScroll += it }, events = listOf(
+                event(change(0L, 100f, 100f, previousPressed = false, y = 100f, previousY = 100f)),
+                event(change(16L, 100f, 100f, y = 111f, previousY = 100f)),
+                event(change(32L, 144f, 100f, y = 114f, previousY = 111f)),
+                event(change(48L, 150f, 144f, pressed = false, y = 115f, previousY = 114f)),
+            )) {
+            assertEquals(6f, childScroll, 0.0001f)
+            assertEquals(0f, state.visualProgress.value, 0.0001f)
         }
     }
 
@@ -390,7 +801,7 @@ class DrawerPointerLoopTest {
         }) {
             assertNotNull(state.gestureSession)
             frames(12)
-            assertEquals(caught + 4f * DRAWER_INPUT_GAIN / 300f, state.visualProgress.value, 0.0001f)
+            assertEquals(caught + 4f / 300f, state.visualProgress.value, 0.0001f)
         }
     }
 
@@ -448,7 +859,7 @@ class DrawerPointerLoopTest {
         }) {
             assertNotNull(state.gestureSession)
             frames(12)
-            assertEquals(caught + 4f * DRAWER_INPUT_GAIN / 300f, state.visualProgress.value, 0.0001f)
+            assertEquals(caught + 4f / 300f, state.visualProgress.value, 0.0001f)
         }
     }
 
@@ -468,7 +879,7 @@ class DrawerPointerLoopTest {
             event(change(32L, 140f, 120f)),
         )) {
             assertEquals("both moves must be visible without advancing the frame clock",
-                40f * DRAWER_INPUT_GAIN / 300f, state.visualProgress.value, 0.0001f)
+                40f / 300f, state.visualProgress.value, 0.0001f)
         }
 
     @Test fun `a short host fling includes the down sample`() =
@@ -481,6 +892,24 @@ class DrawerPointerLoopTest {
             assertEquals(DrawerValue.Open, if (state.isOpen) DrawerValue.Open else DrawerValue.Closed)
         }
 
+    @Test fun `the same swipe in dp has the same fling decision across densities`() {
+        for (density in listOf(1f, 3f)) {
+            for (stepDp in listOf(5f, 9f)) {
+                val step = stepDp * density
+                withPointerLoop(DrawerValue.Closed, shield = false, density = density, events = listOf(
+                    event(change(0L, 0f, 0f, previousPressed = false)),
+                    event(change(16L, step, 0f)),
+                    event(change(32L, 2f * step, step)),
+                    event(change(48L, 3f * step, 2f * step)),
+                    event(change(64L, 3f * step, 3f * step, pressed = false)),
+                )) {
+                    frames(90)
+                    assertEquals("step=$stepDp dp, density=$density", stepDp == 9f, state.isOpen)
+                }
+            }
+        }
+    }
+
     @Test fun `a host release carries its final movement and velocity into the spring`() =
         withPointerLoop(DrawerValue.Closed, shield = false, events = listOf(
             event(change(0L, 100f, 100f, previousPressed = false)),
@@ -488,7 +917,7 @@ class DrawerPointerLoopTest {
             event(change(32L, 140f, 110f, pressed = false)),
         )) {
             assertEquals("the release position must be applied before the first spring frame",
-                40f * DRAWER_INPUT_GAIN / 300f, state.visualProgress.value, 0.0001f)
+                40f / 300f, state.visualProgress.value, 0.0001f)
             frames(90)
             assertTrue("the final accelerating movement must produce an opening fling", state.isOpen)
         }
@@ -500,7 +929,7 @@ class DrawerPointerLoopTest {
             event(change(32L, 310f, 340f, pressed = false)),
         )) {
             assertEquals("the shield must retain the physical release position",
-                1f - 40f * DRAWER_INPUT_GAIN / 300f, state.visualProgress.value, 0.0001f)
+                1f - 40f / 300f, state.visualProgress.value, 0.0001f)
             frames(90)
             assertEquals("the final accelerating movement must produce a closing fling",
                 0f, state.visualProgress.value, 0.0001f)
@@ -516,6 +945,24 @@ class DrawerPointerLoopTest {
             frames(90)
             assertEquals("holding before release must keep this short drag closed",
                 0f, state.visualProgress.value, 0.0001f)
+        }
+
+    @Test fun `a short drag springs back directly from the release position`() =
+        withPointerLoop(DrawerValue.Closed, shield = false, events = listOf(
+            event(change(0L, 100f, 100f, previousPressed = false)),
+            event(change(16L, 105f, 100f)),
+            event(change(32L, 110f, 105f)),
+            event(change(48L, 115f, 110f, pressed = false)),
+        )) {
+            var previous = state.visualProgress.value
+            repeat(4) {
+                frames(1)
+                val current = state.visualProgress.value
+                assertTrue("returning to closed must not move farther open: $previous → $current", current <= previous)
+                previous = current
+            }
+            frames(90)
+            assertEquals(0f, state.visualProgress.value, 0f)
         }
 
     @Test fun `a shield drag held still before up has no fling velocity`() =
@@ -546,14 +993,53 @@ class DrawerPointerLoopTest {
         )) {
             assertNotNull("the remaining finger still owns the drag", state.gestureSession)
             assertEquals("only finger motion, not the distance between fingers, moves the drawer",
-                1f - 40f * DRAWER_INPUT_GAIN / 300f, state.visualProgress.value, 0.0001f)
+                1f - 40f / 300f, state.visualProgress.value, 0.0001f)
         }
+
+    private class DrawerChatFixture(
+        private val initialFollowing: Boolean = false,
+        private val trace: (String) -> Unit = {},
+    ) {
+        val list = spyk(LazyListState(8, 30))
+        val viewportHeight = mutableStateOf(600)
+        val tailBottom = mutableStateOf(680)
+        val position = TranscriptPosition(list)
+        val coordinates = mockk<LayoutCoordinates>()
+        private val gesture = ChatReadingGesture()
+        private val selection = SelectionFocusTracker()
+        private val navigation = arrayOfNulls<kotlinx.coroutines.Job>(1)
+        lateinit var scroll: ChatScroll
+
+        init {
+            val layout = mockk<LazyListLayoutInfo>()
+            every { layout.totalItemsCount } returns 10
+            every { layout.beforeContentPadding } returns 0
+            every { layout.afterContentPadding } returns 0
+            every { layout.viewportSize } answers { IntSize(400, viewportHeight.value) }
+            every { list.layoutInfo } returns layout
+            every { list.canScrollForward } answers { tailBottom.value > viewportHeight.value }
+        }
+
+        @Composable fun bind() {
+            scroll = rememberChatScroll(list, true, { gesture.pressed }, { gesture.pressGuardOn },
+                conversationId = "chat", trace = trace, initialFollowing = initialFollowing)
+            scroll.restoring = false
+            position.following = { scroll.stickToBottom && !gesture.pressed && !gesture.pressGuardOn }
+            position.latestStillWanted = { scroll.stickToBottom }
+            Box(Modifier.chatTranscriptGesture("chat", gesture, navigation, scroll, selection,
+                LocalViewConfiguration.current, LocalFocusManager.current, null, LocalDrawerGestureState.current))
+        }
+    }
 
     private class Harness(
         val state: SuixingDrawerState,
         val scope: CoroutineScope,
         val clock: BroadcastFrameClock,
     ) {
+        lateinit var homeDecorationMotion: () -> Boolean
+        var initialShieldNode: Any? = null
+        lateinit var currentShieldNode: () -> Any?
+        var panelDensityReads = 0
         private var nanos = 0L
 
         suspend fun startClosing() {
@@ -586,6 +1072,9 @@ class DrawerPointerLoopTest {
         childOrientation: Orientation? = null,
         childCanScroll: (Float) -> Boolean = { true },
         childDrag: (Float) -> Unit = {},
+        homeContent: @Composable () -> Unit = {},
+        homePointerInput: Boolean = false,
+        density: Float = 1f,
         block: suspend Harness.() -> Unit,
     ) = runBlocking {
         withTimeout(5_000L) {
@@ -597,6 +1086,12 @@ class DrawerPointerLoopTest {
             val clock = BroadcastFrameClock()
             val state = SuixingDrawerState(initialValue)
             val harness = Harness(state, this, clock)
+            val drawerDensity = object : Density by Density(density) {
+                override fun Dp.toPx(): Float {
+                    if (value == DRAWER_SHEET_WIDTH.toFloat()) harness.panelDensityReads++
+                    return value * density
+                }
+            }
             val recomposer = Recomposer(coroutineContext + clock)
             val composition = Composition(applier, recomposer)
             val runner = launch(clock, CoroutineStart.UNDISPATCHED) {
@@ -606,7 +1101,7 @@ class DrawerPointerLoopTest {
             try {
                 composition.setContent {
                     CompositionLocalProvider(
-                        LocalDensity provides Density(1f),
+                        LocalDensity provides drawerDensity,
                         LocalLayoutDirection provides LayoutDirection.Ltr,
                         LocalViewConfiguration provides DrawerViewConfiguration,
                         LocalFocusManager provides object : FocusManager {
@@ -617,6 +1112,8 @@ class DrawerPointerLoopTest {
                         SuixingDrawer(state, gesturesEnabled = true, drawerContent = {
                             if (rowClick != null) Box(drawerRowTapForTest(rowClick))
                         }, content = {
+                            harness.homeDecorationMotion = LocalDecorationMotion.current
+                            homeContent()
                             if (childOrientation != null) {
                                 val modifier = if (childOrientation == Orientation.Horizontal)
                                     Modifier.drawerScrollPriority(childCanScroll) else Modifier
@@ -637,16 +1134,19 @@ class DrawerPointerLoopTest {
                 harness.beforeInput()
                 val children = nodeClass.getDeclaredMethod("getChildren\$ui")
                 val host = (children.invoke(root) as List<*>).single()!!
+                harness.currentShieldNode = { (children.invoke(host) as List<*>).drop(1).lastOrNull() }
+                harness.initialShieldNode = harness.currentShieldNode()
                 val target = when {
                     rowClick != null -> {
                         val panel = (children.invoke(host) as List<*>).first()!!
                         (children.invoke(panel) as List<*>).single()!!
                     }
                     shield -> (children.invoke(host) as List<*>).last()!!
-                    childOrientation != null -> (children.invoke(host) as List<*>).last()!!
+                    homePointerInput -> (children.invoke(host) as List<*>)[1]!!
+                    childOrientation != null -> (children.invoke(host) as List<*>)[1]!!
                     else -> host
                 }
-                val targets = if ((shield || rowClick != null || childOrientation != null) && includeHost)
+                val targets = if ((shield || rowClick != null || childOrientation != null || homePointerInput) && includeHost)
                     listOf(host, target)
                     else listOf(target)
                 val inputs = targets.flatMap { node ->
@@ -762,12 +1262,13 @@ class DrawerPointerLoopTest {
             previousPressed: Boolean = true,
             y: Float = 0f,
             previousY: Float = 0f,
+            previousTime: Long = (time - 16L).coerceAtLeast(0L),
         ): PointerInputChange = PointerInputChange(
             id = PointerId(id),
             uptimeMillis = time,
             position = Offset(x, y),
             pressed = pressed,
-            previousUptimeMillis = (time - 16L).coerceAtLeast(0L),
+            previousUptimeMillis = previousTime,
             previousPosition = Offset(previousX, previousY),
             previousPressed = previousPressed,
             isInitiallyConsumed = false,

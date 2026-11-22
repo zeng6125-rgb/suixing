@@ -10,8 +10,13 @@ void sx_search_free(std::uint8_t*, std::size_t);
 int sx_core_tokens(const std::uint16_t*, std::size_t, int*);
 bool sx_core_retry(int, bool, int, int, bool, bool, bool);
 int sx_drawer_drag_axis(float, float, float);
-float sx_drawer_drag_offset(float, float, float, float);
-bool sx_drawer_release_open(float, float, float);
+struct DrawerDrag;
+struct VelocitySample;
+void sx_drawer_drag_begin(DrawerDrag*, float, float);
+float sx_drawer_drag_advance(DrawerDrag*, float);
+bool sx_drawer_drag_opens(const DrawerDrag*);
+float sx_drawer_velocity(const VelocitySample*, std::size_t, std::size_t, float);
+bool sx_drawer_settle_open(bool, float);
 int sx_core_json(std::uint64_t, const std::uint16_t*, std::size_t, SearchBuffer*);
 int sx_core_trim_chunk(const std::int32_t*, const std::uint8_t*, std::size_t, int, int, int, std::int32_t*);
 int sx_json_measure(const std::uint16_t*, std::size_t, std::uint64_t*, std::uint64_t*);
@@ -54,11 +59,31 @@ extern "C" JNIEXPORT void JNICALL Java_com_suixing_agent_core_NativeCoreJni_nati
 extern "C" JNIEXPORT jint JNICALL Java_com_suixing_agent_core_NativeCoreJni_nativeDrawerAxis(JNIEnv*, jobject, jfloat x, jfloat y, jfloat slop) {
     return sx_drawer_drag_axis(x, y, slop);
 }
-extern "C" JNIEXPORT jfloat JNICALL Java_com_suixing_agent_core_NativeCoreJni_nativeDrawerOffset(JNIEnv*, jobject, jfloat offset, jfloat delta, jfloat min, jfloat max) {
-    return sx_drawer_drag_offset(offset, delta, min, max);
+extern "C" JNIEXPORT void JNICALL Java_com_suixing_agent_core_NativeCoreJni_nativeDrawerDragBegin(JNIEnv* env, jobject, jobject buffer, jfloat start, jfloat width) {
+    auto* state = static_cast<DrawerDrag*>(env->GetDirectBufferAddress(buffer));
+    if (!state || env->GetDirectBufferCapacity(buffer) != 7 * sizeof(float)) {
+        fail(env, "java/lang/IllegalArgumentException", "Invalid drawer drag state buffer.");
+        return;
+    }
+    sx_drawer_drag_begin(state, start, width);
 }
-extern "C" JNIEXPORT jboolean JNICALL Java_com_suixing_agent_core_NativeCoreJni_nativeDrawerReleaseOpen(JNIEnv*, jobject, jfloat progress, jfloat velocity, jfloat start) {
-    return sx_drawer_release_open(progress, velocity, start) ? JNI_TRUE : JNI_FALSE;
+extern "C" JNIEXPORT jfloat JNICALL Java_com_suixing_agent_core_NativeCoreJni_nativeDrawerDragAdvance(JNIEnv* env, jobject, jobject buffer, jfloat delta) {
+    return sx_drawer_drag_advance(static_cast<DrawerDrag*>(env->GetDirectBufferAddress(buffer)), delta);
+}
+extern "C" JNIEXPORT jboolean JNICALL Java_com_suixing_agent_core_NativeCoreJni_nativeDrawerDragOpens(JNIEnv* env, jobject, jobject buffer) {
+    return sx_drawer_drag_opens(static_cast<DrawerDrag*>(env->GetDirectBufferAddress(buffer))) ? JNI_TRUE : JNI_FALSE;
+}
+extern "C" JNIEXPORT jfloat JNICALL Java_com_suixing_agent_core_NativeCoreJni_nativeDrawerVelocity(JNIEnv* env, jobject, jobject buffer, jint next, jint count, jfloat maxVelocity) {
+    auto* samples = static_cast<VelocitySample*>(env->GetDirectBufferAddress(buffer));
+    if (!samples || env->GetDirectBufferCapacity(buffer) != 20 * 16 ||
+        next < 0 || next >= 20 || count < 0 || count > 20) {
+        fail(env, "java/lang/IllegalArgumentException", "Invalid drawer velocity history.");
+        return 0;
+    }
+    return sx_drawer_velocity(samples, next, count, maxVelocity);
+}
+extern "C" JNIEXPORT jboolean JNICALL Java_com_suixing_agent_core_NativeCoreJni_nativeDrawerReleaseOpen(JNIEnv*, jobject, jboolean openByDistance, jfloat velocityDpPerSecond) {
+    return sx_drawer_settle_open(openByDistance == JNI_TRUE, velocityDpPerSecond) ? JNI_TRUE : JNI_FALSE;
 }
 extern "C" JNIEXPORT jint JNICALL Java_com_suixing_agent_core_NativeCoreJni_nativeTokens(JNIEnv* env, jobject, jstring source) {
     if (!source) { fail(env, "java/lang/IllegalArgumentException", "Null token text."); return 0; }

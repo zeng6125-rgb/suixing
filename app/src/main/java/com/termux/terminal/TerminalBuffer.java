@@ -9,6 +9,7 @@ public final class TerminalBuffer {
     private long preparedRevision = -1;
     private int preparedFrom;
     private int[] cachedNativeRows = new int[0];
+    private TerminalRow[] rotatedRows = new TerminalRow[0];
     TerminalRow[] mLines;
     int mTotalRows, mScreenRows, mColumns;
     private int mActiveTranscriptRows;
@@ -20,24 +21,52 @@ public final class TerminalBuffer {
     }
     void configureNative(int columns, int rows, int total, int history) {
         if (columns != mColumns || total != mTotalRows) {
-            mLines = new TerminalRow[total]; cachedNativeRows = new int[0]; preparedRevision = -1;
+            mLines = new TerminalRow[total]; cachedNativeRows = new int[0];
+            rotatedRows = new TerminalRow[0]; preparedRevision = -1;
         }
         mColumns = columns; mScreenRows = rows; mTotalRows = total; mActiveTranscriptRows = history; mScreenFirstRow = 0;
     }
     void prepareNativeRows(int from, int count) {
         from = Math.max(from, -mActiveTranscriptRows); count = Math.min(count, mScreenRows-from);
-        if (preparedRevision == nativeOwner.revision && preparedFrom == from && cachedNativeRows.length == count) return;
-        byte[] bytes = nativeOwner.rows(nativeAlternate, from, count); if (bytes == null) return;
+        boolean full = preparedRevision == -1 || cachedNativeRows.length != count;
+        if (!full && preparedRevision == nativeOwner.revision && preparedFrom == from) return;
+        byte[] bytes = nativeOwner.rows(nativeAlternate, from, count, full);
+        if (bytes == null) return;
+        java.nio.ByteBuffer input = java.nio.ByteBuffer.wrap(bytes).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+        int updates = input.getInt();
+        int rotation = input.getInt();
+        if (!full) {
+            if (rotation != 0 || preparedFrom != from) {
+                // Move cached rows to match the native viewport before replacing changed cells.
+                for (int i = 0; i < count; i++) {
+                    rotatedRows[i] = mLines[cachedNativeRows[(i + rotation) % count]];
+                }
+                for (int i = 0; i < count; i++) {
+                    mLines[cachedNativeRows[i]] = null;
+                }
+                for (int i = 0; i < count; i++) {
+                    cachedNativeRows[i] = externalToInternalRow(from + i);
+                    mLines[cachedNativeRows[i]] = rotatedRows[i];
+                }
+            }
+            for (int i = 0; i < updates; i++) {
+                int index = externalToInternalRow(input.getInt());
+                mLines[index].readNative(input);
+            }
+            preparedRevision = nativeOwner.revision; preparedFrom = from;
+            return;
+        }
         TerminalRow[] reusable = new TerminalRow[cachedNativeRows.length];
         for (int i=0; i<cachedNativeRows.length; i++) { reusable[i] = mLines[cachedNativeRows[i]]; mLines[cachedNativeRows[i]] = null; }
-        java.nio.ByteBuffer input = java.nio.ByteBuffer.wrap(bytes).order(java.nio.ByteOrder.LITTLE_ENDIAN);
-        int[] indices = new int[input.getInt()];
+        int[] indices = new int[updates];
         for (int i=0; i<indices.length; i++) {
             int external = input.getInt(); int index = externalToInternalRow(external);
             TerminalRow row = i < reusable.length && reusable[i] != null ? reusable[i] : new TerminalRow(mColumns, TextStyle.NORMAL);
             row.readNative(input); mLines[index] = row; indices[i] = index;
         }
-        cachedNativeRows = indices; preparedRevision = nativeOwner.revision; preparedFrom = from;
+        cachedNativeRows = indices;
+        if (rotatedRows.length != count) rotatedRows = new TerminalRow[count];
+        preparedRevision = nativeOwner.revision; preparedFrom = from;
     }
 
     public String getTranscriptText() { return getSelectedText(0, -mActiveTranscriptRows, mColumns, mScreenRows).trim(); }

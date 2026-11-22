@@ -9,10 +9,12 @@ void sx_search_free(std::uint8_t*, std::size_t);
 int sx_transcript_plan(const std::uint8_t*, std::size_t, SearchBuffer*);
 void sx_transcript_page(const std::uint8_t*, std::size_t, int, int*);
 using LogConsume = int (*)(void*, const std::uint8_t*, std::size_t);
-int sx_chat_log_read(int, std::uint64_t, std::uint64_t, LogConsume, void*);
-std::int64_t sx_chat_log_window_start(int, std::int64_t, int);
+using LogCheckpoint = int (*)(void*);
+int sx_chat_log_read(int, std::uint64_t, std::uint64_t, LogConsume, void*, LogCheckpoint, void*);
+std::int64_t sx_chat_log_window_start(int, std::int64_t, int, LogCheckpoint, void*);
 int sx_chat_log_cut(const std::uint8_t*, std::size_t, std::size_t, bool);
 int sx_chat_log_locate(int, std::uint64_t, std::uint64_t, const std::uint8_t*, std::size_t, std::int64_t*);
+int sx_chat_log_locate_pair(int, std::uint64_t, const std::uint8_t*, std::size_t, const std::uint8_t*, std::size_t, std::int64_t*);
 int sx_markdown_runtime(std::uint32_t, const std::uint16_t*, std::size_t, std::size_t, bool, SearchBuffer*);
 }
 namespace {
@@ -34,6 +36,19 @@ int descriptor(JNIEnv* env, jobject file) {
     return field ? env->GetIntField(file, field) : -1;
 }
 struct LogSink { JNIEnv* env; jobject sink; jmethodID accept; };
+struct ReadCheckpoint { JNIEnv* env; jobject target; jmethodID method; };
+ReadCheckpoint readCheckpoint(JNIEnv* env, jobject target) {
+    if (!target) return {env, nullptr, nullptr};
+    auto type = env->GetObjectClass(target);
+    const auto method = env->GetMethodID(type, "check", "()V");
+    env->DeleteLocalRef(type);
+    return {env, target, method};
+}
+int checkLog(void* context) noexcept {
+    auto& checkpoint = *static_cast<ReadCheckpoint*>(context);
+    checkpoint.env->CallVoidMethod(checkpoint.target, checkpoint.method);
+    return checkpoint.env->ExceptionCheck() ? -1 : 0;
+}
 int acceptLog(void* context, const std::uint8_t* data, std::size_t length) noexcept {
     auto& sink = *static_cast<LogSink*>(context);
     auto bytes = sink.env->NewByteArray(static_cast<jsize>(length));
@@ -66,11 +81,15 @@ Java_com_suixing_agent_ui_chat_NativeTranscriptJni_nativePage(JNIEnv* env, jobje
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
-Java_com_suixing_agent_data_NativeChatLogJni_nativeRead(JNIEnv* env, jobject, jobject file, jlong start, jlong end, jobject target) {
+Java_com_suixing_agent_data_NativeChatLogJni_nativeRead(JNIEnv* env, jobject, jobject file, jlong start, jlong end, jobject target, jobject check) {
     const auto fd = descriptor(env, file); if (env->ExceptionCheck()) return false;
     auto type = env->GetObjectClass(target); const auto accept = env->GetMethodID(type, "accept", "([B)V"); env->DeleteLocalRef(type);
     if (env->ExceptionCheck()) return false;
-    LogSink sink{env, target, accept}; const auto status = sx_chat_log_read(fd, start, end, acceptLog, &sink);
+    auto checkpoint = readCheckpoint(env, check);
+    if (env->ExceptionCheck()) return false;
+    LogSink sink{env, target, accept};
+    const auto status = sx_chat_log_read(fd, start, end, acceptLog, &sink,
+        checkpoint.method ? checkLog : nullptr, &checkpoint);
     if (status == 4) return false;
     if (status != 0) { failure(env, "Native committed transcript read failed."); return false; }
     return true;
@@ -84,9 +103,12 @@ Java_com_suixing_agent_data_NativeChatLogJni_nativeCut(JNIEnv* env, jobject, jby
     return sx_chat_log_cut(bytes.data(), bytes.size(), want, atStart);
 }
 extern "C" JNIEXPORT jlong JNICALL
-Java_com_suixing_agent_data_NativeChatLogJni_nativeWindowStart(JNIEnv* env, jobject, jobject file, jlong end, jint turns) {
+Java_com_suixing_agent_data_NativeChatLogJni_nativeWindowStart(JNIEnv* env, jobject, jobject file, jlong end, jint turns, jobject check) {
     const auto fd = descriptor(env, file);
-    return env->ExceptionCheck() ? -1 : sx_chat_log_window_start(fd, end, turns);
+    if (env->ExceptionCheck()) return -1;
+    auto checkpoint = readCheckpoint(env, check);
+    if (env->ExceptionCheck()) return -1;
+    return sx_chat_log_window_start(fd, end, turns, checkpoint.method ? checkLog : nullptr, &checkpoint);
 }
 extern "C" JNIEXPORT jlong JNICALL
 Java_com_suixing_agent_data_NativeChatLogJni_nativeLocate(JNIEnv* env, jobject, jobject file, jlong start, jlong end, jbyteArray request) {
@@ -98,6 +120,28 @@ Java_com_suixing_agent_data_NativeChatLogJni_nativeLocate(JNIEnv* env, jobject, 
     std::int64_t output = -1;
     if (sx_chat_log_locate(fd, start, end, bytes.data(), bytes.size(), &output) != 0) failure(env, "Native transcript offset scan failed.");
     return output;
+}
+extern "C" JNIEXPORT jlongArray JNICALL
+Java_com_suixing_agent_data_NativeChatLogJni_nativeLocatePair(JNIEnv* env, jobject, jobject file, jlong end, jbyteArray first, jbyteArray last) {
+    const auto fd = descriptor(env, file);
+    if (env->ExceptionCheck()) return nullptr;
+    const auto firstLength = env->GetArrayLength(first);
+    const auto lastLength = env->GetArrayLength(last);
+    std::vector<std::uint8_t> firstBytes(static_cast<std::size_t>(firstLength));
+    std::vector<std::uint8_t> lastBytes(static_cast<std::size_t>(lastLength));
+    env->GetByteArrayRegion(first, 0, firstLength, reinterpret_cast<jbyte*>(firstBytes.data()));
+    if (env->ExceptionCheck()) return nullptr;
+    env->GetByteArrayRegion(last, 0, lastLength, reinterpret_cast<jbyte*>(lastBytes.data()));
+    if (env->ExceptionCheck()) return nullptr;
+    std::int64_t offsets[2];
+    if (sx_chat_log_locate_pair(fd, end, firstBytes.data(), firstBytes.size(), lastBytes.data(), lastBytes.size(), offsets) != 0) {
+        failure(env, "Native transcript checkpoint scan failed.");
+        return nullptr;
+    }
+    const jlong values[2] = {offsets[0], offsets[1]};
+    const auto result = env->NewLongArray(2);
+    if (result) env->SetLongArrayRegion(result, 0, 2, values);
+    return result;
 }
 extern "C" JNIEXPORT jbyteArray JNICALL
 Java_com_suixing_agent_ui_chat_markdown_NativeMarkdownJni_nativeRuntime(JNIEnv* env, jobject, jint op, jstring source, jint from, jint parameter, jboolean flag) {

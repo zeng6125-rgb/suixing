@@ -1,5 +1,6 @@
 package com.suixing.agent.data
 
+import com.suixing.agent.ui.settings.prepareUsageViewData
 import com.suixing.agent.ui.settings.usageHeatLevel
 import com.suixing.agent.ui.settings.usageHeatWeeks
 import org.junit.Assert.*
@@ -26,6 +27,25 @@ class UsageAccuracyTest {
         assertEquals(5, result.days.count { it.reported + it.unreported == 0L })
         assertEquals(30L, result.usage.tokens.total)
         assertEquals(30L, result.models.sumOf { it.tokens.total })
+    }
+
+    @Test fun preparedViewRefreshesForNewUsageOrCalendarDay() {
+        val today = LocalDate.parse("2026-11-07")
+        val first = message("a", "2026-11-01", 100)
+        val original = snapshot(first)
+        val view = prepareUsageViewData(original, today, null)
+
+        assertSame(view, prepareUsageViewData(original, today, view))
+        assertEquals(100L, view.windows.getValue(7).usage.tokens.total)
+
+        val nextDay = prepareUsageViewData(original, today.plusDays(1), view)
+        assertEquals(0L, nextDay.windows.getValue(7).usage.tokens.total)
+        assertEquals(100L, nextDay.heatmap.usage.tokens.total)
+
+        val updated = snapshot(first, message("b", "2026-11-07", 50, "other"))
+        val next = prepareUsageViewData(updated, today, view)
+        assertEquals(150L, next.windows.getValue(7).usage.tokens.total)
+        assertEquals(150L, next.all.tokens.total)
     }
 
     @Test fun unknownResponsesHaveCoverageButNeverFabricateTokenUsage() {
@@ -77,6 +97,30 @@ class UsageAccuracyTest {
         assertEquals(2L * Int.MAX_VALUE + 100, result.totals.total)
         assertEquals(200L, result.totals.cached)
         assertEquals(40L, result.totals.reasoning)
+    }
+
+    @Test fun batchedWindowsPreserveBoundariesAndModelRanking() {
+        val end = LocalDate.parse("2026-11-21")
+        val days = (0..120).map { end.minusDays(it.toLong()).toString() }
+        val tracked = UsageBucket(TokenTally(prompt = 100, completion = 40, reasoning = 2, cached = 1), 1, 0)
+        val unreported = UsageBucket(unreported = 1)
+        val snapshot = UsageSnapshot(chats = mapOf(
+            "main" to ChatUsage(dailyModels = mapOf(
+                days[0] to mapOf("z" to tracked, "unknown" to unreported),
+                days[6] to mapOf("a" to tracked),
+                days[7] to mapOf("w" to tracked),
+                days[29] to mapOf("x" to unreported),
+                days[30] to mapOf("x" to tracked),
+                days[89] to mapOf("edge" to tracked),
+                days[90] to mapOf("outside" to tracked),
+            )),
+            "child/main/agent" to ChatUsage(dailyModels = mapOf(days[0] to mapOf("unknown" to unreported))),
+            "deleted" to ChatUsage(deletedAt = 123L, dailyModels = mapOf(days[0] to mapOf("a" to unreported))),
+            "legacy" to ChatUsage(days = mapOf(days[0] to TokenTally(90)), models = mapOf("old" to TokenTally(90))),
+        ))
+        val counts = listOf(7, 30, 90)
+        assertEquals(counts.associateWith { usageWindow(snapshot, it, end) }, usageWindows(snapshot, counts, end))
+        assertEquals(counts.associateWith { usageWindow(UsageSnapshot(), it, end) }, usageWindows(UsageSnapshot(), counts, end))
     }
 
     @Test fun heatmapPadsWeekdaysWithoutInventingDatesOrFutureActivity() {

@@ -1,10 +1,10 @@
 package com.suixing.agent.data
 
-import com.suixing.agent.core.decodeCoreObject
 import com.suixing.agent.core.encodeCoreBytes
 import com.suixing.agent.core.AtomicFiles
 import java.io.File
 import java.io.IOException
+import java.nio.file.Files
 import java.security.MessageDigest
 import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.Serializable
@@ -20,7 +20,8 @@ internal class DeletedUsageStore(private val directory: File) {
         val entries = linkedMapOf<String, ChatUsage>()
         for (file in files) {
             try {
-                val entry = json.decodeCoreObject(DeletedUsageEntry.serializer(), file.readText())
+                val text = Files.readAllBytes(file.toPath()).decodeToString()
+                val entry = json.decodeFromString(DeletedUsageEntry.serializer(), text)
                 require(entry.id.isNotBlank() && entry.usage.deletedAt > 0L)
                 entries[entry.id] = entry.usage
             } catch (cancelled: CancellationException) {

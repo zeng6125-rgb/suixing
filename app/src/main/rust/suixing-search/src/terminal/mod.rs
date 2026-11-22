@@ -40,6 +40,27 @@ fn bytes(output: &mut SearchBuffer, data: Vec<u8>) {
 fn put32(bytes: &mut Vec<u8>, value: i32) {
     bytes.extend_from_slice(&value.to_le_bytes());
 }
+
+fn put_terminal_characters(bytes: &mut Vec<u8>, units: &[u16]) {
+    #[cfg(target_endian = "little")]
+    // The row wire format uses little-endian UTF-16 units.
+    bytes.extend_from_slice(unsafe {
+        slice::from_raw_parts(units.as_ptr().cast(), std::mem::size_of_val(units))
+    });
+    #[cfg(target_endian = "big")]
+    bytes.extend(units.iter().flat_map(|unit| unit.to_le_bytes()));
+}
+
+fn put_terminal_styles(bytes: &mut Vec<u8>, styles: &[i64]) {
+    #[cfg(target_endian = "little")]
+    // Each style is a little-endian i64 with no padding.
+    bytes.extend_from_slice(unsafe {
+        slice::from_raw_parts(styles.as_ptr().cast(), std::mem::size_of_val(styles))
+    });
+    #[cfg(target_endian = "big")]
+    bytes.extend(styles.iter().flat_map(|style| style.to_le_bytes()));
+}
+
 fn text(bytes: &mut Vec<u8>, value: Option<&[u16]>) {
     put32(bytes, value.map_or(-1, |text| text.len() as i32));
     if let Some(value) = value {
@@ -49,8 +70,10 @@ fn text(bytes: &mut Vec<u8>, value: Option<&[u16]>) {
     }
 }
 
-fn state(emulator: &mut Emulator) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(1200);
+fn state(emulator: &mut Emulator, force_palette: bool) -> Vec<u8> {
+    // Palette changes already notify Java through the color event.
+    let include_palette = force_palette || emulator.events.iter().any(|event| event.kind == 3);
+    let mut bytes = Vec::with_capacity(if include_palette { 1120 } else { 80 });
     for field in [
         emulator.rows,
         emulator.columns,
@@ -75,8 +98,11 @@ fn state(emulator: &mut Emulator) -> Vec<u8> {
             put32(&mut bytes, field);
         }
     }
-    for color in emulator.colors.current {
-        put32(&mut bytes, color);
+    put32(&mut bytes, i32::from(include_palette));
+    if include_palette {
+        for color in emulator.colors.current {
+            put32(&mut bytes, color);
+        }
     }
     put32(&mut bytes, emulator.events.len() as i32);
     for event in emulator.events.drain(..) {
@@ -152,7 +178,7 @@ pub unsafe extern "C" fn sx_terminal_step(
             10 => emulator.mouse(args[0], args[1], args[2], args[3] != 0),
             _ => {}
         }
-        bytes(unsafe { &mut *output }, state(emulator));
+        bytes(unsafe { &mut *output }, state(emulator, op == 9));
     }));
     emulator.callbacks = None;
     if result.is_ok() { 0 } else { 1 }
@@ -164,6 +190,7 @@ pub unsafe extern "C" fn sx_terminal_rows(
     alternate: bool,
     from: i32,
     count: i32,
+    full: bool,
     output: *mut SearchBuffer,
 ) -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
@@ -173,10 +200,34 @@ pub unsafe extern "C" fn sx_terminal_rows(
         } else {
             &mut emulator.main
         };
-        let mut result = Vec::new();
-        put32(&mut result, count);
-        for external in from..from + count {
+        let mut rendered = std::mem::take(&mut buffer.rendered_rows);
+        let full = full || rendered.len() != count as usize;
+        rendered.truncate(count as usize);
+        let mut rotation = 0;
+        if !full && count > 0 {
+            let scroll =
+                (buffer.first_row + from - buffer.rendered_first_row).rem_euclid(buffer.total_rows);
+            if scroll < count {
+                rotation = scroll;
+            } else if buffer.total_rows - scroll < count {
+                rotation = count - (buffer.total_rows - scroll);
+            }
+            rendered.rotate_left(rotation as usize);
+        }
+        let mut result = vec![0; 4];
+        put32(&mut result, rotation);
+        let mut updates = 0_i32;
+        for (index, external) in (from..from + count).enumerate() {
             let row = buffer.line(external);
+            if let Some(previous) = rendered.get_mut(index) {
+                if !full && row.same_rendering(previous) {
+                    continue;
+                }
+                previous.clone_from(row);
+            } else {
+                rendered.push(row.clone());
+            }
+            updates += 1;
             for field in [
                 external,
                 row.used as i32,
@@ -185,16 +236,12 @@ pub unsafe extern "C" fn sx_terminal_rows(
             ] {
                 put32(&mut result, field);
             }
-            for unit in &row.text[..row.used] {
-                result.extend_from_slice(&unit.to_le_bytes());
-            }
+            put_terminal_characters(&mut result, &row.text[..row.used]);
             put32(&mut result, i32::from(!row.styles.is_empty()));
             if row.styles.is_empty() {
                 result.extend_from_slice(&row.uniform_style.to_le_bytes());
             } else {
-                for style in &row.styles {
-                    result.extend_from_slice(&style.to_le_bytes());
-                }
+                put_terminal_styles(&mut result, &row.styles);
             }
             let widths_start = result.len();
             result.resize(widths_start + row.used, if row.complex { 0 } else { 1 });
@@ -207,6 +254,9 @@ pub unsafe extern "C" fn sx_terminal_rows(
                 }
             }
         }
+        buffer.rendered_rows = rendered;
+        buffer.rendered_first_row = buffer.first_row + from;
+        result[..4].copy_from_slice(&updates.to_le_bytes());
         bytes(unsafe { &mut *output }, result);
     }))
     .map_or(1, |_| 0)
@@ -291,7 +341,8 @@ pub unsafe extern "C" fn sx_terminal_paste(
     catch_unwind(AssertUnwindSafe(|| {
         let emulator = unsafe { &mut *handle.cast::<Emulator>() };
         emulator.paste(unsafe { slice::from_raw_parts(data, len) });
-        bytes(unsafe { &mut *output }, state(emulator));
+        // Paste does not take the Java theme colors supplied by step.
+        bytes(unsafe { &mut *output }, state(emulator, true));
     }))
     .map_or(1, |_| 0)
 }

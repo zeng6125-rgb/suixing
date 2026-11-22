@@ -9,7 +9,9 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import com.suixing.agent.ui.drawer.LocalDrawerGestureState
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.collectLatest
 
 /** One scroll policy for one conversation. Durable positions belong to ConversationViewport. */
@@ -46,16 +48,32 @@ fun rememberChatScroll(
     initialFollowing: Boolean = true,
 ): ChatScroll {
     val scroll = remember(listState) { ChatScroll(listState, conversationId.toString(), initialFollowing) }
-    LaunchedEffect(listState) {
+    val drawer = LocalDrawerGestureState.current
+    val drawerGenerationAtMount = remember(scroll, drawer) { drawer?.gestureGeneration }
+    LaunchedEffect(scroll, drawer) {
+        if (drawer == null) return@LaunchedEffect
         snapshotFlow {
-            scroll.allowBottomResume && !listState.canScrollForward && !listState.isScrollInProgress && !scroll.nestedScrolling() &&
+            drawer.gestureGeneration to (drawer.homeShieldActive && !scroll.stickToBottom)
+        }.collect { (generation, readingBehindDrawer) ->
+            // Drawer/IME geometry cannot turn reading into following. The next vertical
+            // transcript gesture or explicit latest request re-enables bottom resume.
+            // The generation retains an open/close that finishes before the next frame.
+            if (!scroll.stickToBottom && (readingBehindDrawer || generation != drawerGenerationAtMount)) {
+                scroll.allowBottomResume = false
+            }
+        }
+    }
+    LaunchedEffect(listState, drawer) {
+        snapshotFlow {
+            !scroll.stickToBottom && drawer?.homeShieldActive != true && scroll.allowBottomResume && !listState.canScrollForward && !listState.isScrollInProgress && !scroll.nestedScrolling() &&
                 !scroll.restoring && !pressedNow() && !guardNow()
         }.collectLatest { reachedBottom ->
             if (!reachedBottom) return@collectLatest
             val index = listState.firstVisibleItemIndex
+            val drawerGeneration = drawer?.gestureGeneration
             // Keep the existing overscroll/selection settling interval.
             delay(420)
-            if (scroll.allowBottomResume && !listState.canScrollForward && !listState.isScrollInProgress && !scroll.nestedScrolling() && !scroll.restoring &&
+            if (!scroll.stickToBottom && drawer?.gestureGeneration == drawerGeneration && scroll.allowBottomResume && !listState.canScrollForward && !listState.isScrollInProgress && !scroll.nestedScrolling() && !scroll.restoring &&
                 !pressedNow() && !guardNow() && listState.firstVisibleItemIndex == index) {
                 scroll.stickToBottom = true
                 trace("stick=true reason=reached-bottom")

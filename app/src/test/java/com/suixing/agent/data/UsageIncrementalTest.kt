@@ -5,6 +5,7 @@ import io.mockk.every
 import io.mockk.mockk
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -133,6 +134,10 @@ class UsageIncrementalTest {
         val bytesAfterFirst = afterFirst.chats.getValue("c1").scannedBytes
         assertTrue("第一次扫完要留下字节水位", bytesAfterFirst > 0)
 
+        val unchanged = usage.refresh()
+        assertSame(afterFirst.chats.getValue("c1"), unchanged.chats.getValue("c1"))
+        assertSame(afterFirst, unchanged)
+
         // 再追加两条（追加写，代数不变）。
         val second = first + listOf(msg("m2", 11), msg("m3", 13))
         store.save(store.readMeta("c1")!!, second)
@@ -143,6 +148,46 @@ class UsageIncrementalTest {
         assertEquals("水位是绝对下标", 4, usage2.scanned)
         assertTrue("字节水位要往前走", usage2.scannedBytes > bytesAfterFirst)
         assertEquals("代数没变（只是追加）", afterFirst.chats.getValue("c1").scannedGen, usage2.scannedGen)
+    }
+
+    @Test
+    fun `an unchanged watermark still reports a missing log`() = runBlocking {
+        val dir = tmp.newFolder("missing-log")
+        val store = ChatStore(File(dir, "chats"))
+        val messages = listOf(msg("m0", 5))
+        val meta = store.append(store.newMeta(Conversation(id = "chat", title = "test", messages = messages)), messages)
+        val usage = UsageStore(contextFor(dir))
+        val first = usage.refresh()
+        assertTrue(checkNotNull(store.logFileOf(meta)).delete())
+
+        val refreshed = usage.refresh()
+
+        assertTrue(refreshed.issues.isNotEmpty())
+        assertEquals(first.chats.getValue("chat"), refreshed.chats.getValue("chat"))
+    }
+
+    @Test
+    fun `archived usage keeps legacy defaults and reports a damaged record`() = runBlocking {
+        val dir = tmp.newFolder("archived-usage")
+        val archive = File(dir, "deleted-usage").apply { mkdirs() }
+        File(archive, "legacy.json").writeText("""
+            {
+              "id":"deleted-chat","zoneId":"UTC",
+              "usage":{"deletedAt":99,"dailyModels":{"2026-03-01":{"m":{"reported":1,
+                "tokens":{"prompt":5,"completion":7}}}}},
+              "futureField":{"metadata":[true,null]}
+            }
+        """.trimIndent())
+        val damaged = File(archive, "damaged.json").apply { writeText("{ truncated") }
+
+        val refreshed = UsageStore(contextFor(dir)).refresh()
+
+        assertEquals(12L, refreshed.deletedCoverage.tokens.total)
+        assertEquals(1L, refreshed.deletedCoverage.reported)
+        assertEquals(0L, refreshed.deletedCoverage.unreported)
+        assertEquals(setOf("deleted-chat"), refreshed.chats.keys)
+        assertEquals(1, refreshed.issues.size)
+        assertEquals("{ truncated", damaged.readText())
     }
 
     @Test

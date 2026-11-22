@@ -41,7 +41,7 @@ class DrawerGestureInteractionTest {
         val blocker = scope.launch(start = CoroutineStart.UNDISPATCHED) {
             state.progress.animateTo(0.9f, tween(durationMillis = 10_000))
         }
-        val progress = accumulator.dragBy(generation, 40f)!!
+        val progress = accumulator.dragBy(generation, 40f)
         val move = scope.launch(start = CoroutineStart.UNDISPATCHED) {
             state.applyGestureFrame(session, progress)
         }
@@ -60,12 +60,14 @@ class DrawerGestureInteractionTest {
         for (initial in listOf(DrawerValue.Open, DrawerValue.Closed)) {
             state.snapTo(initial)
             val wasOpen = state.isOpen
-            val progress = if (wasOpen) 0.6f else 0.4f
             val session = state.beginGesture()
+            val drag = DrawerDragAccumulator()
+            val generation = drag.begin(state.visualProgress.value, 300f)
+            val progress = drag.dragBy(generation, if (wasOpen) -90f else 90f)
             state.applyGestureFrame(session, progress)
             assertTrue(state.finishGesture(session))
 
-            val target = drawerDragTarget(wasOpen, progress, 0f)
+            val target = drawerDragTarget(drag.finish(generation)!!.openByDistance, 0f)
             val settle = scope.launch(start = CoroutineStart.UNDISPATCHED) {
                 state.settleGesture(session, target, DRAWER_SPEC, releaseProgress = progress)
             }
@@ -80,12 +82,50 @@ class DrawerGestureInteractionTest {
     }
 
     @Test
+    fun `a fast release finishes at the first frame that reaches its anchor`() = withHarness {
+        for (opening in listOf(true, false)) {
+            state.snapTo(if (opening) DrawerValue.Closed else DrawerValue.Open)
+            val session = state.beginGesture()
+            state.applyGestureFrame(session, if (opening) 0.98f else 0.02f)
+            assertTrue(state.finishGesture(session))
+            val settle = scope.launch(start = CoroutineStart.UNDISPATCHED) {
+                state.settleGesture(
+                    session,
+                    if (opening) DrawerValue.Open else DrawerValue.Closed,
+                    DRAWER_SPEC,
+                    initialVelocity = if (opening) 8f else -8f,
+                )
+            }
+            pumpFrames(3)
+            assertEquals(if (opening) 1f else 0f, state.visualProgress.value, 0.0001f)
+            assertTrue("the panel has hit the anchor, so its motion must be finished", settle.isCompleted)
+            assertEquals(opening, state.isOpen)
+            assertEquals(opening, state.homeShieldActive)
+        }
+    }
+
+    @Test
+    fun `reversing near the edge still reaches the requested anchor`() = withHarness {
+        state.progress.snapTo(0.02f)
+        val opening = scope.launch(start = CoroutineStart.UNDISPATCHED) {
+            state.animateTo(DrawerValue.Open, DRAWER_SPEC, initialVelocity = -30f)
+        }
+        pumpFrames(3)
+        assertFalse(opening.isCompleted)
+        assertTrue(state.homeShieldActive)
+        pumpFrames(90)
+        assertTrue(opening.isCompleted)
+        assertTrue(state.isOpen)
+        assertEquals(1f, state.visualProgress.value, 0.0001f)
+    }
+
+    @Test
     fun `a short fast swipe on the moving shield settles closed`() = withHarness {
         state.snapTo(DrawerValue.Open)
         val session = state.beginGesture()
         val accumulator = DrawerDragAccumulator()
         val generation = accumulator.begin(progress = 1f, widthPx = 1_000f)
-        val tracker = DrawerPointerVelocity()
+        val tracker = DrawerPointerVelocity(touchSlop = 8f)
         for (sample in 0..5) {
             val position = Offset(50f, 0f)
             tracker.trackDrawerPointer(PointerInputChange(
@@ -107,7 +147,7 @@ class DrawerGestureInteractionTest {
         assertEquals(0.9f, release.progress, 0.0001f)
         val velocity = tracker.calculateVelocity().x
         assertTrue("the shield must preserve leftward fling velocity", velocity < -800f)
-        val target = drawerDragTarget(state.isOpen, release.progress, velocity)
+        val target = drawerDragTarget(release.openByDistance, velocity)
         val settle = scope.launch(start = CoroutineStart.UNDISPATCHED) {
             state.settleGesture(session, target, DRAWER_SPEC,
                 initialVelocity = velocity / 1_000f, releaseProgress = release.progress)
@@ -306,7 +346,7 @@ class DrawerGestureInteractionTest {
         assertTrue("the reverse owner keeps the shield mounted", state.homeShieldActive)
         val secondAccumulator = DrawerDragAccumulator()
         val secondGeneration = secondAccumulator.begin(progress = 0.7f, widthPx = 200f)
-        val reverseProgress = secondAccumulator.dragBy(secondGeneration, -100f)!!
+        val reverseProgress = secondAccumulator.dragBy(secondGeneration, -100f)
         val newFrame = scope.launch(start = CoroutineStart.UNDISPATCHED) {
             state.applyGestureFrame(second, reverseProgress)
         }
@@ -346,12 +386,12 @@ class DrawerGestureInteractionTest {
             val accumulator = DrawerDragAccumulator()
             val first = state.beginGesture()
             val firstGeneration = accumulator.begin(progress = 0.1f, widthPx = 200f)
-            state.applyGestureFrame(first, accumulator.dragBy(firstGeneration, 20f)!!)
+            state.applyGestureFrame(first, accumulator.dragBy(firstGeneration, 20f))
             assertEquals(0.2f, state.visualProgress.value, 0.0001f)
 
             val second = state.beginGesture()
             val secondGeneration = accumulator.begin(progress = 0.2f, widthPx = 200f)
-            val secondProgress = accumulator.dragBy(secondGeneration, 40f)!!
+            val secondProgress = accumulator.dragBy(secondGeneration, 40f)
             state.applyGestureFrame(first, 0.9f)
             state.applyGestureFrame(second, secondProgress)
             assertEquals(secondProgress, state.visualProgress.value, 0.0001f)

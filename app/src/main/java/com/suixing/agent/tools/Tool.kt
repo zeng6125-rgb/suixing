@@ -14,11 +14,14 @@ import com.suixing.agent.data.TodoItem
 import com.suixing.agent.data.TodoStore
 import com.suixing.agent.data.UserProfileStore
 import com.suixing.agent.skills.SkillStore
+import com.suixing.agent.ui.browser.browserOpenRequests
 import com.suixing.agent.voice.Speaker
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -210,6 +213,7 @@ class ToolRegistry private constructor() {
         add(ScheduleTools(schedules, scheduleWriter))
         add(SkillTools(skills))
         add(WebTools(context, settings))
+        add(BrowserTools { target -> withContext(Dispatchers.Main.immediate) { browserOpenRequests.open(target) } })
         add(VoiceTools(speaker))
         add(AssistantTools())
         add(SessionTools())

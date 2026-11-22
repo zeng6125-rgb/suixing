@@ -27,6 +27,7 @@ import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.yield
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotSame
 import org.junit.Assert.assertSame
 import org.junit.Test
 
@@ -115,6 +116,36 @@ class ChatTranscriptProjectionInputsTest {
         assertEquals(60L, projection.runElapsed.getValue("run-${total - 1}"))
     }
 
+    @Test fun switchingBackReusesTheProjectedTranscriptInComposition() = withProjection(elapsedState()) {
+        val source = state
+        val opened = projection
+        state = ChatUiState(
+            conversationId = "other", loading = false, messagesRevision = 1,
+            messages = listOf(StoredMessage("other-question", Roles.USER, "Another conversation")),
+        )
+        frames(3)
+        assertEquals(listOf("other-question"), projection.visible.map { it.message.id })
+
+        state = source.copy(messagesRevision = 2)
+        frames(3)
+        assertSame(opened.viewport, projection.viewport)
+        assertSame(opened.visible, projection.visible)
+        assertSame(opened.rowKeys, projection.rowKeys)
+        assertSame(opened.rowKeyIndices, projection.rowKeyIndices)
+    }
+
+    @Test fun receivingTheStoredPositionKeepsTheAlreadyProjectedTranscript() = withProjection(elapsedState()) {
+        storageReady = false
+        frames(3)
+        val before = projection
+        storageReady = true
+        frames(3)
+
+        assertNotSame(before.viewport, projection.viewport)
+        assertSame(before.visible, projection.visible)
+        assertSame(before.rowKeys, projection.rowKeys)
+    }
+
     private fun elapsedState(): ChatUiState {
         val total = PAGE_TURNS + 2
         return ChatUiState(
@@ -157,6 +188,7 @@ class ChatTranscriptProjectionInputsTest {
 
     private class Harness(scope: CoroutineScope, initial: ChatUiState) {
         var state by mutableStateOf(initial, referentialEqualityPolicy())
+        var storageReady by mutableStateOf(true)
         lateinit var projection: ChatTranscriptProjection
             private set
         private val configuration = Configuration().apply { screenWidthDp = 400; screenHeightDp = 800 }
@@ -174,7 +206,7 @@ class ChatTranscriptProjectionInputsTest {
                     LocalConfiguration provides configuration,
                     LocalDensity provides Density(1f),
                 ) {
-                    val current = rememberChatTranscriptProjection(state, true, null, false)
+                    val current = rememberChatTranscriptProjection(state, storageReady, null, false)
                     SideEffect { projection = current }
                 }
             }

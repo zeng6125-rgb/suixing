@@ -12,6 +12,8 @@ pub(super) struct Buffer {
     pub columns: i32,
     pub transcript_rows: i32,
     pub first_row: i32,
+    pub rendered_rows: Vec<Row>,
+    pub rendered_first_row: i32,
 }
 
 impl Buffer {
@@ -23,6 +25,8 @@ impl Buffer {
             columns,
             transcript_rows: 0,
             first_row: 0,
+            rendered_rows: Vec::new(),
+            rendered_first_row: 0,
         };
         result.block_set(0, 0, columns, screen_rows, 32, NORMAL);
         result
