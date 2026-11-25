@@ -173,10 +173,10 @@ private fun UsageDayDetail(day: DayUsage, days: List<DayUsage>, onSelect: (Strin
                 style = SettingsStyle.badge, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         IconButton(enabled = index > 0, onClick = { onSelect(days[index - 1].date) }, colors = actionIconButtonColors()) {
-            Icon(ImageVector.vectorResource(R.drawable.ic_chevron_left), "前一天")
+            Icon(com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_chevron_left), "前一天")
         }
         IconButton(enabled = index >= 0 && index < days.lastIndex, onClick = { onSelect(days[index + 1].date) }, colors = actionIconButtonColors()) {
-            Icon(ImageVector.vectorResource(R.drawable.ic_chevron_right), "后一天")
+            Icon(com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_chevron_right), "后一天")
         }
     }
 }

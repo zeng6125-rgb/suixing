@@ -18,8 +18,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Button
-import androidx.compose.material3.CircularProgressIndicator
+import com.suixing.agent.ui.components.SuixingButton
+import com.suixing.agent.ui.components.SuixingCircularProgressIndicator
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import com.suixing.agent.ui.components.CompactOutlinedTextField as OutlinedTextField
@@ -114,8 +114,8 @@ fun ProfileScreen(onBack: () -> Unit) {
                     modifier = Modifier.weight(1f),
                 )
                 if (summarizing) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(18.dp),
+                    SuixingCircularProgressIndicator(
+                        size = 18.dp,
                         strokeWidth = 2.dp,
                     )
                 } else {
@@ -191,7 +191,7 @@ fun ProfileScreen(onBack: () -> Unit) {
                         )
                     }
                 }
-                Button(
+                SuixingButton(
                     enabled = !over,
                     onClick = {
                         scope.launch {

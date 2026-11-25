@@ -305,7 +305,7 @@ class FloatConsoleService : Service() {
                 // Read once, as the console appears: the theme belongs to the user, and
                 // re-reading it mid-run would repaint a window they are looking at.
                 val settings = Core.settings.current()
-                palette = paletteFor(settings.themeMode, settings.paletteMode)
+                palette = paletteFor(settings.uiTheme, settings.themeMode, settings.paletteMode)
                 buildConsole()
                 observeRun()
                 scope.launch {

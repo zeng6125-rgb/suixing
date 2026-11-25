@@ -247,7 +247,7 @@ private fun KeyPill(label: String?, spoken: String, enabled: Boolean, active: Bo
         ) {
             if (label == null) {
                 Icon(
-                    imageVector = ImageVector.vectorResource(R.drawable.ic_keyboard),
+                    imageVector = com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_keyboard),
                     contentDescription = null,
                     tint = ink,
                     modifier = Modifier.size(Glyph),

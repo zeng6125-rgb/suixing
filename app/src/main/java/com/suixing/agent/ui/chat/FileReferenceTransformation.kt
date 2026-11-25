@@ -14,13 +14,18 @@ internal class FileReferenceTransformation(
     private val commandEnd: Int? = null,
 ) : VisualTransformation {
     override fun filter(text: AnnotatedString): TransformedText {
-        if (commandEnd == null && '@' !in text.text) {
-            return TransformedText(text, OffsetMapping.Identity)
+        val references = fileReferences(text.text)
+        if (references.isEmpty()) {
+            val displayed = if (commandEnd == null) text else buildAnnotatedString {
+                append(text)
+                addStyle(SpanStyle(color = color), 0, commandEnd)
+            }
+            return TransformedText(displayed, OffsetMapping.Identity)
         }
         val segments = ArrayList<ReferenceOffsetSegment>()
         var source = 0
         val displayed = buildAnnotatedString {
-            for (reference in fileReferences(text.text)) {
+            for (reference in references) {
                 if (source < reference.start) {
                     val before = length
                     append(text.subSequence(source, reference.start))

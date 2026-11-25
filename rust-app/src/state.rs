@@ -35,8 +35,10 @@ impl SettingsResetScope {
         match self {
             Self::Appearance => {
                 let appearance = &mut settings.behavior;
+                appearance.ui_theme = defaults.ui_theme;
                 appearance.theme_mode = defaults.theme_mode;
                 appearance.palette_mode = defaults.palette_mode;
+                appearance.font_preset = defaults.font_preset;
                 appearance.font_scale = defaults.font_scale;
                 appearance.bubble_width = defaults.bubble_width;
                 appearance.corner_scale = defaults.corner_scale;

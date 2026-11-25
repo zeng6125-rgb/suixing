@@ -28,7 +28,7 @@ import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
 import com.suixing.agent.MainActivity
 import com.suixing.agent.core.Core
-import com.suixing.agent.ui.theme.AppearancePalette
+import com.suixing.agent.ui.theme.resolvedScheme
 import com.suixing.agent.tools.ToolResult
 import com.suixing.agent.terminal.TerminalCaller
 import com.suixing.agent.virtualscreen.VirtualScreenManager
@@ -266,13 +266,13 @@ object TouchFx {
      *
      * 关掉的那一刻要**立刻**熄灯，不能等下一次 tick（最长一秒）—— 所以收集到变化就重算一次。
      */
-    /** 当前配色的 primary 转 ARGB；themeMode: 0=跟随系统, 1=浅色, 2=深色。 */
-    private fun brandColorFor(themeMode: Int, paletteMode: Int): Int {
+    /** 当前主题配色的 primary 转 ARGB；themeMode: 0=跟随系统, 1=浅色, 2=深色。 */
+    private fun brandColorFor(uiTheme: Int, themeMode: Int, paletteMode: Int): Int {
         val night = (android.content.res.Resources.getSystem().configuration.uiMode and
             android.content.res.Configuration.UI_MODE_NIGHT_MASK) ==
             android.content.res.Configuration.UI_MODE_NIGHT_YES
         val dark = themeMode == 2 || (themeMode == 0 && night)
-        return AppearancePalette.fromId(paletteMode).scheme(dark).primary.toArgb()
+        return resolvedScheme(uiTheme, paletteMode, dark).primary.toArgb()
     }
 
     private fun watchSettings() {
@@ -284,9 +284,9 @@ object TouchFx {
             // 而且没有任何迹象。失败就写一行 trace，让人能从日志里看出来。
             runCatching {
                 Core.settings.flow.collect { s ->
-                    // 边缘光跟当前配色的 primary，不再留一套固定墨绿。
-                    fxBrandColor = brandColorFor(s.themeMode, s.paletteMode)
-                    appContext?.let { UiOperationOverlay.setAppearance(it, s.themeMode, s.paletteMode) }
+                    // 边缘光跟当前主题配色的 primary，不再留一套固定墨绿。
+                    fxBrandColor = brandColorFor(s.uiTheme, s.themeMode, s.paletteMode)
+                    appContext?.let { UiOperationOverlay.setAppearance(it, s.uiTheme, s.themeMode, s.paletteMode) }
                     val changed = !feedbackSettingsReady || edgeLightOn != s.edgeLight ||
                         edgeLightInForeground != s.edgeLightInForeground ||
                         promptOn != s.uiAutomationPrompt || promptInForeground != s.uiAutomationPromptInForeground

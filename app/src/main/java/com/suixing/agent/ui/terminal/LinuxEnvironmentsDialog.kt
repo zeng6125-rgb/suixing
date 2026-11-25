@@ -11,6 +11,8 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.suixing.agent.core.Core
 import com.suixing.agent.terminal.*
+import com.suixing.agent.ui.components.SuixingDialog
+import com.suixing.agent.ui.components.SuixingLinearProgressIndicator
 import kotlinx.coroutines.launch
 
 @Composable
@@ -24,15 +26,26 @@ internal fun LinuxEnvironmentsDialog(
     var removing by remember { mutableStateOf<LinuxDistro?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     removing?.let { distro ->
-        AlertDialog(onDismissRequest = { removing = null }, title = { Text("移除 " + distro.title + "？") },
+        SuixingDialog(
+            onDismissRequest = { removing = null },
+            title = { Text("移除 " + distro.title + "？") },
             text = { Text("将删除该环境内的软件和 /root 文件；共享 /workspace 中的项目会保留。") },
-            confirmButton = { TextButton(onClick = {
-                removing = null
-                scope.launch { runCatching { Core.terminals.removeLinux(distro) }.onFailure { error = it.message } }
-            }) { Text("移除") } },
-            dismissButton = { TextButton(onClick = { removing = null }) { Text("取消") } })
+            confirmButton = { dialog ->
+                TextButton(onClick = {
+                    dialog.closeThen {
+                        removing = null
+                        scope.launch { runCatching { Core.terminals.removeLinux(distro) }.onFailure { error = it.message } }
+                    }
+                }) { Text("移除") }
+            },
+            dismissButton = { dialog ->
+                TextButton(onClick = { dialog.closeThen { removing = null } }) { Text("取消") }
+            },
+        )
     }
-    AlertDialog(onDismissRequest = onDismiss, title = { Text("可选 Linux 环境") },
+    SuixingDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("可选 Linux 环境") },
         text = {
             Column(Modifier.fillMaxWidth().heightIn(max = 520.dp).verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -63,10 +76,14 @@ internal fun LinuxEnvironmentsDialog(
                             LinuxPhase.CHECKING -> "正在检查本机运行兼容性"
                             else -> "正在移除"
                         }, style = MaterialTheme.typography.bodySmall)
-                        if (state.phase == LinuxPhase.DOWNLOADING)
-                            LinearProgressIndicator(progress = { (state.bytes.toFloat() / distro.downloadBytes).coerceIn(0f, 1f) },
-                                modifier = Modifier.fillMaxWidth())
-                        else LinearProgressIndicator(Modifier.fillMaxWidth())
+                        if (state.phase == LinuxPhase.DOWNLOADING) {
+                            SuixingLinearProgressIndicator(
+                                progress = { (state.bytes.toFloat() / distro.downloadBytes).coerceIn(0f, 1f) },
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                        } else {
+                            SuixingLinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                        }
                         if (state.phase != LinuxPhase.REMOVING) TextButton(onClick = { installer.cancel() }) { Text("取消安装") }
                     }
                     state.message?.let { Text(it, style = MaterialTheme.typography.bodySmall,
@@ -85,5 +102,8 @@ internal fun LinuxEnvironmentsDialog(
                 Text("基础镜像中的各软件遵循各自许可证；可在环境内查看 /usr/share/doc。", style = MaterialTheme.typography.labelSmall)
             }
         },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("完成") } })
+        confirmButton = { dialog ->
+            TextButton(onClick = { dialog.closeThen(onDismiss) }) { Text("完成") }
+        },
+    )
 }

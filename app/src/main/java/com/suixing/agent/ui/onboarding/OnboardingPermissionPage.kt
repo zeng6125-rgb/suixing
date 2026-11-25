@@ -11,7 +11,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
+import com.suixing.agent.ui.components.SuixingOutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -81,7 +81,7 @@ fun PermissionPage(scroll: ScrollState) {
         Spacer(Modifier.height(16.dp))
 
         PermissionCard(
-            icon = ImageVector.vectorResource(R.drawable.ic_pointer),
+            icon = com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_pointer),
             want = "想让它看着屏幕动手",
             need = "无障碍服务：读屏、点按钮、滑动、替你打字、截图",
             without = "不开就只有聊天——它看不见你的屏幕，也点不了任何东西。",
@@ -92,7 +92,7 @@ fun PermissionPage(scroll: ScrollState) {
         )
 
         PermissionCard(
-            icon = ImageVector.vectorResource(R.drawable.ic_terminal),
+            icon = com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_terminal),
             want = "想让它执行命令、管别的应用",
             need = "Shizuku：相当于把手机接上电脑用 adb（adb / input / 读写 Android/data）",
             without = "不开它就只能在应用自己的目录里干活，碰不到别的应用。",
@@ -113,7 +113,7 @@ fun PermissionPage(scroll: ScrollState) {
         )
 
         PermissionCard(
-            icon = ImageVector.vectorResource(R.drawable.ic_shield_user),
+            icon = com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_shield_user),
             want = "想让它碰系统文件",
             need = "Root：系统分区可写，最高权限",
             without = "不开照样能用——只是它到不了系统目录。",
@@ -130,7 +130,7 @@ fun PermissionPage(scroll: ScrollState) {
         )
 
         PermissionCard(
-            icon = ImageVector.vectorResource(R.drawable.ic_picture_in_picture_2),
+            icon = com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_picture_in_picture_2),
             want = "想让它跑起来时能随时叫停、能插话",
             need = "悬浮窗：屏幕上留一个球",
             without = "不开就没有那个球——任务跑起来时你只能回来看。",
@@ -191,7 +191,7 @@ private fun PermissionCard(
                 tone = if (granted) Tone.OK else Tone.OFF,
             )
             Spacer(Modifier.weight(1f))
-            OutlinedButton(
+            SuixingOutlinedButton(
                 enabled = actionEnabled,
                 onClick = onAction,
             ) { Text(actionLabel) }

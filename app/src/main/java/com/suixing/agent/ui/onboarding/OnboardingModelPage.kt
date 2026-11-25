@@ -19,10 +19,10 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.FilterChip
+import com.suixing.agent.ui.components.SuixingCircularProgressIndicator
+import com.suixing.agent.ui.components.SuixingFilterChip
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
+import com.suixing.agent.ui.components.SuixingOutlinedButton
 import com.suixing.agent.ui.components.CompactOutlinedTextField as OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -104,7 +104,7 @@ fun ModelPage(
         )
         Spacer(Modifier.height(10.dp))
 
-        OutlinedButton(
+        SuixingOutlinedButton(
             enabled = !loading && draft.baseUrl.isNotBlank(),
             onClick = {
                 scope.launch {
@@ -130,7 +130,7 @@ fun ModelPage(
             },
         ) {
             if (loading) {
-                CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
+                SuixingCircularProgressIndicator(size = 14.dp, strokeWidth = 2.dp)
                 Spacer(Modifier.width(8.dp))
             }
             Text(if (loading) "获取中…" else "获取模型列表")
@@ -160,7 +160,7 @@ fun ModelPage(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             REASONING_LEVELS.forEach { (wire, label) ->
-                FilterChip(
+                SuixingFilterChip(
                     selected = draft.reasoningEffort == wire,
                     onClick = { onChange(draft.copy(reasoningEffort = wire, touched = true)) },
                     label = { Text(label) },

@@ -40,9 +40,9 @@ import androidx.compose.foundation.verticalScroll
 
 
 
-import androidx.compose.material3.CircularProgressIndicator
+import com.suixing.agent.ui.components.SuixingCircularProgressIndicator
 
-import androidx.compose.material3.FilterChip
+import com.suixing.agent.ui.components.SuixingFilterChip
 
 import androidx.compose.material3.Icon
 
@@ -50,7 +50,7 @@ import androidx.compose.material3.IconButton
 
 import androidx.compose.material3.MaterialTheme
 
-import androidx.compose.material3.OutlinedButton
+import com.suixing.agent.ui.components.SuixingOutlinedButton
 
 import com.suixing.agent.ui.components.CompactOutlinedTextField as OutlinedTextField
 import androidx.compose.material3.Surface
@@ -380,7 +380,7 @@ fun ProviderPage(
 
                     Icon(
 
-                        painter = painterResource(
+                        painter = com.suixing.agent.ui.components.suixingIconPainter(
                             if (revealKey) R.drawable.ic_eye_off else R.drawable.ic_eye,
                         ),
 
@@ -446,7 +446,7 @@ fun ProviderPage(
 
         Spacer(Modifier.height(16.dp))
 
-        OutlinedButton(
+        SuixingOutlinedButton(
 
             enabled = !testing && draft.baseUrl.isNotBlank() && draft.apiKey.isNotBlank(),
 
@@ -495,7 +495,7 @@ fun ProviderPage(
 
             if (testing) {
 
-                CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
+                SuixingCircularProgressIndicator(size = 14.dp, strokeWidth = 2.dp)
 
                 Spacer(Modifier.width(8.dp))
 
@@ -633,27 +633,35 @@ private fun PresetCard(
 
             Spacer(Modifier.width(10.dp))
 
-            Icon(
+            if (selected || !com.suixing.agent.ui.theme.LocalUseMiuix.current) {
+                Icon(
 
-                painter = painterResource(
-                    if (selected) R.drawable.ic_circle_check else R.drawable.ic_circle,
-                ),
+                    painter = com.suixing.agent.ui.components.suixingIconPainter(
+                        if (selected) R.drawable.ic_circle_check else R.drawable.ic_circle,
+                    ),
 
-                contentDescription = if (selected) "已选" else "未选",
+                    contentDescription = if (selected) "已选" else "未选",
 
-                tint = if (selected) {
+                    tint = if (selected) {
 
-                    MaterialTheme.colorScheme.primary
+                        MaterialTheme.colorScheme.primary
 
-                } else {
+                    } else {
 
-                    MaterialTheme.colorScheme.outline
+                        MaterialTheme.colorScheme.outline
 
-                },
+                    },
 
-                modifier = Modifier.size(20.dp),
-
-            )
+                    modifier = Modifier.size(20.dp),
+                )
+            } else {
+                Surface(
+                    modifier = Modifier.size(20.dp),
+                    shape = androidx.compose.foundation.shape.CircleShape,
+                    color = androidx.compose.ui.graphics.Color.Transparent,
+                    border = BorderStroke(1.5.dp, MaterialTheme.colorScheme.outline),
+                ) {}
+            }
 
         }
 
@@ -679,7 +687,7 @@ private fun ProtocolChip(
 
 ) {
 
-    FilterChip(
+    SuixingFilterChip(
 
         selected = current == wire,
 

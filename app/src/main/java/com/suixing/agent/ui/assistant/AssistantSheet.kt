@@ -14,7 +14,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilledTonalButton
+import com.suixing.agent.ui.components.SuixingFilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -61,6 +61,28 @@ fun AssistantSheet(
     onOpenEditor: (String) -> Unit,
     onDismiss: () -> Unit,
 ) {
+    val listModifier = Modifier
+        .padding(horizontal = 16.dp)
+        .padding(bottom = 22.dp)
+        // 表里没有可滚动的父容器，高度只能在这里封顶（表头 + 列表 ≈ 540dp），
+        // 列表自己的 verticalScroll 才拿得到有界的高度。
+        .heightIn(max = 540.dp)
+    if (com.suixing.agent.ui.theme.LocalUseMiuix.current) {
+        com.suixing.agent.ui.components.MiuixBottomSheetHost(onDismiss = onDismiss) {
+            AssistantListContent(
+                assistants = assistants,
+                activeId = activeId,
+                settings = settings,
+                onUse = onUse,
+                onSetDefault = onSetDefault,
+                onOpenEditor = onOpenEditor,
+                // 选一张卡就是选完了：表要收起来，否则用户看着还开着的半屏列表不知道有没有生效。
+                onPicked = onDismiss,
+                modifier = listModifier,
+            )
+        }
+        return
+    }
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
     ModalBottomSheet(
@@ -77,12 +99,7 @@ fun AssistantSheet(
             onOpenEditor = onOpenEditor,
             // 选一张卡就是选完了：表要收起来，否则用户看着还开着的半屏列表不知道有没有生效。
             onPicked = onDismiss,
-            modifier = Modifier
-                .padding(horizontal = 16.dp)
-                .padding(bottom = 22.dp)
-                // 表里没有可滚动的父容器，高度只能在这里封顶（表头 + 列表 ≈ 540dp），
-                // 列表自己的 verticalScroll 才拿得到有界的高度。
-                .heightIn(max = 540.dp),
+            modifier = listModifier,
         )
     }
 }
@@ -130,10 +147,10 @@ fun AssistantListContent(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            FilledTonalButton(
+            SuixingFilledTonalButton(
                 onClick = { onOpenEditor(UUID.randomUUID().toString()) },
             ) {
-                Icon(ImageVector.vectorResource(R.drawable.ic_plus), contentDescription = null, modifier = Modifier.size(18.dp))
+                Icon(com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_plus), contentDescription = null, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.width(6.dp))
                 Text("新建")
             }
@@ -229,7 +246,7 @@ private fun AssistantCard(
                     modifier = Modifier.size(30.dp),
                 ) {
                     Icon(
-                        imageVector = ImageVector.vectorResource(R.drawable.ic_star),
+                        imageVector = com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_star),
                         contentDescription = if (isDefault) "默认" else "设为默认",
                         // Spelled out because an explicit tint outlives the disabled colour
                         // IconButton would otherwise apply on its own.
@@ -249,7 +266,7 @@ private fun AssistantCard(
                     modifier = Modifier.minimumInteractiveComponentSize().size(30.dp),
                 ) {
                     Icon(
-                        imageVector = ImageVector.vectorResource(R.drawable.ic_square_pen),
+                        imageVector = com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_square_pen),
                         contentDescription = "编辑",
                         tint = scheme.onSurfaceVariant,
                         modifier = Modifier.size(15.dp),
@@ -268,7 +285,7 @@ private fun AssistantCard(
                 if (active) {
                     Spacer(Modifier.width(5.dp))
                     Icon(
-                        imageVector = ImageVector.vectorResource(R.drawable.ic_circle_check),
+                        imageVector = com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_circle_check),
                         contentDescription = "当前",
                         tint = scheme.primary,
                         modifier = Modifier.size(14.dp),

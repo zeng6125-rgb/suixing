@@ -26,6 +26,7 @@ import com.suixing.agent.ui.components.PageTopBarAction
 import com.suixing.agent.ui.components.SegmentedPill
 import com.suixing.agent.ui.components.SettingsStyle
 import com.suixing.agent.ui.components.SuixingCard
+import com.suixing.agent.ui.components.SuixingCircularProgressIndicator
 import com.suixing.agent.ui.components.SuixingDialog
 import com.suixing.agent.ui.components.settingsPagePadding
 import kotlinx.coroutines.CancellationException
@@ -77,7 +78,7 @@ fun UsageScreen(onBack: () -> Unit) {
         containerColor = scheme.background, contentWindowInsets = WindowInsets(0, 0, 0, 0),
         topBar = { PageTopBar(title = "用量", onBack = onBack, actions = {
             PageTopBarAction(
-                icon = ImageVector.vectorResource(R.drawable.ic_rotate_cw),
+                icon = com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_rotate_cw),
                 contentDescription = "刷新用量",
                 onClick = { reload++ },
                 enabled = !loading,
@@ -101,7 +102,7 @@ fun UsageScreen(onBack: () -> Unit) {
                 if (loading) item(key = "loading") {
                     Row(Modifier.fillMaxWidth().padding(vertical = 24.dp),
                         horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                        CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                        SuixingCircularProgressIndicator(size = 20.dp, strokeWidth = 2.dp)
                         Text("正在汇总用量…", style = SettingsStyle.body)
                     }
                 }
@@ -142,7 +143,7 @@ fun UsageScreen(onBack: () -> Unit) {
                     TextButton(onClick = { modelsExpanded = !modelsExpanded }, modifier = Modifier.fillMaxWidth()) {
                         Text(if (modelsExpanded) "收起" else "展开全部 ${window.models.size} 个模型")
                         Spacer(Modifier.width(4.dp))
-                        Icon(ImageVector.vectorResource(if (modelsExpanded) R.drawable.ic_chevron_up else R.drawable.ic_chevron_down),
+                        Icon(com.suixing.agent.ui.components.suixingIcon(if (modelsExpanded) R.drawable.ic_chevron_up else R.drawable.ic_chevron_down),
                             contentDescription = null, modifier = Modifier.size(18.dp))
                     }
                 }

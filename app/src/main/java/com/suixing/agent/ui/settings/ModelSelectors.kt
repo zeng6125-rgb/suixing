@@ -189,7 +189,7 @@ private fun SelectionCardButton(
                 Text(subtitle, style = SettingsStyle.badge, color = colors.onSurfaceVariant,
                     maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
-            Icon(ImageVector.vectorResource(R.drawable.ic_chevron_down), null,
+            Icon(com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_chevron_down), null,
                 Modifier.size(18.dp).graphicsLayer { rotationZ = rotation.value }, tint = colors.onSurfaceVariant)
         }
     }
@@ -231,7 +231,7 @@ internal fun ProviderDropdown(
                 if (onDelete != null) {
                     IconButton(enabled = selected != null && providers.size > 1,
                         onClick = { onExpandedChange(false); onDelete() }) {
-                        Icon(ImageVector.vectorResource(R.drawable.ic_trash), "删除当前供应商", Modifier.size(16.dp),
+                        Icon(com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_trash), "删除当前供应商", Modifier.size(16.dp),
                             tint = if (selected != null && providers.size > 1) colors.onSurfaceVariant else colors.onSurface.copy(alpha = 0.38f))
                     }
                 }
@@ -253,7 +253,7 @@ internal fun ProviderDropdown(
                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             Text("${provider.enabled.size} 模型", style = SettingsStyle.badge, color = colors.onSurfaceVariant)
                             Box(Modifier.size(18.dp), contentAlignment = Alignment.Center) {
-                                if (chosen) Icon(ImageVector.vectorResource(R.drawable.ic_check), "当前供应商", Modifier.size(16.dp), tint = colors.primary)
+                                if (chosen) Icon(com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_check), "当前供应商", Modifier.size(16.dp), tint = colors.primary)
                             }
                         }
                     },
@@ -264,7 +264,7 @@ internal fun ProviderDropdown(
             if (onAdd != null) {
                 ActionMenuItem(
                     text = { Text("添加供应商", style = SettingsStyle.controlLabel, color = colors.primary) },
-                    leadingIcon = { Icon(ImageVector.vectorResource(R.drawable.ic_plus), null, Modifier.size(18.dp), tint = colors.primary) },
+                    leadingIcon = { Icon(com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_plus), null, Modifier.size(18.dp), tint = colors.primary) },
                     onClick = { onExpandedChange(false); onAdd() },
                 )
             }
@@ -346,7 +346,7 @@ internal fun CompactProtocolPicker(
                     },
                     trailingIcon = {
                         Box(Modifier.size(18.dp), contentAlignment = Alignment.Center) {
-                            if (isChosen) Icon(ImageVector.vectorResource(R.drawable.ic_check), "当前协议", Modifier.size(16.dp), tint = colors.primary)
+                            if (isChosen) Icon(com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_check), "当前协议", Modifier.size(16.dp), tint = colors.primary)
                         }
                     },
                     onClick = { onExpandedChange(false); onPick(value) },
@@ -378,7 +378,7 @@ internal fun EnabledModelDropdown(
             Modifier.size(30.dp).clip(MaterialTheme.shapes.small).background(colors.surfaceContainerHighest),
             contentAlignment = Alignment.Center,
         ) {
-            Icon(ImageVector.vectorResource(R.drawable.ic_cpu), null, Modifier.size(16.dp), tint = colors.onSurfaceVariant)
+            Icon(com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_cpu), null, Modifier.size(16.dp), tint = colors.onSurfaceVariant)
         }
     }
     Box(Modifier.fillMaxWidth().onSizeChanged { anchorWidth = it.width }) {
@@ -408,7 +408,7 @@ internal fun EnabledModelDropdown(
                     leadingIcon = identity,
                     trailingIcon = {
                         Box(Modifier.size(18.dp), contentAlignment = Alignment.Center) {
-                            if (chosen) Icon(ImageVector.vectorResource(R.drawable.ic_check), "当前模型", Modifier.size(16.dp), tint = colors.primary)
+                            if (chosen) Icon(com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_check), "当前模型", Modifier.size(16.dp), tint = colors.primary)
                         }
                     },
                     onClick = { onExpandedChange(false); onPick(id) },

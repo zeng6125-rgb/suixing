@@ -13,6 +13,8 @@ const MAGIC: u32 = 0x314d_5853;
 const COMPATIBILITY: i32 = 4;
 const MAX_REQUEST: usize = 4 * 1024 * 1024;
 const MAX_RESPONSE: usize = 16 * 1024 * 1024;
+const MAX_BATCH_DOCUMENTS: usize = 16;
+const MAX_DOCUMENT_RESPONSE: usize = MAX_RESPONSE - 8 - 8 * MAX_BATCH_DOCUMENTS;
 const MAX_DOCUMENT: usize = 512 * 1024;
 const MAX_NODES: usize = 50_000;
 const POLL: usize = 8192;
@@ -48,7 +50,7 @@ pub unsafe extern "C" fn sx_markdown_parse(
             return Err(STATUS_REQUEST_ERROR);
         }
         let count = input.u32().ok_or(STATUS_REQUEST_ERROR)? as usize;
-        if !(1..=16).contains(&count) {
+        if !(1..=MAX_BATCH_DOCUMENTS).contains(&count) {
             return Err(STATUS_REQUEST_ERROR);
         }
         let mut response = Writer::new(MAX_RESPONSE);
@@ -57,23 +59,7 @@ pub unsafe extern "C" fn sx_markdown_parse(
         for index in 0..count {
             check_cancelled(&cancelled)?;
             let text = input.string().ok_or(STATUS_REQUEST_ERROR)?;
-            let parsed = if text.len() > MAX_DOCUMENT {
-                Err(COMPATIBILITY)
-            } else {
-                parse_document(text, &cancelled)
-            };
-            match parsed {
-                Ok(document)
-                    if response.bytes.len() + 8 + document.len() + 4 * (count - index - 1)
-                        <= MAX_RESPONSE =>
-                {
-                    response.u32(0)?;
-                    response.u32(document.len() as u32)?;
-                    response.extend(&document)?;
-                }
-                Ok(_) | Err(COMPATIBILITY) => response.u32(COMPATIBILITY as u32)?,
-                Err(status) => return Err(status),
-            }
+            append_document(&mut response, text, count - index - 1, &cancelled)?;
         }
         if input.at != bytes.len() {
             return Err(STATUS_REQUEST_ERROR);
@@ -89,6 +75,39 @@ pub unsafe extern "C" fn sx_markdown_parse(
         Ok(Ok(())) => STATUS_OK,
         Ok(Err(status)) => status,
         Err(_) => STATUS_PANIC,
+    }
+}
+
+fn append_document(
+    writer: &mut Writer,
+    text: &str,
+    remaining_documents: usize,
+    cancelled: &AtomicBool,
+) -> Result<(), i32> {
+    if text.len() > MAX_DOCUMENT {
+        return writer.u32(COMPATIBILITY as u32);
+    }
+    let start = writer.bytes.len();
+    let batch_limit = writer.limit;
+    // Later documents must always have room for at least their fallback status.
+    writer.limit = (batch_limit - 4 * remaining_documents).min(start + 8 + MAX_DOCUMENT_RESPONSE);
+    let result = (|| {
+        writer.u32(0)?;
+        writer.u32(0)?;
+        write_document(writer, text, cancelled)
+    })();
+    writer.limit = batch_limit;
+    match result {
+        Ok(()) => {
+            let length = (writer.bytes.len() - start - 8) as u32;
+            writer.bytes[start + 4..start + 8].copy_from_slice(&length.to_le_bytes());
+            Ok(())
+        }
+        Err(COMPATIBILITY) => {
+            writer.bytes.truncate(start);
+            writer.u32(COMPATIBILITY as u32)
+        }
+        Err(status) => Err(status),
     }
 }
 
@@ -872,7 +891,7 @@ fn write_blocks<'a>(
     Ok(())
 }
 
-fn parse_document(text: &str, cancelled: &AtomicBool) -> Result<Vec<u8>, i32> {
+fn write_document(writer: &mut Writer, text: &str, cancelled: &AtomicBool) -> Result<(), i32> {
     for (index, ch) in text.char_indices() {
         if index % POLL == 0 {
             check_cancelled(cancelled)?;
@@ -891,9 +910,8 @@ fn parse_document(text: &str, cancelled: &AtomicBool) -> Result<Vec<u8>, i32> {
         Cow::Borrowed(text)
     };
     let blocks = parse_blocks(&normalized, cancelled)?;
-    let mut writer = Writer::new(MAX_RESPONSE - 136);
     let mut leaves = Vec::new();
-    write_blocks(&mut writer, &blocks, &mut leaves, cancelled)?;
+    write_blocks(writer, &blocks, &mut leaves, cancelled)?;
     let mut seen = HashSet::new();
     leaves.retain(|leaf| {
         leaf.bytes()
@@ -915,7 +933,7 @@ fn parse_document(text: &str, cancelled: &AtomicBool) -> Result<Vec<u8>, i32> {
             writer.string(run.link.as_deref().unwrap_or(""))?;
         }
     }
-    Ok(writer.bytes)
+    Ok(())
 }
 
 #[cfg_attr(feature = "rust-app", derive(Clone, Debug, PartialEq, Eq))]
@@ -1673,7 +1691,9 @@ mod tests {
     #[test]
     fn gfm_escaped_pipes_reach_document_cells_and_formatted_inline_runs() {
         let source = "| f\\|oo |\n| --- |\n| b `\\|` az |\n| b **\\|** im |";
-        let document = parse_document(source, &AtomicBool::new(false)).unwrap();
+        let mut writer = Writer::new(MAX_DOCUMENT_RESPONSE);
+        write_document(&mut writer, source, &AtomicBool::new(false)).unwrap();
+        let document = writer.bytes;
         let mut input = crate::Input {
             bytes: &document,
             at: 0,
@@ -1701,6 +1721,35 @@ mod tests {
             }
         }
         assert_eq!(input.at, document.len());
+    }
+
+    #[test]
+    fn over_budget_document_leaves_only_its_status_and_keeps_later_documents() {
+        let cancelled = AtomicBool::new(false);
+        let mut writer = Writer::new(62);
+        writer.u32(MAGIC).unwrap();
+        writer.u32(3).unwrap();
+        append_document(&mut writer, "# 中文", 2, &cancelled).unwrap();
+        append_document(&mut writer, &"x".repeat(100), 1, &cancelled).unwrap();
+        append_document(&mut writer, "", 0, &cancelled).unwrap();
+
+        let mut input = crate::Input {
+            bytes: &writer.bytes,
+            at: 8,
+        };
+        assert_eq!(input.u32(), Some(0));
+        assert_eq!(input.u32(), Some(26));
+        assert_eq!(input.u32(), Some(1));
+        assert_eq!(input.u32(), Some(1));
+        assert_eq!(input.u32(), Some(1));
+        assert_eq!(input.string(), Some("中文"));
+        assert_eq!(input.u32(), Some(0));
+        assert_eq!(input.u32(), Some(COMPATIBILITY as u32));
+        assert_eq!(input.u32(), Some(0));
+        assert_eq!(input.u32(), Some(8));
+        assert_eq!(input.u32(), Some(0));
+        assert_eq!(input.u32(), Some(0));
+        assert_eq!(input.at, writer.limit);
     }
 
     #[test]

@@ -33,13 +33,13 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Checkbox
-import androidx.compose.material3.CircularProgressIndicator
+import com.suixing.agent.ui.components.SuixingCircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
+import com.suixing.agent.ui.components.SuixingOutlinedButton
 import com.suixing.agent.ui.components.CompactOutlinedTextField as OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
@@ -553,7 +553,7 @@ internal fun ModelSettingsPage(onBack: () -> Unit) {
             item { SectionHeader("模型列表") }
             item {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    OutlinedButton(
+                    SuixingOutlinedButton(
                         enabled = !loadingModels && selected != null && baseUrlText.isNotBlank(),
                         modifier = Modifier.heightIn(min = SettingsStyle.ControlHeight),
                         contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
@@ -599,10 +599,10 @@ internal fun ModelSettingsPage(onBack: () -> Unit) {
                         },
                     ) {
                         if (loadingModels) {
-                            CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
+                            SuixingCircularProgressIndicator(size = 14.dp, strokeWidth = 2.dp)
                         } else {
                             Icon(
-                                imageVector = ImageVector.vectorResource(R.drawable.ic_rotate_cw),
+                                imageVector = com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_rotate_cw),
                                 contentDescription = null,
                                 modifier = Modifier.size(16.dp),
                             )

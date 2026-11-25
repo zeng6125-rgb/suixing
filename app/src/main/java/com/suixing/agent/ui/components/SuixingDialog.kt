@@ -44,6 +44,18 @@ internal fun SuixingDialog(
     confirmButton: @Composable (DialogScope) -> Unit = {},
     dismissButton: (@Composable (DialogScope) -> Unit)? = null,
 ) {
+    if (com.suixing.agent.ui.theme.LocalUseMiuix.current) {
+        MiuixDialog(
+            onDismissRequest = onDismissRequest,
+            title = title,
+            text = text,
+            icon = icon,
+            properties = properties,
+            confirmButton = confirmButton,
+            dismissButton = dismissButton,
+        )
+        return
+    }
     val motion = remember { PopupMotionState() }
     val coroutines = rememberCoroutineScope()
     val latestDismiss by rememberUpdatedState(onDismissRequest)

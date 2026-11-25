@@ -270,11 +270,12 @@ impl Skin {
             3 => 1.26,
             _ => 1.0,
         };
-        let serif = !matches!(behavior.palette_mode, 1 | 3);
+        let serif = behavior.font_preset != 0;
         let surface = visual.panel_fill;
-        let (drawer, input, high, ink, divider, user_bubble) = match (behavior.palette_mode, dark) {
-            (3, false) => (0xf6f6f6, 0xffffff, 0xffffff, 0x606163, 0xe3e3e3, 0xf4f4f4),
-            (3, true) => (0x141414, 0x2d2d2d, 0x2d2d2d, 0xb0b0b0, 0x424242, 0x363636),
+        let effective_palette = behavior.palette_mode;
+        let (drawer, input, high, ink, divider, user_bubble) = match (effective_palette, dark) {
+            (4, false) => (0xf7f7f7, 0xffffff, 0xf0f0f0, 0x5c5c5c, 0xe5e5ea, 0xeaf2ff),
+            (4, true) => (0x0d0d0f, 0x1c1c1e, 0x242426, 0x9c9ca3, 0x2c2c2e, 0x1f3557),
             (1, _) => {
                 return Self {
                     surface,

@@ -28,9 +28,9 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Button
+import com.suixing.agent.ui.components.SuixingButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
+import com.suixing.agent.ui.components.SuixingOutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.State
@@ -366,12 +366,12 @@ private fun OnboardingFooter(
         HorizontalRule()
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             if (canGoBack) {
-                OutlinedButton(onClick = onBack, modifier = Modifier.weight(1f)) { Text("上一步") }
+                SuixingOutlinedButton(onClick = onBack, modifier = Modifier.weight(1f)) { Text("上一步") }
             }
             if (step == OnboardingStep.READY) {
-                Button(onClick = onFinish, modifier = Modifier.weight(1f)) { Text("开始使用") }
+                SuixingButton(onClick = onFinish, modifier = Modifier.weight(1f)) { Text("开始使用") }
             } else {
-                Button(onClick = onNext, modifier = Modifier.weight(1f)) { Text("下一步") }
+                SuixingButton(onClick = onNext, modifier = Modifier.weight(1f)) { Text("下一步") }
             }
         }
     }

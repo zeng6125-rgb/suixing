@@ -82,6 +82,31 @@ class ComposerFieldLayoutTest {
         assertEquals(listOf(0), positions)
     }
 
+    @Test fun keyboardAnimationMovesTheSizedEditorWithoutReadingTheLiveInsetDuringMeasure() {
+        val positions = mutableListOf<Int>()
+        var inset = 0
+        var insetReads = 0
+        val result = with(scope) {
+            measureComposerImeViewport(
+                placedChild(700, 54) { positions += it },
+                Constraints(maxWidth = 500, maxHeight = 600),
+                navigationPx = 28,
+                reservedImePx = 270,
+            ) {
+                insetReads++
+                inset
+            }
+        }
+        assertEquals(330, result.height)
+        assertEquals(0, insetReads)
+        for (frame in listOf(0, 12, 28, 128, 270, 128, 12, 0)) {
+            inset = frame
+            result.placeChildren()
+        }
+        assertEquals(listOf(-28, -28, -28, -128, -270, -128, -28, -28), positions)
+        assertEquals(8, insetReads)
+    }
+
     @Test fun compactWindowReservesBothActionRowsBeforeMeasuringLongDraft() {
         val positions = mutableListOf<Pair<String, Int>>()
         val field = placedChild(182, 54) { positions += "field" to it }

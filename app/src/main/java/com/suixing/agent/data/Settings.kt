@@ -59,6 +59,10 @@ val ApprovalMode.label: String
  */
 const val DEFAULT_CONTEXT_WINDOW = 256_000
 
+/** 字体预设：0 = 系统字体，1 = JAgent 字体（Serif）。 */
+const val FONT_PRESET_SYSTEM = 0
+const val FONT_PRESET_JAGENT = 1
+
 /**
  * The three wires an endpoint may speak. [PROTOCOL_OPENAI] is the empty string so that a
  * settings file written before the field existed — which deserialises to "" — keeps taking
@@ -291,10 +295,15 @@ data class AppSettings(
     val approvalMode: ApprovalMode = ApprovalMode.ASK,
     val systemPrompt: String = DEFAULT_SYSTEM_PROMPT,
     /**
-     * 0 = JAgent, 1 = system wallpaper (Material You), 2 = Claude, 3 = Codex.
-     * Claude 为默认配色；JAgent 墨绿保留为可选项。已保存的设置不受默认值变化影响。
+     * 界面主题：0 = 默认 (Material 3)，1 = MIUIX（第三方 HyperOS 风格组件、图标与配色）。
+     */
+    val uiTheme: Int = 0,
+    /**
+     * 0 = JAgent（已移除并回落到 2）, 1 = system wallpaper (Material You), 2 = Claude, 3 = Codex（已移除并回落到 2）, 4 = MIUIX 默认.
+     * Claude 为默认配色。已保存的设置不受默认值变化影响。
      */
     val paletteMode: Int = 2,
+    /** 深浅模式：0 = 跟随系统, 1 = 浅色, 2 = 深色。 */
     val themeMode: Int = 0,
     /** Keep the display awake only while JAgent is in the foreground. */
     val keepScreenOn: Boolean = false,
@@ -398,6 +407,8 @@ data class AppSettings(
     val consoleWidthDp: Int = 0,
     /** 悬浮窗展开面板的高度，dp；0 表示随内容自适应（默认）。手柄向上拖写这里。 */
     val consoleHeightDp: Int = 0,
+    /** 字体预设：0 = 系统字体（无衬线），1 = JAgent 字体（Serif 衬线，默认）。 */
+    val fontPreset: Int = FONT_PRESET_JAGENT,
     /** 0 小, 1 标准, 2 大, 3 特大 */
     val fontScale: Int = 1,
     /** 0 窄, 1 标准, 2 宽 —— 助手气泡最多占屏宽的比例，由聊天页读取 */

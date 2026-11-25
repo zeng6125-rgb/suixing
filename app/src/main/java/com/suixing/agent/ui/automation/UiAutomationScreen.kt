@@ -18,7 +18,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material3.Button
+import com.suixing.agent.ui.components.SuixingButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
@@ -192,7 +192,7 @@ private fun VirtualScreenCard() {
                 horizontalArrangement = Arrangement.spacedBy(SettingsStyle.FieldGap),
                 verticalArrangement = Arrangement.spacedBy(SettingsStyle.RowGap),
             ) {
-                Button(enabled = !busy, onClick = {
+                SuixingButton(enabled = !busy, onClick = {
                     if (busyOperation == null) {
                         choosingApp = true
                         if (apps == null) loadApps()
@@ -211,7 +211,7 @@ private fun VirtualScreenCard() {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(top = SettingsStyle.FieldGap))
         } else {
-            Button(enabled = !busy, onClick = { act("正在开启虚拟屏…") {
+            SuixingButton(enabled = !busy, onClick = { act("正在开启虚拟屏…") {
                 val opened = VirtualScreenControl.open(context)
                 if (!VirtualScreenOverlay.isShowing) {
                     noticeDisplayId = opened.displayId
@@ -397,7 +397,7 @@ private fun AutomationCardHeader(
     trailing: (@Composable () -> Unit)? = null,
 ) {
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        Icon(painterResource(icon), contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant,
+        Icon(com.suixing.agent.ui.components.suixingIconPainter(icon), contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.size(20.dp))
         Spacer(Modifier.width(SettingsStyle.ControlGap))
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {

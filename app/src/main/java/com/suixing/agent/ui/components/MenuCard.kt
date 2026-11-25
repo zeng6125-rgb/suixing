@@ -88,8 +88,10 @@ internal fun MenuCard(
     popupPositionProvider: androidx.compose.ui.window.PopupPositionProvider? = null,
     /** 是否自带"点外面即关闭"的遮罩（默认带：focus-less 窗口自己看不到外部点击）。 */
     scrim: Boolean = true,
-    /** 卡片底色；默认与其它浮层一致（theme 的 surface）。 */
-    containerColor: androidx.compose.ui.graphics.Color = MaterialTheme.colorScheme.surface,
+    /** 卡片底色；默认与其它浮层一致（Miuix 模式下走 surfaceContainer）。 */
+    containerColor: androidx.compose.ui.graphics.Color =
+        if (com.suixing.agent.ui.theme.LocalUseMiuix.current) MaterialTheme.colorScheme.surfaceContainer
+        else MaterialTheme.colorScheme.surface,
     /**
      * 卡片描边；默认无（保持既有浮层外观）。
      *
@@ -221,6 +223,7 @@ internal fun MenuItemRow(
     onClick: () -> Unit,
     /** Ticked on the right when this row is the one in force; the caller says which. */
     selected: Boolean = false,
+    iconModifier: Modifier = Modifier,
 ) {
     val scheme = MaterialTheme.colorScheme
     Row(
@@ -237,7 +240,7 @@ internal fun MenuItemRow(
             imageVector = icon,
             contentDescription = null,
             tint = scheme.onSurfaceVariant,
-            modifier = Modifier.size(18.dp),
+            modifier = Modifier.size(18.dp).then(iconModifier),
         )
         Spacer(Modifier.width(10.dp))
         Text(
@@ -251,7 +254,7 @@ internal fun MenuItemRow(
         if (selected) {
             Spacer(Modifier.width(10.dp))
             Icon(
-                imageVector = ImageVector.vectorResource(R.drawable.ic_check),
+                imageVector = suixingIcon(R.drawable.ic_check),
                 contentDescription = null,
                 tint = scheme.primary,
                 modifier = Modifier.size(16.dp),

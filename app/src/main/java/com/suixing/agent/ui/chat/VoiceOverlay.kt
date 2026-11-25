@@ -23,7 +23,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.material3.Button
+import com.suixing.agent.ui.components.SuixingButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -297,7 +297,7 @@ internal fun VoiceOverlay(
                         Spacer(Modifier.width(12.dp))
                     } else {
                         Icon(
-                            imageVector = ImageVector.vectorResource(R.drawable.ic_circle_alert),
+                            imageVector = com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_circle_alert),
                             contentDescription = null,
                             tint = scheme.error,
                             modifier = Modifier.size(18.dp),
@@ -332,7 +332,7 @@ internal fun VoiceOverlay(
                     }
                     Spacer(Modifier.width(6.dp))
                     CircleActionButton(
-                        icon = ImageVector.vectorResource(R.drawable.ic_x),
+                        icon = com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_x),
                         contentDescription = "取消",
                         onClick = onDismiss,
                         containerColor = scheme.surfaceContainerHighest,
@@ -355,7 +355,7 @@ internal fun VoiceOverlay(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     if (!asrReady) {
-                        Button(onClick = { onOpenSettings(); onDismiss() }) { Text("去设置") }
+                        SuixingButton(onClick = { onOpenSettings(); onDismiss() }) { Text("去设置") }
                     } else {
                         TextButton(onClick = { begin() }) { Text("重试") }
                     }

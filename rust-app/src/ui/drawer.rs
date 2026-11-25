@@ -88,8 +88,34 @@ pub(super) struct FrozenTranscript {
     rect: Rect,
     pixels_per_point: f32,
     font_fill: f32,
-    shapes: Vec<egui::epaint::ClippedShape>,
+    shapes: Vec<FrozenShape>,
     _textures: Vec<egui::TextureHandle>,
+}
+
+struct FrozenShape {
+    paint: egui::epaint::ClippedShape,
+    bounds: Option<Rect>,
+}
+
+impl FrozenShape {
+    fn new(paint: egui::epaint::ClippedShape, pixels_per_point: f32) -> Self {
+        let bounds = match &paint.shape {
+            egui::Shape::Mesh(mesh) => Some(mesh.calc_bounds()),
+            // Text is rounded to the pixel grid during tessellation.
+            egui::Shape::Text(text) if text.underline.is_empty() => {
+                Some(text.visual_bounding_rect().expand(1.0 / pixels_per_point))
+            }
+            _ => None,
+        }
+        .map(|rect| paint.transform_after_tessellation * rect);
+        Self { paint, bounds }
+    }
+
+    fn visible_clip(&self, clip: Rect) -> Option<Rect> {
+        let clip = self.paint.clip_rect.intersect(clip);
+        (clip.is_positive() && self.bounds.is_none_or(|bounds| clip.intersects(bounds)))
+            .then_some(clip)
+    }
 }
 
 impl FrozenTranscript {
@@ -119,11 +145,11 @@ impl FrozenTranscript {
             ctx.graphics_mut(|graphics| {
                 let list = graphics.entry(layer);
                 for shape in &frozen.shapes {
-                    let visible = shape.clip_rect.intersect(clip);
-                    if visible.is_positive() {
-                        let index = list.add(visible, shape.shape.clone());
+                    if let Some(visible) = shape.visible_clip(clip) {
+                        let index = list.add(visible, shape.paint.shape.clone());
                         list.mutate_shape(index, |entry| {
-                            entry.transform_after_tessellation = shape.transform_after_tessellation;
+                            entry.transform_after_tessellation =
+                                shape.paint.transform_after_tessellation;
                         });
                     }
                 }
@@ -135,24 +161,23 @@ impl FrozenTranscript {
         ui.set_clip_rect(rect);
         draw(ui);
         ui.set_clip_rect(clip);
-        let shapes: Vec<_> = ctx.graphics_mut(|graphics| {
+        let shapes = ctx.graphics_mut(|graphics| {
             let list = graphics.entry(layer);
-            let shapes = list
-                .all_entries()
-                .skip(start.0)
-                .filter(|entry| !matches!(entry.shape, egui::Shape::Noop))
-                .cloned()
-                .collect();
+            let mut shapes = Vec::new();
             for i in start.0..list.next_idx().0 {
                 list.mutate_shape(egui::layers::ShapeIdx(i), |entry| {
-                    entry.clip_rect = entry.clip_rect.intersect(clip);
+                    if !matches!(entry.shape, egui::Shape::Noop) {
+                        let frozen = FrozenShape::new(entry.clone(), pixels_per_point);
+                        entry.clip_rect = frozen.visible_clip(clip).unwrap_or(Rect::NOTHING);
+                        shapes.push(frozen);
+                    }
                 });
             }
             shapes
         });
         let mut ids = BTreeSet::new();
         for entry in &shapes {
-            texture_ids(&entry.shape, &mut ids);
+            texture_ids(&entry.paint.shape, &mut ids);
         }
         let manager = ctx.tex_manager();
         // A history update can evict an image while its frozen frame is still visible.
@@ -723,6 +748,13 @@ mod tests {
                     FrozenTranscript::show(&mut home, &mut snapshot, progress > 0.0, |ui| {
                         layouts += 1;
                         ui.label("会话正文");
+                        ui.painter().text(
+                            image.left_top(),
+                            egui::Align2::LEFT_BOTTOM,
+                            "right edge",
+                            egui::FontId::proportional(16.0),
+                            egui::Color32::WHITE,
+                        );
                         if let Some(texture) = &texture {
                             ui.painter().image(
                                 texture.id(),
@@ -736,13 +768,25 @@ mod tests {
                 },
             );
             if progress > 0.0 {
-                let shape = output
+                let visible = output
                     .shapes
                     .iter()
-                    .find(|entry| entry.shape.texture_id() == texture_id)
-                    .expect("retained image");
-                let center = shape.transform_after_tessellation * image.center();
-                assert_eq!(shape.clip_rect.contains(center), progress < 0.2);
+                    .filter(|entry| entry.clip_rect.is_positive());
+                let image_shape = visible
+                    .clone()
+                    .find(|entry| entry.shape.texture_id() == texture_id);
+                assert_eq!(image_shape.is_some(), progress < 0.2);
+                if let Some(shape) = image_shape {
+                    assert!(
+                        shape
+                            .clip_rect
+                            .contains(shape.transform_after_tessellation * image.center())
+                    );
+                }
+                let has_text = visible.clone().any(|entry| {
+                    matches!(&entry.shape, egui::Shape::Text(text) if text.galley.job.text == "right edge")
+                });
+                assert_eq!(has_text, progress < 0.2);
                 assert_eq!(layouts, 1);
                 texture = None;
                 assert!(ctx.tex_manager().read().meta(texture_id).is_some());

@@ -8,6 +8,13 @@ pub(super) fn draw(ui: &mut egui::Ui, settings: &mut Settings, can_reset: bool) 
     controls::choice_row(
         ui,
         "主题",
+        "「默认」使用 Material 3 组件；「MIUIX」在安卓主界面启用第三方 Miuix（HyperOS 风格）组件与图标，两者均支持下方配色与字体。",
+        &mut a.ui_theme,
+        &[(0, "默认"), (1, "MIUIX")],
+    );
+    controls::choice_row(
+        ui,
+        "深浅模式",
         "",
         &mut a.theme_mode,
         &[(0, "跟随系统"), (1, "浅色"), (2, "深色")],
@@ -15,11 +22,18 @@ pub(super) fn draw(ui: &mut egui::Ui, settings: &mut Settings, can_reset: bool) 
     controls::choice_row(
         ui,
         "配色",
-        "「跟随壁纸」需要安卓 12 以上，会改用系统动态取色。",
+        "「跟随壁纸」需要安卓 12 以上，会改用系统动态取色；默认与 MIUIX 主题均同步生效，「MIUIX 默认」即官方 HyperOS 蓝白/纯黑配色。",
         &mut a.palette_mode,
-        &[(1, "跟随壁纸"), (2, "JAgent 配色"), (3, "Codex")],
+        &[(1, "跟随壁纸"), (2, "JAgent 配色"), (4, "MIUIX 默认")],
     );
     controls::section(ui, "文字与布局");
+    controls::choice_row(
+        ui,
+        "字体",
+        "「系统字体」使用系统默认无衬线体；「JAgent 字体」使用衬线正文字体（默认）。",
+        &mut a.font_preset,
+        &[(0, "系统字体"), (1, "JAgent 字体")],
+    );
     controls::choice_row(
         ui,
         "字号",

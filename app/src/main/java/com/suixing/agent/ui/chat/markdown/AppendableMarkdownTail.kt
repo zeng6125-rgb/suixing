@@ -111,12 +111,21 @@ internal sealed interface AppendableMarkdownTail {
 }
 
 /** A new final row does not copy or replace completed row identities. */
-private class CompletedTableRows(
+internal class CompletedTableRows(
     private val prefix: List<List<String>>,
     private val completedCount: Int,
     private val last: List<String>?,
 ) : AbstractList<List<String>>() {
     override val size: Int get() = completedCount + if (last == null) 0 else 1
+
+    fun preservesRowReferencesFrom(previous: CompletedTableRows): Boolean {
+        if (prefix !== previous.prefix || completedCount < previous.completedCount) return false
+        val previousTail = previous.last ?: return true
+        val incoming = getOrNull(previous.completedCount) ?: return true
+        // Only the former partial row can have a different but equal cell list.
+        return incoming === previousTail || incoming != previousTail
+    }
+
     override fun get(index: Int): List<String> {
         if (index !in 0 until size) throw IndexOutOfBoundsException("index=$index size=$size")
         return if (index < completedCount) prefix[index] else requireNotNull(last)

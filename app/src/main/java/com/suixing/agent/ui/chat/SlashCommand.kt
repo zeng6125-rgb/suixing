@@ -24,15 +24,26 @@ internal data class SlashCommand(
  * tool-like name. A bare `/` or a path such as `/data/...` stays ordinary text.
  */
 internal fun parseSlashCommand(text: String): SlashCommand? {
-    val trimmed = text.trim()
-    if (!trimmed.startsWith("/") || trimmed.length < 2) return null
-    val end = trimmed.indexOfFirst { it.isWhitespace() }.let { if (it < 0) trimmed.length else it }
-    val name = trimmed.substring(1, end)
-    if (!NAME.matches(name)) return null
-    return SlashCommand(name.lowercase(), trimmed.substring(end).trim())
+    val token = slashCommandToken(text) ?: return null
+    val end = token.last + 1
+    return SlashCommand(text.substring(token.first + 1, end).lowercase(), text.substring(end).trim())
 }
 
-private val NAME = Regex("[A-Za-z][A-Za-z0-9_]*")
+private fun Char.isCommandLetter(): Boolean = this in 'A'..'Z' || this in 'a'..'z'
+
+/** Source range of the slash and tool name, for rendering or parsing the command. */
+internal fun slashCommandToken(text: String): IntRange? {
+    val start = text.indexOfFirst { !it.isWhitespace() }
+    if (start < 0 || text[start] != '/' || text.getOrNull(start + 1)?.isCommandLetter() != true) return null
+    var end = start + 2
+    while (end < text.length) {
+        val char = text[end]
+        if (char.isWhitespace()) break
+        if (!char.isCommandLetter() && char !in '0'..'9' && char != '_') return null
+        end++
+    }
+    return start until end
+}
 
 /** `/goal` reads; `/goal resume` resumes; `/goal clear` clears. */
 internal fun SlashCommand.toolName(): String =

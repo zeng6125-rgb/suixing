@@ -145,3 +145,7 @@ PRoot 版权包括 STMicroelectronics 和上游贡献者；talloc 版权包括 A
 | Debian 12 Bookworm aarch64，proot-distro v4.17.3 | https://github.com/termux/proot-distro/releases/download/v4.17.3/debian-bookworm-aarch64-pd-v4.17.3.tar.xz | `3a841a794ae5999b33e33b329582ed0379d4f54ca62c6ce5a8eb9cff5ef8900b` |
 
 镜像内各软件的许可、版权和源码来源应依发行版包记录查询，不将整个镜像标为某一种许可证。Alpine 包信息与源码构建配方见 https://pkgs.alpinelinux.org/ 、 https://gitlab.alpinelinux.org/alpine/aports ；Debian 包与源码见 https://packages.debian.org/bookworm/ 、 https://sources.debian.org/ 。
+
+## Miuix UI 组件库
+
+Android 客户端的「MIUIX」内置主题接入了官方第三方库 [`top.yukonga.miuix.kmp`](https://github.com/compose-miuix-ui/miuix)（`miuix-ui-android`、`miuix-preference-android` 与 `miuix-icons-android`，版本 `0.9.4`，连带传递 `miuix-core-android`、`miuix-squircle-android`、`miuix-shader-android` 等模块）。上游项目以 Apache-2.0 许可发布（Copyright compose-miuix-ui Contributors）。

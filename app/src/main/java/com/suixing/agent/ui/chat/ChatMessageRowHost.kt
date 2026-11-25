@@ -70,6 +70,11 @@ internal fun ChatMessageRowHost(
         Modifier
             .then(if (heavyRow) Modifier.graphicsLayer() else Modifier),
     ) {
+        androidx.compose.runtime.CompositionLocalProvider(
+            // Nested thinking/tool LazyColumns and horizontal code scrolls inside message cards
+            // must not stretch or capture overscroll inside the parent transcript list.
+            androidx.compose.foundation.LocalOverscrollFactory provides null,
+        ) {
         // 外观 → 显示时间: off means no labels at all, not fewer.
         if (settings.showTimestamps && row.showTimeLabel &&
             reasoningExpansion.stored("time:${row.message.runId}") != false) {
@@ -128,6 +133,7 @@ internal fun ChatMessageRowHost(
                 onRegenerate = onRegenerate,
                 onEdit = onEdit,
             )
+        }
         }
         // 中断/截断/失败的原因不再挂在这里：错误提醒统一画在列表最底
         // （回执行 + 无回执时的实时红字），同一次失败只通知一次。

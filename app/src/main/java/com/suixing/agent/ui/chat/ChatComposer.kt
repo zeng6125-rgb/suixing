@@ -29,12 +29,10 @@ import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -65,7 +63,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import com.suixing.agent.ui.drawer.drawerScrollPriority
-import com.suixing.agent.ui.components.bottomInsetPadding
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
@@ -135,7 +132,6 @@ import com.suixing.agent.data.TODO_IN_PROGRESS
 import com.suixing.agent.data.TodoItem
 import com.suixing.agent.data.label
 import com.suixing.agent.ui.components.CircleActionButton
-import com.suixing.agent.ui.components.LocalHeldImePx
 import com.suixing.agent.ui.theme.LocalDarkTheme
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
@@ -630,24 +626,12 @@ internal fun Composer(
         sheetOpen = false
         approvalOpen = false
     }
-    // 手势条高度在**组合期**算一次：它是 @Composable 调用，布局 lambda 里不能调；
-    // 而它在键盘动画期间不变化，捕获下来即可。键盘高度本身在布局期读（见下面的 .layout）。
-    val navBarBottomPx = with(density) { WindowInsets.navigationBars.getBottom(this) }
-    val imePxState = LocalHeldImePx.current
     // Nothing here paints a background: the transcript scrolls right down to the gesture
     // bar behind the pill, so the composer reads as something floating over the
     // conversation rather than an opaque strip that cuts it off.
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            // The gesture bar's strip, but never on top of the keyboard: when the keyboard is
-            // up it already covers that strip, and padding for it as well pushed the card a
-            // navigation bar's height above the keyboard — the band the user photographed.
-            // The shell's clamped keyboard height is what to subtract (clamped, so the
-            // platform's end-of-animation rebound cannot flicker the band back for a frame).
-            // **读数在布局期完成**（键盘动画期间不重组）：这一处原来在组合期减键盘高度，
-            // 键盘抬起/收起时输入框每帧重组一次 —— 用户报的「输入法一抬一收就掉帧」。
-            .bottomInsetPadding { (navBarBottomPx - imePxState.value).coerceAtLeast(0) }
             .padding(horizontal = 16.dp)
             // The air under the pill, named: the list's own padding is this plus the strip
             // above, and it is measured here, inside the padding (see COMPOSER_BOTTOM_PAD).
@@ -1132,10 +1116,12 @@ private fun ComposerControlsArea(
                 modifier = Modifier.size(36.dp),
             ) {
                 Icon(
-                    imageVector = ImageVector.vectorResource(R.drawable.ic_plus),
+                    imageVector = com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_plus),
                     contentDescription = "添加图片或文件",
                     tint = scheme.onSurfaceVariant,
-                    modifier = Modifier.size(22.dp),
+                    modifier = Modifier.size(
+                        if (com.suixing.agent.ui.theme.LocalUseMiuix.current) 18.dp else 22.dp,
+                    ),
                 )
             }
             MenuCard(
@@ -1150,7 +1136,7 @@ private fun ComposerControlsArea(
                 compactMotion = true,
             ) {
                 MenuItemRow(
-                    icon = ImageVector.vectorResource(R.drawable.ic_image),
+                    icon = com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_image),
                     label = "图片",
                     onClick = {
                         onDismissMenu()
@@ -1158,7 +1144,7 @@ private fun ComposerControlsArea(
                     },
                 )
                 MenuItemRow(
-                    icon = ImageVector.vectorResource(R.drawable.ic_camera),
+                    icon = com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_camera),
                     label = "拍照",
                     onClick = {
                         onDismissMenu()
@@ -1166,7 +1152,7 @@ private fun ComposerControlsArea(
                     },
                 )
                 MenuItemRow(
-                    icon = ImageVector.vectorResource(R.drawable.ic_file),
+                    icon = com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_file),
                     label = "文件",
                     onClick = {
                         onDismissMenu()
@@ -1174,7 +1160,7 @@ private fun ComposerControlsArea(
                     },
                 )
                 MenuItemRow(
-                    icon = ImageVector.vectorResource(R.drawable.ic_compass),
+                    icon = com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_compass),
                     label = "目标指令",
                     onClick = {
                         onDismissMenu()
@@ -1182,7 +1168,7 @@ private fun ComposerControlsArea(
                     },
                 )
                 MenuItemRow(
-                    icon = ImageVector.vectorResource(R.drawable.ic_minimize_2),
+                    icon = com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_minimize_2),
                     label = "压缩上下文",
                     onClick = {
                         onDismissMenu()
@@ -1203,7 +1189,7 @@ private fun ComposerControlsArea(
                 modifier = Modifier.size(36.dp),
             ) {
                 Icon(
-                    imageVector = ImageVector.vectorResource(approvalIcon(approvalMode)),
+                    imageVector = com.suixing.agent.ui.components.suixingIcon(approvalIcon(approvalMode)),
                     contentDescription = "当前会话工具审批：${approvalMode.label}",
                     tint = when (approvalMode) {
                         ApprovalMode.DENY -> scheme.error
@@ -1226,7 +1212,7 @@ private fun ComposerControlsArea(
             ) {
                 ApprovalMode.entries.forEach { mode ->
                     MenuItemRow(
-                        icon = ImageVector.vectorResource(approvalIcon(mode)),
+                        icon = com.suixing.agent.ui.components.suixingIcon(approvalIcon(mode)),
                         label = mode.label,
                         selected = mode == approvalMode,
                         onClick = {
@@ -1300,10 +1286,12 @@ private fun ComposerControlsArea(
                 modifier = Modifier.size(30.dp),
             ) {
                 Icon(
-                    ImageVector.vectorResource(R.drawable.ic_mic),
+                    com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_mic),
                     contentDescription = if (running) "语音输入，正在生成时不可录音" else "语音输入",
                     tint = scheme.onSurfaceVariant,
-                    modifier = Modifier.size(18.dp),
+                    modifier = Modifier.size(
+                        if (com.suixing.agent.ui.theme.LocalUseMiuix.current) 20.dp else 18.dp,
+                    ),
                 )
             }
         }
@@ -1314,9 +1302,12 @@ private fun ComposerControlsArea(
         val sendable = primaryAction != PrimaryChatAction.DISABLED
         CircleActionButton(
             icon = if (stopping) {
-                ImageVector.vectorResource(R.drawable.ic_stop_filled)
+                com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_stop_filled)
             } else {
-                ImageVector.vectorResource(R.drawable.ic_arrow_up)
+                com.suixing.agent.ui.components.suixingVector(
+                    R.drawable.ic_arrow_up,
+                    com.suixing.agent.ui.components.MiuixExtraIcons.Send,
+                )
             },
             contentDescription = when {
                 steers -> "插话发送"
@@ -1351,7 +1342,11 @@ private fun ComposerControlsArea(
                 scheme.onSurfaceVariant
             },
             shadowElevation = 0.dp,
-            iconSize = if (stopping) 18.dp else 22.dp,
+            iconSize = if (stopping) {
+                if (com.suixing.agent.ui.theme.LocalUseMiuix.current) 20.dp else 18.dp
+            } else {
+                22.dp
+            },
         )
     }
 }
@@ -1384,7 +1379,7 @@ private fun GoalChip(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Icon(
-                imageVector = ImageVector.vectorResource(R.drawable.ic_compass),
+                imageVector = com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_compass),
                 contentDescription = null,
                 modifier = Modifier.size(15.dp),
             )

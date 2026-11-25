@@ -4,7 +4,7 @@ import kotlin.math.roundToInt
 import kotlin.math.sign
 
 /** Equal weights use the same rounded-share/remainder distribution as Foundation Row. */
-internal class TableColumns(width: Int, count: Int, divider: Int) {
+internal class TableColumns(val width: Int, val count: Int, val divider: Int) {
     val widths = IntArray(count)
     val starts = IntArray(count)
     val dividers = IntArray((count - 1).coerceAtLeast(0))
@@ -44,12 +44,16 @@ internal class TableColumns(width: Int, count: Int, divider: Int) {
 internal class TableColumnCache {
     private data class Key(val width: Int, val count: Int, val divider: Int)
     private val entries = LinkedHashMap<Key, TableColumns>(8, .75f, true)
+    private var last: TableColumns? = null
 
     fun get(width: Int, count: Int, divider: Int): TableColumns {
+        last?.let { if (it.width == width && it.count == count && it.divider == divider) return it }
         val key = Key(width, count, divider)
-        return entries[key] ?: TableColumns(width, count, divider).also { columns ->
+        val result = entries[key] ?: TableColumns(width, count, divider).also { columns ->
             entries[key] = columns
             if (entries.size > 8) entries.entries.iterator().let { it.next(); it.remove() }
         }
+        last = result
+        return result
     }
 }

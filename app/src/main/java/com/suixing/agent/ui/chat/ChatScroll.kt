@@ -46,6 +46,7 @@ fun rememberChatScroll(
     conversationId: Any? = Unit,
     trace: (String) -> Unit = {},
     initialFollowing: Boolean = true,
+    overscrollActiveNow: () -> Boolean = { false },
 ): ChatScroll {
     val scroll = remember(listState) { ChatScroll(listState, conversationId.toString(), initialFollowing) }
     val drawer = LocalDrawerGestureState.current
@@ -65,16 +66,19 @@ fun rememberChatScroll(
     }
     LaunchedEffect(listState, drawer) {
         snapshotFlow {
-            !scroll.stickToBottom && drawer?.homeShieldActive != true && scroll.allowBottomResume && !listState.canScrollForward && !listState.isScrollInProgress && !scroll.nestedScrolling() &&
-                !scroll.restoring && !pressedNow() && !guardNow()
+            !scroll.stickToBottom && drawer?.homeShieldActive != true && scroll.allowBottomResume &&
+                !listState.canScrollForward && !listState.isScrollInProgress && !overscrollActiveNow() &&
+                !scroll.nestedScrolling() && !scroll.restoring && !pressedNow() && !guardNow()
         }.collectLatest { reachedBottom ->
             if (!reachedBottom) return@collectLatest
             val index = listState.firstVisibleItemIndex
             val drawerGeneration = drawer?.gestureGeneration
             // Keep the existing overscroll/selection settling interval.
             delay(420)
-            if (!scroll.stickToBottom && drawer?.gestureGeneration == drawerGeneration && scroll.allowBottomResume && !listState.canScrollForward && !listState.isScrollInProgress && !scroll.nestedScrolling() && !scroll.restoring &&
-                !pressedNow() && !guardNow() && listState.firstVisibleItemIndex == index) {
+            if (!scroll.stickToBottom && drawer?.gestureGeneration == drawerGeneration && scroll.allowBottomResume &&
+                !listState.canScrollForward && !listState.isScrollInProgress && !overscrollActiveNow() &&
+                !scroll.nestedScrolling() && !scroll.restoring && !pressedNow() && !guardNow() &&
+                listState.firstVisibleItemIndex == index) {
                 scroll.stickToBottom = true
                 trace("stick=true reason=reached-bottom")
             }

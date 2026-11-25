@@ -179,9 +179,15 @@ private fun sourceLabel(source: SkillSource): String = when (source) {
 
 @Composable
 private fun SkillIntroCard(rootPath: String) {
-    SuixingCard(containerColor = MaterialTheme.colorScheme.surfaceContainerLow) {
+    SuixingCard(
+        containerColor = if (com.suixing.agent.ui.theme.LocalUseMiuix.current) {
+            MaterialTheme.colorScheme.surfaceContainer
+        } else {
+            MaterialTheme.colorScheme.surfaceContainerLow
+        },
+    ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            SoftIcon(ImageVector.vectorResource(R.drawable.ic_info), size = 34.dp, tint = MaterialTheme.colorScheme.secondary)
+            SoftIcon(com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_info), size = 34.dp, tint = MaterialTheme.colorScheme.secondary)
             Spacer(Modifier.width(12.dp))
             Text("什么是技能", style = SettingsStyle.cardTitle)
         }
@@ -249,7 +255,7 @@ private fun SkillCard(
     val downloaded = remember(skill.sourceUrl, skill.sourceAt) { downloadedLine(skill) }
     SuixingCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            SoftIcon(ImageVector.vectorResource(R.drawable.ic_book_open), tint = MaterialTheme.colorScheme.tertiary)
+            SoftIcon(com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_book_open), tint = MaterialTheme.colorScheme.tertiary)
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
                 Text(
@@ -272,7 +278,7 @@ private fun SkillCard(
             SettingsSwitch(checked = skill.enabled, onCheckedChange = onToggle)
             IconButton(onClick = onDelete) {
                 Icon(
-                    ImageVector.vectorResource(R.drawable.ic_trash),
+                    com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_trash),
                     contentDescription = "删除",
                     modifier = Modifier.size(20.dp),
                 )

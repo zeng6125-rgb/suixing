@@ -125,7 +125,7 @@ internal fun TurnMetrics(
         ) {
             if (elapsedMs > 0) {
                 MetricButton(
-                    icon = ImageVector.vectorResource(R.drawable.ic_clock),
+                    icon = com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_clock),
                     text = elapsed,
                     label = "用时详情",
                     onClick = { shown = MetricCard.TIME; open = MetricCard.TIME },
@@ -133,7 +133,7 @@ internal fun TurnMetrics(
             }
             if (total > 0) {
                 MetricButton(
-                    icon = ImageVector.vectorResource(R.drawable.ic_database),
+                    icon = com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_database),
                     text = remember(total) { "用量 ${shortTokens(total)} tok" },
                     label = "用量详情",
                     onClick = { shown = MetricCard.USAGE; open = MetricCard.USAGE },

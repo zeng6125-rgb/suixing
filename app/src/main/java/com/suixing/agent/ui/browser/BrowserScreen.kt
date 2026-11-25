@@ -24,7 +24,7 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material3.LinearProgressIndicator
+import com.suixing.agent.ui.components.SuixingLinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -77,10 +77,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.asExecutor
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
-import kotlin.coroutines.resume
-import kotlin.coroutines.resumeWithException
 
 internal class BrowserPage(val url: String, val toolRequest: BrowserOpenRequest?)
 
@@ -238,18 +235,42 @@ internal class BrowserSession(private var saved: Bundle? = null) {
     }
 }
 
-private suspend fun startBrowserEngine(context: Context) = suspendCancellableCoroutine<Unit> { ready ->
-    val config = WebViewStartUpConfig.Builder(Dispatchers.IO.asExecutor()).build()
-    WebViewCompat.startUpWebView(
-        context.applicationContext,
-        config,
-        object : WebViewOutcomeReceiver<WebViewStartUpResult, WebViewStartupException> {
-            override fun onResult(result: WebViewStartUpResult) = ready.resume(Unit)
+/** The engine belongs to the process. A cancelled page only stops waiting for it. */
+internal class BrowserEngineStartup {
+    private var readiness: CompletableDeferred<Unit>? = null
 
-            override fun onError(error: WebViewStartupException) =
-                ready.resumeWithException(IllegalStateException("无法启动系统 WebView", error))
-        },
-    )
+    suspend fun awaitReady(start: (CompletableDeferred<Unit>) -> Unit) {
+        val ready = readiness?.takeUnless { it.isCancelled } ?: CompletableDeferred<Unit>().also {
+            readiness = it
+            try {
+                start(it)
+            } catch (failure: Exception) {
+                it.completeExceptionally(failure)
+            }
+        }
+        ready.await()
+    }
+}
+
+private val browserEngineStartup = BrowserEngineStartup()
+
+private suspend fun startBrowserEngine(context: Context) {
+    browserEngineStartup.awaitReady { ready ->
+        val config = WebViewStartUpConfig.Builder(Dispatchers.IO.asExecutor()).build()
+        WebViewCompat.startUpWebView(
+            context.applicationContext,
+            config,
+            object : WebViewOutcomeReceiver<WebViewStartUpResult, WebViewStartupException> {
+                override fun onResult(result: WebViewStartUpResult) {
+                    ready.complete(Unit)
+                }
+
+                override fun onError(error: WebViewStartupException) {
+                    ready.completeExceptionally(IllegalStateException("无法启动系统 WebView", error))
+                }
+            },
+        )
+    }
 }
 
 @Composable
@@ -363,11 +384,11 @@ private fun BrowserTopBar(
     onReload: () -> Unit,
 ) {
     PageTopBar(title = session.title, onBack = onBack) {
-        PageTopBarAction(ImageVector.vectorResource(R.drawable.ic_chevron_left), "后退", {
+        PageTopBarAction(com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_chevron_left), "后退", {
             session.loadedPage?.toolRequest?.fail("用户切换了网页")
             session.view?.goBack()
         }, enabled = session.canBack, glyphSize = 22.dp)
-        PageTopBarAction(ImageVector.vectorResource(R.drawable.ic_chevron_right), "前进", {
+        PageTopBarAction(com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_chevron_right), "前进", {
             session.loadedPage?.toolRequest?.fail("用户切换了网页")
             session.view?.goForward()
         }, enabled = session.canForward, glyphSize = 22.dp)
@@ -499,8 +520,10 @@ private fun BrowserContent(
                 Text("正在打开网页…", color = MaterialTheme.colorScheme.onSurfaceVariant,
                     style = MaterialTheme.typography.bodyMedium, modifier = Modifier.align(Alignment.Center))
             }
-            if (loading && session.error == null) LinearProgressIndicator(
-                progress = { session.progress / 100f }, modifier = Modifier.fillMaxWidth().align(Alignment.TopCenter),
+            if (loading && session.error == null) SuixingLinearProgressIndicator(
+                progress = { session.progress / 100f },
+                modifier = Modifier.fillMaxWidth().align(Alignment.TopCenter),
+                height = 3.dp,
             )
         }
     }

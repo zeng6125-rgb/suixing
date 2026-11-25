@@ -3,6 +3,7 @@
 //! Common text and reasoning events cross the bridge as strings; other events keep their tree.
 
 use crate::{STATUS_CANCELLED, STATUS_OK, STATUS_PANIC, STATUS_REQUEST_ERROR};
+use memchr::memchr;
 use serde_json::Value;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -300,19 +301,29 @@ impl State {
             }
             return Ok(response(0, self.stopped, event));
         }
-        for (index, byte) in bytes.iter().copied().enumerate() {
-            if index % 1024 == 0 {
-                check_cancel(cancelled)?;
+        let mut consumed = 0;
+        while consumed < bytes.len() {
+            check_cancel(cancelled)?;
+            let remaining = &bytes[consumed..];
+            let end = memchr(b'\n', remaining).unwrap_or(remaining.len());
+            let room = MAX_LINE_BYTES - self.line.len();
+            if end > room {
+                return Ok(response(consumed + room + 1, 0, Some(self.error(1))));
             }
-            if byte == b'\n' {
-                let event = self.accept_bytes(true, cancelled)?;
-                if event.is_some() || self.stopped != 0 {
-                    return Ok(response(index + 1, self.stopped, event));
-                }
-            } else if self.line.len() == MAX_LINE_BYTES {
-                return Ok(response(index + 1, 0, Some(self.error(1))));
+            let prefix = &remaining[..end];
+            if end == remaining.len() {
+                self.line.extend_from_slice(prefix);
+                break;
+            }
+            consumed += end + 1;
+            let event = if self.line.is_empty() {
+                self.accept_line_bytes(prefix, true, cancelled)?
             } else {
-                self.line.push(byte);
+                self.line.extend_from_slice(prefix);
+                self.accept_bytes(true, cancelled)?
+            };
+            if event.is_some() || self.stopped != 0 {
+                return Ok(response(consumed, self.stopped, event));
             }
         }
         Ok(response(bytes.len(), 0, None))
@@ -323,27 +334,36 @@ impl State {
         terminated: bool,
         cancelled: &AtomicBool,
     ) -> Result<Option<Event>, i32> {
-        if terminated && self.line.last() == Some(&b'\r') {
-            self.line.pop();
-        }
         let mut bytes = std::mem::take(&mut self.line);
-        // Non-data fields are ignored by the existing reader even when they contain invalid UTF-8.
-        if !bytes.is_empty() && !bytes.starts_with(b"data:") {
+        let event = self.accept_line_bytes(&bytes, terminated, cancelled);
+        if !self.normalizing {
             bytes.clear();
             self.line = bytes;
+        }
+        event
+    }
+
+    fn accept_line_bytes(
+        &mut self,
+        bytes: &[u8],
+        terminated: bool,
+        cancelled: &AtomicBool,
+    ) -> Result<Option<Event>, i32> {
+        let bytes = if terminated {
+            bytes.strip_suffix(b"\r").unwrap_or(bytes)
+        } else {
+            bytes
+        };
+        // Non-data fields are ignored by the existing reader even when they contain invalid UTF-8.
+        if !bytes.is_empty() && !bytes.starts_with(b"data:") {
             return Ok(None);
         }
-        match str::from_utf8(&bytes) {
-            Ok(line) => {
-                let event = self.accept_line(line, cancelled);
-                bytes.clear();
-                self.line = bytes;
-                event
-            }
+        match str::from_utf8(bytes) {
+            Ok(line) => self.accept_line(line, cancelled),
             Err(_) => {
                 self.normalizing = true;
                 let mut body = response_buffer(bytes.len());
-                body.extend_from_slice(&bytes);
+                body.extend_from_slice(bytes);
                 Ok(Some(Event {
                     kind: KIND_NORMALIZE_LINE,
                     body,
@@ -678,6 +698,70 @@ fn decode_event(payload: &str, cancelled: &AtomicBool, protocol: u8) -> Result<O
 #[cfg(test)]
 mod delta_tests {
     use super::*;
+
+    #[test]
+    fn complete_lines_do_not_need_a_carry_buffer() {
+        let cancelled = AtomicBool::new(false);
+        let mut state = State {
+            protocol: 3,
+            ..State::default()
+        };
+        let delta = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"你好🙂\"}\r\n";
+        let comment = b": ignored \xff\r\n";
+        let done = b"data: [DONE]\r\n";
+        let input = [comment.as_slice(), delta.as_bytes(), done.as_slice()].concat();
+
+        let first = state.feed(&input, 0, &cancelled).unwrap();
+        let consumed = comment.len() + delta.len();
+        assert_eq!(&first[4..8], &(consumed as u32).to_le_bytes());
+        assert_eq!(&first[12..16], &KIND_DELTA.to_le_bytes());
+        assert_eq!(state.line.capacity(), 0);
+
+        let end = state.feed(&input[consumed..], 0, &cancelled).unwrap();
+        assert_eq!(&end[4..8], &(done.len() as u32).to_le_bytes());
+        assert_eq!(&end[8..12], &FLAG_DONE.to_le_bytes());
+        assert_eq!(state.line.capacity(), 0);
+    }
+
+    #[test]
+    fn split_utf8_and_crlf_lines_match_the_borrowed_path() {
+        let cancelled = AtomicBool::new(false);
+        let line =
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"你好🙂\"}\r\n".as_bytes();
+        let start = || State {
+            protocol: 3,
+            ..State::default()
+        };
+        let complete = start().feed(line, 0, &cancelled).unwrap();
+        for split in 1..line.len() {
+            let mut state = start();
+            let prefix = state.feed(&line[..split], 0, &cancelled).unwrap();
+            assert_eq!(&prefix[12..16], &KIND_NONE.to_le_bytes());
+            let output = state.feed(&line[split..], 0, &cancelled).unwrap();
+            assert_eq!(&output[4..8], &((line.len() - split) as u32).to_le_bytes());
+            assert_eq!(&output[8..], &complete[8..]);
+        }
+    }
+
+    #[test]
+    fn malformed_final_line_can_be_normalized_and_delivered_at_eof() {
+        let cancelled = AtomicBool::new(false);
+        let mut state = State {
+            protocol: 3,
+            ..State::default()
+        };
+        let raw = b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"\xff\"}";
+        state.feed(&raw[..20], 0, &cancelled).unwrap();
+        state.feed(&raw[20..], 0, &cancelled).unwrap();
+        let requested = state.feed(&[], 1, &cancelled).unwrap();
+        assert_eq!(&requested[12..16], &KIND_NORMALIZE_LINE.to_le_bytes());
+        assert_eq!(&requested[HEADER_BYTES..], raw);
+
+        let normalized = String::from_utf8_lossy(raw);
+        let result = state.feed(normalized.as_bytes(), 2, &cancelled).unwrap();
+        assert_eq!(&result[8..12], &FLAG_EOF.to_le_bytes());
+        assert_eq!(&result[12..16], &KIND_DELTA.to_le_bytes());
+    }
 
     #[test]
     fn projects_text_and_reasoning_through_the_stream_wire() {

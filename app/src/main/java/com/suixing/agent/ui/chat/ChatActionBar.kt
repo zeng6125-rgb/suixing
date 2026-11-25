@@ -109,7 +109,7 @@ internal fun ActionBar(
             val atStart = branch.index <= 0
             val atEnd = branch.index >= branch.runs.lastIndex
             BranchArrow(
-                icon = ImageVector.vectorResource(R.drawable.ic_chevron_left),
+                icon = com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_chevron_left),
                 label = "上一个回答",
                 enabled = !atStart,
                 // **盒宽收到 15dp（= 图标宽）**，同时满足两条（用户：「左侧比右侧大，改成和
@@ -131,7 +131,7 @@ internal fun ActionBar(
                 color = scheme.onSurfaceVariant,
             )
             BranchArrow(
-                icon = ImageVector.vectorResource(R.drawable.ic_chevron_right),
+                icon = com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_chevron_right),
                 label = "下一个回答",
                 enabled = !atEnd,
                 onClick = { onBranch(branch.turnId, branch.runs[branch.index + 1]) },

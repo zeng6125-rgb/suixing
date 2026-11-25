@@ -17,7 +17,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
-import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.platform.ViewConfiguration
 import kotlin.math.abs
 import kotlinx.coroutines.delay
@@ -125,11 +124,11 @@ internal fun rememberChatSelectionGuard(
         val lockOffset = listState.firstVisibleItemScrollOffset
         val latestRequestGeneration = scroll.latestRequestGeneration
         try {
-            while (pressGuardOn) {
-                if (!pressed && SystemClock.uptimeMillis() - pressUpAt >= LONG_PRESS_SETTLE_MS) {
-                    pressGuardOn = false
+            snapshotFlow { if (pressed) null else pressUpAt }.collectLatest { releasedAt ->
+                if (releasedAt != null) {
+                    delay(LONG_PRESS_SETTLE_MS - (SystemClock.uptimeMillis() - releasedAt))
+                    if (!pressed && pressUpAt == releasedAt) pressGuardOn = false
                 }
-                withFrameNanos { }
             }
         } finally {
             // 按下到抬手后 400ms 内，如果列表位置被推走

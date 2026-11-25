@@ -34,6 +34,7 @@ import com.suixing.agent.ui.components.MenuRippleHost
 import com.suixing.agent.ui.components.MenuRippleTextButton
 import com.suixing.agent.ui.components.menuRippleClickable
 import com.suixing.agent.ui.components.PageTopBar
+import com.suixing.agent.ui.components.SuixingDialog
 import com.termux.terminal.TextStyle
 import com.termux.view.TerminalView
 import kotlinx.coroutines.Dispatchers
@@ -86,7 +87,7 @@ fun TerminalScreen(onBack: () -> Unit, chatId: String = "") {
         if (manager.entries.value.isEmpty()) open("android")
     }
     BackHandler(onBack = onBack)
-    if (newSession) AlertDialog(
+    if (newSession) SuixingDialog(
         onDismissRequest = { newSession = false }, title = { Text("新建终端会话") },
         text = {
             MenuRippleHost(horizontalOverflow = 24.dp) {
@@ -106,7 +107,7 @@ fun TerminalScreen(onBack: () -> Unit, chatId: String = "") {
                 }
             }
             }
-        }, confirmButton = { TextButton(onClick = { newSession = false }) { Text("取消") } },
+        }, confirmButton = { dialog -> TextButton(onClick = { dialog.closeThen { newSession = false } }) { Text("取消") } },
     )
     if (sessions) TerminalSessionsDialog(
         entries = entries,
@@ -133,13 +134,15 @@ fun TerminalScreen(onBack: () -> Unit, chatId: String = "") {
         },
     )
     closing?.let { entry ->
-        AlertDialog(onDismissRequest = { closing = null }, title = { Text("停止这个终端会话？") },
+        SuixingDialog(onDismissRequest = { closing = null }, title = { Text("停止这个终端会话？") },
             text = { Text("将终止这个会话中的命令，其它会话继续运行。") },
-            confirmButton = { TextButton(onClick = {
-                closing = null
-                scope.launch { runCatching { manager.stop(entry.info.id) }.onFailure { error = it.message } }
+            confirmButton = { dialog -> TextButton(onClick = {
+                dialog.closeThen {
+                    closing = null
+                    scope.launch { runCatching { manager.stop(entry.info.id) }.onFailure { error = it.message } }
+                }
             }) { Text("停止") } },
-            dismissButton = { TextButton(onClick = { closing = null }) { Text("取消") } })
+            dismissButton = { dialog -> TextButton(onClick = { dialog.closeThen { closing = null } }) { Text("取消") } })
     }
     Scaffold(topBar = { PageTopBar(title = "终端", onBack = onBack,
         actions = { TextButton(onClick = { sessions = true }) { Text("会话 · ${entries.size}") } }) },
@@ -176,7 +179,7 @@ private fun TerminalSessionsDialog(
     onNew: () -> Unit, onEnvironments: () -> Unit, onDismiss: () -> Unit,
 ) {
     val scheme = MaterialTheme.colorScheme
-    AlertDialog(onDismissRequest = onDismiss, title = { Text("终端会话") },
+    SuixingDialog(onDismissRequest = onDismiss, title = { Text("终端会话") },
         text = {
             MenuRippleHost(horizontalOverflow = 24.dp) {
             Column {
@@ -210,11 +213,11 @@ private fun TerminalSessionsDialog(
             }
             }
         },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("完成") } },
-        dismissButton = {
+        confirmButton = { dialog -> TextButton(onClick = { dialog.closeThen(onDismiss) }) { Text("完成") } },
+        dismissButton = { dialog ->
             Row {
-                TextButton(onClick = onEnvironments) { Text("Linux 环境") }
-                TextButton(onClick = onNew) { Text("新建") }
+                TextButton(onClick = { dialog.closeThen(onEnvironments) }) { Text("Linux 环境") }
+                TextButton(onClick = { dialog.closeThen(onNew) }) { Text("新建") }
             }
         })
 }
@@ -268,22 +271,24 @@ private fun TerminalContent(
         onDispose { session.onCopy = null; session.onPaste = null }
     }
     paste?.let { text ->
-        AlertDialog(onDismissRequest = { paste = null }, title = { Text("确认粘贴内容") },
+        SuixingDialog(onDismissRequest = { paste = null }, title = { Text("确认粘贴内容") },
             text = { Column {
                 Text("内容包含换行或控制字符，粘贴后可能执行命令。", style = MaterialTheme.typography.bodySmall)
                 OutlinedTextField(value = text, onValueChange = { paste = it }, maxLines = 8)
             } },
-            confirmButton = { TextButton(onClick = {
-                if (running && text.toByteArray().size <= 16 * 1024) {
-                    session.takeOver()
-                    session.display.emulator.paste(text)
+            confirmButton = { dialog -> TextButton(onClick = {
+                dialog.closeThen {
+                    if (running && text.toByteArray().size <= 16 * 1024) {
+                        session.takeOver()
+                        session.display.emulator.paste(text)
+                    }
+                    paste = null
+                    keyboard()
                 }
-                paste = null
-                keyboard()
             }) { Text("确认粘贴") } },
-            dismissButton = { TextButton(onClick = { paste = null }) { Text("取消") } })
+            dismissButton = { dialog -> TextButton(onClick = { dialog.closeThen { paste = null } }) { Text("取消") } })
     }
-    if (details) AlertDialog(onDismissRequest = { details = false }, title = { Text("会话信息") },
+    if (details) SuixingDialog(onDismissRequest = { details = false }, title = { Text("会话信息") },
         text = { SelectionContainer {
             Text(listOfNotNull(
                 if (entry.info.kind == "android") "Android · 应用身份" else "Linux · 模拟 root",
@@ -291,7 +296,7 @@ private fun TerminalContent(
                 if (entry.info.kind == "android") session.cwd else "/workspace → ${session.cwd}",
                 entry.info.note?.let { "启动说明：$it" },
             ).joinToString("\n"), fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
-        } }, confirmButton = { TextButton(onClick = { details = false }) { Text("完成") } })
+        } }, confirmButton = { dialog -> TextButton(onClick = { dialog.closeThen { details = false } }) { Text("完成") } })
     Column(modifier.fillMaxWidth()) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
             Text(title, style = MaterialTheme.typography.labelMedium, maxLines = 1,

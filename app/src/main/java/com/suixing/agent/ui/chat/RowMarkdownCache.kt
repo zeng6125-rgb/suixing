@@ -43,6 +43,8 @@ internal class RowMarkdownCache {
         preparedRows.retainAll(ids)
     }
 
+    fun hasPreparedDocuments(): Boolean = preparedRows.isNotEmpty()
+
     /** Keep lightweight row slots, but release parsed documents outside the preparation window. */
     fun retainDocuments(ids: Set<String>) {
         val iterator = preparedRows.iterator()

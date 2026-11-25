@@ -70,4 +70,18 @@ class AppearanceSettingsPersistenceTest {
         assertEquals(2, reopened.bubbleWidth)
         assertEquals(3, reopened.fontScale)
     }
+
+    @Test fun `miuix ui theme and font preset persist independently of paletteMode`() = runBlocking<Unit> {
+        val firstOwner = owner()
+        val repository = SettingsRepository(preferences(firstOwner))
+        assertEquals(FONT_PRESET_JAGENT, repository.current().fontPreset)
+        assertTrue(repository.update { it.copy(uiTheme = 1, paletteMode = 4, themeMode = 2, fontPreset = FONT_PRESET_SYSTEM) })
+        firstOwner.coroutineContext[Job]!!.cancelAndJoin()
+
+        val reopened = SettingsRepository(preferences(owner())).current()
+        assertEquals(1, reopened.uiTheme)
+        assertEquals(4, reopened.paletteMode)
+        assertEquals(2, reopened.themeMode)
+        assertEquals(FONT_PRESET_SYSTEM, reopened.fontPreset)
+    }
 }

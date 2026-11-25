@@ -27,7 +27,7 @@ class AppearancePaletteTest {
         assertEquals(null, AppearancePalette.CLAUDE.userBubbleColor(dark = true))
         for (palette in listOf(
             AppearancePalette.WALLPAPER,
-            AppearancePalette.CODEX,
+            AppearancePalette.MIUIX,
         )) {
             for (dark in listOf(false, true)) {
                 assertEquals("$palette dark=$dark", null, palette.userBubbleColor(dark))
@@ -36,35 +36,58 @@ class AppearancePaletteTest {
     }
 
     @Test
-    fun `saved palette ids retain their meaning and the retired green falls back to JAgent`() {
-        // id 0 是已移除的墨绿：老存档落到默认的 JAgent 配色，而不是崩或留白。
+    fun `saved palette ids retain their meaning and retired ids fall back to JAgent`() {
+        // id 0（已移除的墨绿）、id 3（已移除的 Codex）与未知值都落到默认的 JAgent 配色；id 4 对应「MIUIX 默认」。
         assertEquals(AppearancePalette.CLAUDE, AppearancePalette.fromId(0))
         assertEquals(AppearancePalette.WALLPAPER, AppearancePalette.fromId(1))
         assertEquals(AppearancePalette.CLAUDE, AppearancePalette.fromId(2))
-        assertEquals(AppearancePalette.CODEX, AppearancePalette.fromId(3))
+        assertEquals(AppearancePalette.CLAUDE, AppearancePalette.fromId(3))
+        assertEquals(AppearancePalette.MIUIX, AppearancePalette.fromId(4))
         assertEquals(AppearancePalette.CLAUDE, AppearancePalette.fromId(99))
+        assertEquals(3, AppearancePalette.entries.size)
     }
 
     @Test
-    fun `new palettes keep main text and accents legible in light and dark`() {
-        for (palette in listOf(AppearancePalette.CLAUDE, AppearancePalette.CODEX)) {
+    fun `miuix standalone theme resolves selected palette tokens in both light and dark`() {
+        for (palette in AppearancePalette.entries) {
             for (dark in listOf(false, true)) {
-                val scheme = palette.scheme(dark)
-                val label = "$palette dark=$dark"
+                val scheme = resolvedScheme(UI_THEME_MIUIX, paletteMode = palette.id, dark = dark)
+                assertEquals(palette.scheme(dark), scheme)
+                val label = "MIUIX-$palette dark=$dark"
+                val accentMin = if (palette == AppearancePalette.MIUIX) 3.0f else 4.5f
+                val cardBg = if (palette == AppearancePalette.MIUIX) scheme.surface else scheme.surfaceContainerHighest
                 assertContrast("$label body", scheme.onBackground, scheme.background)
-                assertContrast("$label card", scheme.onSurface, scheme.surfaceContainerHighest)
-                assertContrast("$label supporting text", scheme.onSurfaceVariant, scheme.surfaceContainerHighest)
-                assertContrast("$label accent", scheme.primary, scheme.surfaceContainerHighest)
-                assertContrast("$label button", scheme.onPrimary, scheme.primary)
+                assertContrast("$label card", scheme.onSurface, cardBg)
+                assertContrast("$label supporting text", scheme.onSurfaceVariant, cardBg)
+                assertContrast("$label accent", scheme.primary, cardBg, minRatio = accentMin)
+                assertContrast("$label button", scheme.onPrimary, scheme.primary, minRatio = accentMin)
                 assertContrast("$label chip", scheme.onPrimaryContainer, scheme.primaryContainer)
             }
         }
     }
 
-    private fun assertContrast(label: String, foreground: Color, background: Color) {
+    @Test
+    fun `new palettes keep main text and accents legible in light and dark`() {
+        for (palette in listOf(AppearancePalette.CLAUDE, AppearancePalette.MIUIX)) {
+            for (dark in listOf(false, true)) {
+                val scheme = palette.scheme(dark)
+                val label = "$palette dark=$dark"
+                val accentMin = if (palette == AppearancePalette.MIUIX) 3.0f else 4.5f
+                val cardBg = if (palette == AppearancePalette.MIUIX) scheme.surface else scheme.surfaceContainerHighest
+                assertContrast("$label body", scheme.onBackground, scheme.background)
+                assertContrast("$label card", scheme.onSurface, cardBg)
+                assertContrast("$label supporting text", scheme.onSurfaceVariant, cardBg)
+                assertContrast("$label accent", scheme.primary, cardBg, minRatio = accentMin)
+                assertContrast("$label button", scheme.onPrimary, scheme.primary, minRatio = accentMin)
+                assertContrast("$label chip", scheme.onPrimaryContainer, scheme.primaryContainer)
+            }
+        }
+    }
+
+    private fun assertContrast(label: String, foreground: Color, background: Color, minRatio: Float = 4.5f) {
         val first = foreground.luminance()
         val second = background.luminance()
         val ratio = (maxOf(first, second) + 0.05f) / (minOf(first, second) + 0.05f)
-        assertTrue("$label contrast was $ratio", ratio >= 4.5f)
+        assertTrue("$label contrast was $ratio", ratio >= minRatio)
     }
 }

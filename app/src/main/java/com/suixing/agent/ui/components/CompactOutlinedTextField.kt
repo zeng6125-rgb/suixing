@@ -53,6 +53,32 @@ fun CompactOutlinedTextField(
     shape: Shape = MaterialTheme.shapes.small,
     colors: TextFieldColors = OutlinedTextFieldDefaults.colors(),
 ) {
+    if (com.suixing.agent.ui.theme.LocalUseMiuix.current) {
+        MiuixCompactTextField(
+            value = value,
+            onValueChange = onValueChange,
+            modifier = modifier,
+            enabled = enabled,
+            readOnly = readOnly,
+            textStyle = textStyle,
+            label = label,
+            placeholder = placeholder,
+            leadingIcon = leadingIcon,
+            trailingIcon = trailingIcon,
+            prefix = prefix,
+            suffix = suffix,
+            supportingText = supportingText,
+            isError = isError,
+            visualTransformation = visualTransformation,
+            keyboardOptions = keyboardOptions,
+            keyboardActions = keyboardActions,
+            singleLine = singleLine,
+            maxLines = maxLines,
+            minLines = minLines,
+            interactionSource = interactionSource,
+        )
+        return
+    }
     val interactions = interactionSource ?: remember { MutableInteractionSource() }
     val focused by interactions.collectIsFocusedAsState()
     val textColor = when {

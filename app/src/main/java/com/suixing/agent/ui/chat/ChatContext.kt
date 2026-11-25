@@ -117,10 +117,11 @@ internal fun TopBarContextEntry(
     // enforceTouchTarget = false：嵌在头部行的既有热区里，不补 48dp（会撑高行）。
     Box {
         CircleIconAction(
-            icon = painterResource(R.drawable.ic_chart_column),
+            icon = com.suixing.agent.ui.components.suixingIconPainter(R.drawable.ic_chart_column),
             label = "上下文用量明细",
             onClick = { open = true },
-            size = 28.dp,
+            size = 32.dp,
+            glyphSize = 20.dp,
             enforceTouchTarget = false,
         )
         // **直接复用 MenuCard**（模型选择等七处同一个组件）：同一个 Popup、同一套卡片外框、
@@ -308,7 +309,7 @@ internal fun CheckpointCard(
     var showOriginal by remember { mutableStateOf(false) }
     // *和思考块/工具块同一个折叠壳**（用户：「不要直勾勾显示在卡片下方，像工具块思考块一样
     ProcessCard(
-        icon = ImageVector.vectorResource(R.drawable.ic_minimize_2),
+        icon = com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_minimize_2),
         title = "已压缩上下文 · ${formatTime(checkpoint.at)}",
         expanded = expanded,
         onToggle = { expanded = !expanded },
@@ -438,7 +439,7 @@ internal fun SteerQueueRow(
             // A clock, not a speech mark: the line is waiting, and that is the whole point of
             // the bar.
             Icon(
-                imageVector = ImageVector.vectorResource(R.drawable.ic_clock),
+                imageVector = com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_clock),
                 contentDescription = null,
                 tint = scheme.onSurfaceVariant,
                 modifier = Modifier.size(15.dp),
@@ -563,7 +564,7 @@ internal fun TodoQueueRow(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Icon(
-                imageVector = ImageVector.vectorResource(
+                imageVector = com.suixing.agent.ui.components.suixingIcon(
                     if (done) R.drawable.ic_circle_check else R.drawable.ic_list_checks,
                 ),
                 contentDescription = null,
@@ -656,7 +657,7 @@ private fun CopyGlyphIcon(
         contentAlignment = Alignment.Center,
     ) {
         Icon(
-            imageVector = ImageVector.vectorResource(R.drawable.ic_copy),
+            imageVector = com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_copy),
             contentDescription = contentDescription,
             tint = tint,
             modifier = Modifier.size(glyphSize),
@@ -677,7 +678,7 @@ internal fun RunReasonLine(reason: String) {
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Icon(
-            imageVector = ImageVector.vectorResource(R.drawable.ic_circle_alert),
+            imageVector = com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_circle_alert),
             contentDescription = null,
             tint = scheme.error,
             modifier = Modifier.size(14.dp),
@@ -735,7 +736,7 @@ internal fun FailureReceiptRow(text: String) {
             verticalAlignment = Alignment.Top,
         ) {
             Icon(
-                imageVector = ImageVector.vectorResource(R.drawable.ic_circle_alert),
+                imageVector = com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_circle_alert),
                 contentDescription = null,
                 tint = scheme.error,
                 // **用 offset 而不是 padding**：padding 会把 14dp 的图标**压扁**成

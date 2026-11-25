@@ -1,5 +1,6 @@
 package com.suixing.agent.ui.chat
 
+import android.os.SystemClock
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.gestures.BringIntoViewSpec
 import androidx.compose.foundation.gestures.LocalBringIntoViewSpec
@@ -17,6 +18,8 @@ import androidx.compose.runtime.snapshots.Snapshot
 import androidx.compose.ui.platform.ViewConfiguration
 import io.mockk.every
 import io.mockk.mockk
+import io.mockk.mockkStatic
+import io.mockk.unmockkStatic
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
@@ -65,6 +68,31 @@ class ChatSelectionGuardTest {
         assertEquals(listOf(true, false), events)
     }
 
+    @Test fun releaseSettlesTheSelectionWithoutAnotherDisplayFrame() {
+        mockkStatic(SystemClock::class)
+        try {
+            every { SystemClock.uptimeMillis() } returns 2_000L
+            withGuard { fixture ->
+                val binding = fixture.current.value
+                fixture.gesture.pressed = true
+                fixture.gesture.pressGuardOn = true
+                fixture.frames()
+                assertEquals(listOf(true), binding.events)
+
+                fixture.gesture.pressUpAt = 2_000L - LONG_PRESS_SETTLE_MS
+                fixture.gesture.pressed = false
+                repeat(3) {
+                    Snapshot.sendApplyNotifications()
+                    repeat(8) { yield() }
+                }
+                assertFalse(fixture.gesture.pressGuardOn)
+                assertEquals(listOf(true, false), binding.events)
+            }
+        } finally {
+            unmockkStatic(SystemClock::class)
+        }
+    }
+
     private data class Binding(
         val id: String,
         val offset: androidx.compose.runtime.MutableIntState = mutableIntStateOf(0),
@@ -92,12 +120,12 @@ class ChatSelectionGuardTest {
     }
 
     private fun withGuard(block: suspend (Fixture) -> Unit) = runBlocking {
+        val clock = BroadcastFrameClock()
+        val fixture = Fixture(clock)
+        val viewConfig = mockk<ViewConfiguration> {
+            every { longPressTimeoutMillis } returns 500L
+        }
         withTimeout(5_000) {
-            val clock = BroadcastFrameClock()
-            val fixture = Fixture(clock)
-            val viewConfig = mockk<ViewConfiguration> {
-                every { longPressTimeoutMillis } returns 500L
-            }
             val bringIntoViewSpec = object : BringIntoViewSpec {
                 override fun calculateScrollDistance(offset: Float, size: Float, containerSize: Float) = 0f
             }

@@ -30,7 +30,6 @@ import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.offset
 import androidx.compose.ui.zIndex
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.suixing.agent.R
@@ -57,6 +56,7 @@ internal fun BoxScope.ChatComposerPanel(
     snackbarHostState: SnackbarHostState,
     scroll: ChatScroll,
     itemCount: Int,
+    navBarPx: Int,
     imePxState: State<Int>,
     onOpenSettings: () -> Unit,
     jumpToLatest: () -> Unit,
@@ -88,11 +88,10 @@ internal fun BoxScope.ChatComposerPanel(
     Box(
         modifier = Modifier
             .align(Alignment.BottomCenter)
-            .offset { IntOffset(0, -imePxState.value) }
             .layout { measurable, constraints ->
-                // Size for the taller keyboard endpoint. Placement still follows each live inset.
-                val child = measurable.measure(constraints.offset(vertical = -imeReserve.value))
-                layout(child.width, child.height) { child.placeRelative(0, 0) }
+                measureComposerImeViewport(measurable, constraints, navBarPx, imeReserve.value) {
+                    imePxState.value
+                }
             },
     ) {
         ComposerDraftText(actions, state.conversationId) { input ->
@@ -269,7 +268,7 @@ internal fun BoxScope.JumpToLatestButton(
         )
         IconButton(onClick = onClick, modifier = Modifier.fillMaxSize()) {
             Icon(
-                ImageVector.vectorResource(R.drawable.ic_arrow_down),
+                com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_arrow_down),
                 contentDescription = "回到最新",
                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.size(20.dp),

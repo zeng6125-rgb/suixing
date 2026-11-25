@@ -83,24 +83,32 @@ fun SuixingTopBar(
     startPadding: Dp = 8.dp,
 ) {
     val scheme = MaterialTheme.colorScheme
+    val useMiuix = com.suixing.agent.ui.theme.LocalUseMiuix.current
+    val miuixBarColor = if (useMiuix) top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme.surface else Color.Unspecified
     Box(
         Modifier
             .fillMaxWidth()
-            .background(
-                // 三档渐隐，不是两档：两档（10% → 透明）在 68dp 的高度里到一半就淡没了，
-                // 按钮与标题看着像浮在文字上。18%/6% 用户仍说「淡」——这一栏背后是整页
-                // surface，对比只来自 primary 与 surface 的色差，18% 在浅色主题里只有几个
-                // 色阶。现在 26%/10% 起步，到栏底才归零，于是这一栏有明确的「底」，又不会
-                // 在栏下缘留一条硬边。
-                //
-                // 没有叠 surfaceContainerLow(0.35) 的平铺：平铺在渐变最淡的栏底仍是满值，
-                // 栏底会立刻撞回页面的 surface，正好把这条渐变要消掉的那条硬边又画回来。
-                // 「有底」由 26% 的起步和下面那条 1dp 收边一起给，不需要再加一层。
-                remember(scheme.primary) {
-                    Brush.verticalGradient(
-                        0f to scheme.primary.copy(alpha = 0.26f),
-                        0.55f to scheme.primary.copy(alpha = 0.10f),
-                        1f to Color.Transparent,
+            .then(
+                if (useMiuix) {
+                    Modifier.background(miuixBarColor)
+                } else {
+                    Modifier.background(
+                        // 三档渐隐，不是两档：两档（10% → 透明）在 68dp 的高度里到一半就淡没了，
+                        // 按钮与标题看着像浮在文字上。18%/6% 用户仍说「淡」——这一栏背后是整页
+                        // surface，对比只来自 primary 与 surface 的色差，18% 在浅色主题里只有几个
+                        // 色阶。现在 26%/10% 起步，到栏底才归零，于是这一栏有明确的「底」，又不会
+                        // 在栏下缘留一条硬边。
+                        //
+                        // 没有叠 surfaceContainerLow(0.35) 的平铺：平铺在渐变最淡的栏底仍是满值，
+                        // 栏底会立刻撞回页面的 surface，正好把这条渐变要消掉的那条硬边又画回来。
+                        // 「有底」由 26% 的起步和下面那条 1dp 收边一起给，不需要再加一层。
+                        remember(scheme.primary) {
+                            Brush.verticalGradient(
+                                0f to scheme.primary.copy(alpha = 0.26f),
+                                0.55f to scheme.primary.copy(alpha = 0.10f),
+                                1f to Color.Transparent,
+                            )
+                        },
                     )
                 },
             ),
@@ -173,7 +181,7 @@ fun SuixingTopBar(
                                 )
                                 if (interactive) {
                                     Icon(
-                                        painter = painterResource(R.drawable.ic_chevron_down),
+                                        painter = suixingIconPainter(R.drawable.ic_chevron_down),
                                         contentDescription = null,
                                         tint = MaterialTheme.colorScheme.primary,
                                         modifier = Modifier.size(16.dp),
@@ -210,6 +218,15 @@ fun PageTopBar(
     subtitle: String? = null,
     actions: @Composable RowScope.() -> Unit = {},
 ) {
+    if (com.suixing.agent.ui.theme.LocalUseMiuix.current) {
+        MiuixPageTopBar(
+            title = title,
+            onBack = onBack,
+            subtitle = subtitle,
+            actions = actions,
+        )
+        return
+    }
     // 栏底不画线，也不再铺另一层底色：底色与页面同一个 background（用户原话「顶栏的颜色和
     // 页面颜色一致就行，不用分色块」——这一栏原本用 surfaceContainerLow，于是只有子页顶上
     // 挂着一块看得见的色块）。分层只剩栏下那 12dp 空隙，也不靠阴影（README「不用阴影」）：
@@ -243,7 +260,7 @@ fun PageTopBar(
                 // sticker. The chat header is the other way round — it floats over the
                 // transcript with no fill, so there every button carries its own disc.
                 CircleActionButton(
-                    painter = painterResource(R.drawable.ic_arrow_left),
+                    painter = suixingIconPainter(R.drawable.ic_arrow_left),
                     contentDescription = "返回",
                     onClick = onBack,
                     containerColor = Color.Transparent,

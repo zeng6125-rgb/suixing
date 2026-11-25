@@ -72,7 +72,7 @@ internal fun ApprovalDialog(
     }
     SuixingDialog(
         onDismissRequest = { resolve(false) },
-        icon = { Icon(ImageVector.vectorResource(R.drawable.ic_shield_alert), contentDescription = null) },
+        icon = { Icon(com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_shield_alert), contentDescription = null) },
         title = {
             Column {
                 Text("需要你确认")

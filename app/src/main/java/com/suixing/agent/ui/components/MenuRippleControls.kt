@@ -56,6 +56,14 @@ internal fun MenuRippleCheckbox(
     onCheckedChange: ((Boolean) -> Unit)?,
     modifier: Modifier = Modifier,
 ) {
+    if (com.suixing.agent.ui.theme.LocalUseMiuix.current) {
+        MiuixCheckboxControl(
+            checked = checked,
+            onCheckedChange = onCheckedChange,
+            modifier = modifier,
+        )
+        return
+    }
     // Checkbox owns its small circular ripple and the internal Press coordinate space.
     // Keeping it native also avoids registering another full-width layer for the same row.
     val configuration = rememberMenuRippleConfiguration()

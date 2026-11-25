@@ -1,6 +1,8 @@
 package com.suixing.agent.ui.settings
 
 import com.suixing.agent.data.SecretBox
+import androidx.compose.animation.AnimatedVisibility
+import com.suixing.agent.ui.theme.UI_THEME_MIUIX
 import com.suixing.agent.ui.components.settingsPagePadding
 import com.suixing.agent.ui.components.SettingsStyle
 import com.suixing.agent.ui.components.CompletionDot
@@ -149,7 +151,19 @@ internal fun AppearanceSettingsPage(onBack: () -> Unit) {
         ) {
             item { SectionHeader("主题与配色", first = true) }
             item {
-                LabeledBlock(label = "主题") {
+                LabeledBlock(
+                    label = "主题",
+                    hint = "「默认」使用 Material 3 组件；「MIUIX」启用第三方 Miuix（HyperOS 风格）组件与图标，两者均支持下方配色与字体。",
+                ) {
+                    SegmentedPill(
+                        options = listOf("默认", "MIUIX"),
+                        selectedIndex = if (stored.uiTheme == UI_THEME_MIUIX) 1 else 0,
+                        onSelect = { index -> scope.persist { it.copy(uiTheme = index) } },
+                    )
+                }
+            }
+            item {
+                LabeledBlock(label = "深浅模式") {
                     SegmentedPill(
                         options = listOf("跟随系统", "浅色", "深色"),
                         selectedIndex = stored.themeMode.coerceIn(0, 2),
@@ -160,7 +174,7 @@ internal fun AppearanceSettingsPage(onBack: () -> Unit) {
             item {
                 LabeledBlock(
                     label = "配色",
-                    hint = "「跟随壁纸」需要安卓 12 以上，会改用系统动态取色。",
+                    hint = "「跟随壁纸」需要安卓 12 以上，会改用系统动态取色；默认与 MIUIX 主题均同步生效，「MIUIX 默认」即官方 HyperOS 蓝白/纯黑配色。",
                 ) {
                     SegmentedPill(
                         options = AppearancePalette.labels,
@@ -173,6 +187,25 @@ internal fun AppearanceSettingsPage(onBack: () -> Unit) {
                 }
             }
             item { SectionHeader("文字与布局") }
+            item {
+                LabeledBlock(
+                    label = "字体",
+                    hint = "「系统字体」使用系统默认无衬线体；「JAgent 字体」使用衬线正文字体（默认）。",
+                ) {
+                    SegmentedPill(
+                        options = listOf("系统字体", "JAgent 字体"),
+                        selectedIndex = if (stored.fontPreset == com.suixing.agent.data.FONT_PRESET_SYSTEM) 0 else 1,
+                        onSelect = { index ->
+                            val nextPreset = if (index == 0) {
+                                com.suixing.agent.data.FONT_PRESET_SYSTEM
+                            } else {
+                                com.suixing.agent.data.FONT_PRESET_JAGENT
+                            }
+                            scope.persist { it.copy(fontPreset = nextPreset) }
+                        },
+                    )
+                }
+            }
             item {
                 LabeledBlock(label = "字号", hint = "正文字号，立即生效。") {
                     SegmentedPill(
@@ -265,24 +298,32 @@ internal fun AppearanceSettingsPage(onBack: () -> Unit) {
                 }
             }
             item {
-                TextButton(
-                    onClick = {
-                        val defaults = AppSettings()
-                        scope.persist {
-                            it.copy(
-                                themeMode = defaults.themeMode,
-                                paletteMode = defaults.paletteMode,
-                                fontScale = defaults.fontScale,
-                                bubbleWidth = defaults.bubbleWidth,
-                                assistantCard = defaults.assistantCard,
-                                cornerScale = defaults.cornerScale,
-                                // 只重置此页管理的外观参数；边缘光由 UI自动化页管理。
-                                bannerSeconds = defaults.bannerSeconds,
-                                typewriter = defaults.typewriter,
-                            )
-                        }
-                    },
-                ) { Text("恢复默认外观") }
+                val resetAppearance: () -> Unit = {
+                    val defaults = AppSettings()
+                    scope.persist {
+                        it.copy(
+                            uiTheme = defaults.uiTheme,
+                            themeMode = defaults.themeMode,
+                            paletteMode = defaults.paletteMode,
+                            fontPreset = defaults.fontPreset,
+                            fontScale = defaults.fontScale,
+                            bubbleWidth = defaults.bubbleWidth,
+                            assistantCard = defaults.assistantCard,
+                            cornerScale = defaults.cornerScale,
+                            // 只重置此页管理的外观参数；边缘光由 UI自动化页管理。
+                            bannerSeconds = defaults.bannerSeconds,
+                            typewriter = defaults.typewriter,
+                        )
+                    }
+                }
+                if (com.suixing.agent.ui.theme.LocalUseMiuix.current) {
+                    com.suixing.agent.ui.components.MiuixActionTextButton(
+                        text = "恢复默认外观",
+                        onClick = resetAppearance,
+                    )
+                } else {
+                    TextButton(onClick = resetAppearance) { Text("恢复默认外观") }
+                }
             }
         }
     }

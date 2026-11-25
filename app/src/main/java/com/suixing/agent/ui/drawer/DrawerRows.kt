@@ -246,7 +246,10 @@ internal fun ConversationRow(
                 // 放标题左边，与行尾的菜单/排序把手区分开。
                 if (conversation.pinned) {
                     Icon(
-                        painter = painterResource(R.drawable.ic_star),
+                        painter = com.suixing.agent.ui.components.suixingPainter(
+                            R.drawable.ic_star,
+                            com.suixing.agent.ui.components.MiuixExtraIcons.Pin,
+                        ),
                         contentDescription = "已置顶",
                         tint = scheme.primary,
                         modifier = Modifier.size(14.dp),
@@ -348,6 +351,11 @@ internal fun ConversationRow(
                 DrawerMenuAction(
                     if (conversation.pinned) "取消置顶" else "置顶",
                     iconRes = R.drawable.ic_star,
+                    miuixIcon = if (conversation.pinned) {
+                        com.suixing.agent.ui.components.MiuixExtraIcons.Unpin
+                    } else {
+                        com.suixing.agent.ui.components.MiuixExtraIcons.Pin
+                    },
                     onClick = onTogglePin,
                 )
                 // 归档：从抽屉列表里收起来，数据留着；取消归档在「设置 → 会话管理」那一页。

@@ -130,7 +130,7 @@ internal fun AttachmentChip(attachment: Attachment, onRemove: () -> Unit) {
                     )
                 } else {
                     Icon(
-                        imageVector = ImageVector.vectorResource(R.drawable.ic_file),
+                        imageVector = com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_file),
                         contentDescription = null,
                         tint = scheme.onSurfaceVariant,
                         modifier = Modifier.size(18.dp),
@@ -163,7 +163,7 @@ internal fun AttachmentChip(attachment: Attachment, onRemove: () -> Unit) {
                 }
                 IconButton(onClick = onRemove, modifier = Modifier.size(26.dp)) {
                     Icon(
-                        imageVector = ImageVector.vectorResource(R.drawable.ic_x),
+                        imageVector = com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_x),
                         contentDescription = "移除附件：" + attachment.label,
                         tint = scheme.onSurfaceVariant,
                         modifier = Modifier.size(15.dp),

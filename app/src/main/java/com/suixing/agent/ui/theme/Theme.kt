@@ -22,7 +22,7 @@ val LocalDarkTheme = staticCompositionLocalOf { false }
 
 /**
  * 用户气泡的底色。默认 null ⇒ 用 Material 的 `primaryContainer`，也就是JAgent / 壁纸 /
- * Codex 与深色 Claude 的原样。只有 Claude 浅色单独给一个暖米色（用户给的截图色
+ * 跟随壁纸、MIUIX 默认与深色 Claude 的原样。只有 Claude 浅色单独给一个暖米色（用户给的截图色
  * `#EAE4D5`），因为 `primaryContainer` 同时被模型 chip、助手选中态等 5 处复用，
  * 改那个槽位会把它们一起带走。
  */
@@ -34,7 +34,9 @@ val LocalDrawerSurfaceColor = staticCompositionLocalOf<Color?> { null }
 @Composable
 fun SuixingTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
+    uiTheme: Int = UI_THEME_DEFAULT,
     paletteMode: Int = 2,
+    fontPreset: Int = com.suixing.agent.data.FONT_PRESET_JAGENT,
     fontScale: Int = 1,
     cornerScale: Int = 1,
     content: @Composable () -> Unit,
@@ -45,32 +47,33 @@ fun SuixingTheme(
     // 而外壳（MainActivity）每次写设置都会重组一次，等于每次改设置都重建整份配色。
     // 键里带 `LocalConfiguration`：动态取色跟着壁纸与深浅色走，换壁纸必须重新取一次。
     val configuration = LocalConfiguration.current
+    val useMiuix = uiTheme == UI_THEME_MIUIX
     val palette = AppearancePalette.fromId(paletteMode)
-    val scheme = remember(context, darkTheme, palette, configuration) {
+    val scheme = remember(context, darkTheme, uiTheme, palette, configuration) {
         if (palette == AppearancePalette.WALLPAPER && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
         } else {
-            palette.scheme(darkTheme)
+            resolvedScheme(uiTheme, palette.id, darkTheme)
         }
     }
     // Rebuilding the ramp is cheap but not free, and a tier only moves in settings,
     // so the two of them are keyed on the setting instead of running every recomposition.
-    val useSerif = palette == AppearancePalette.CLAUDE
+    val useSerif = fontPreset != com.suixing.agent.data.FONT_PRESET_SYSTEM
     val typography = remember(fontScale, useSerif) { suixingTypography(fontScale, serif = useSerif) }
     val shapes = remember(cornerScale) { suixingShapes(cornerScale) }
     // **选中高亮必须自己给**（用户：「有些地方长按复制没有底色，看不出选了哪儿」）：
     // 全项目此前没有设置 `LocalTextSelectionColors`，用的是 Compose 默认值 ——
     // 它由 primary 派生、透明度很低，浅色画布上几乎看不见。
-    // Codex follows the desktop's independent blue selection; other palettes use primary 32%.
-    val selectionBackground = palette.textSelectionBackgroundColor(darkTheme)
-    val selectionColors = remember(scheme.primary, selectionBackground) {
+    val selectionColors = remember(scheme.primary) {
         androidx.compose.foundation.text.selection.TextSelectionColors(
             handleColor = scheme.primary,
-            backgroundColor = selectionBackground ?: scheme.primary.copy(alpha = 0.32f),
+            backgroundColor = scheme.primary.copy(alpha = 0.32f),
         )
     }
     CompositionLocalProvider(
         LocalDarkTheme provides darkTheme,
+        LocalUseMiuix provides useMiuix,
+        LocalMiuixCornerScale provides cornerScale,
         LocalUserBubbleColor provides palette.userBubbleColor(darkTheme),
         LocalDrawerSurfaceColor provides palette.drawerSurfaceColor(darkTheme),
         androidx.compose.foundation.text.selection.LocalTextSelectionColors provides selectionColors,
@@ -79,7 +82,19 @@ fun SuixingTheme(
             colorScheme = scheme,
             typography = typography,
             shapes = shapes,
-            content = content,
-        )
+        ) {
+            if (useMiuix) {
+                MiuixPaletteContainer(
+                    scheme = scheme,
+                    darkTheme = darkTheme,
+                    fontScale = fontScale,
+                    serif = useSerif,
+                    nativeMiuixPalette = palette == AppearancePalette.MIUIX,
+                    content = content,
+                )
+            } else {
+                content()
+            }
+        }
     }
 }

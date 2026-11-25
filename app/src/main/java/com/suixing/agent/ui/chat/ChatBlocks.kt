@@ -36,7 +36,7 @@ import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.CircularProgressIndicator
+import com.suixing.agent.ui.components.SuixingCircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -112,7 +112,7 @@ internal fun ExpandChevron(expanded: Boolean) {
     )
     Box(Modifier.size(24.dp), contentAlignment = Alignment.Center) {
         Icon(
-            imageVector = ImageVector.vectorResource(R.drawable.ic_chevron_down),
+            imageVector = com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_chevron_down),
             contentDescription = null,
             tint = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.size(16.dp).graphicsLayer { rotationZ = rotation.value },
@@ -496,23 +496,25 @@ internal fun ReasoningBlock(
             val lineCount by rememberUpdatedState(lines.size)
             // A completed user scroll away from the bottom stops following; reaching
             // the bottom resumes it. Content growth alone must not disable following.
-            var innerWasScrolling by remember { mutableStateOf(false) }
             LaunchedEffect(inner) {
                 inner.interactionSource.interactions.collect { interaction ->
                     if (interaction is DragInteraction.Start) viewport.follow = false
                 }
             }
             LaunchedEffect(inner) {
-                snapshotFlow { Triple(inner.isScrollInProgress, inner.canScrollForward, inner.layoutInfo.totalItemsCount > 0) }
-                    .collect { (scrolling, canForward, measured) ->
-                        if (!measured) return@collect
-                        if (!canForward && !scrolling) {
-                            viewport.follow = true
-                        } else if (innerWasScrolling && !scrolling && canForward) {
-                            // 一次滚动结束在非底部 ⇒ 用户拖上去的（程序化贴底只会停在底部）。
-                            viewport.follow = false
+                // This list always has a line once mounted. Stop observing layout after
+                // its first measure so each scroll offset cannot wake the follow policy.
+                snapshotFlow { inner.layoutInfo.totalItemsCount > 0 }.first { it }
+                var wasScrolling = false
+                snapshotFlow { if (inner.isScrollInProgress) null else inner.canScrollForward }
+                    .collect { canForward ->
+                        when {
+                            canForward == null -> wasScrolling = true
+                            else -> {
+                                if (!canForward || wasScrolling) viewport.follow = !canForward
+                                wasScrolling = false
+                            }
                         }
-                        innerWasScrolling = scrolling
                     }
             }
             // Follow only while opted in. The ordinary top anchor itself keeps a
@@ -643,7 +645,7 @@ internal fun ReasoningBlock(
             ) {
                 Box(Modifier.size(24.dp), contentAlignment = Alignment.Center) {
                     Icon(
-                        imageVector = ImageVector.vectorResource(R.drawable.ic_brain),
+                        imageVector = com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_brain),
                         contentDescription = null,
                         tint = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.size(16.dp),
@@ -688,7 +690,7 @@ internal fun ReasoningBlock(
         }
     } else {
         ProcessCard(
-            icon = ImageVector.vectorResource(R.drawable.ic_brain),
+            icon = com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_brain),
             title = "思考过程",
             expanded = expanded,
             onToggle = toggle,
@@ -785,7 +787,7 @@ internal fun ToolBundle(
         t to p
     }
     ProcessCard(
-        icon = ImageVector.vectorResource(R.drawable.ic_wrench),
+        icon = com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_wrench),
         title = title,
         expanded = expanded,
         onToggle = { expansion.set(blockId, !expanded) },
@@ -944,7 +946,7 @@ internal fun ToolDetail(line: ToolLine, maxHeight: Dp = 180.dp, listState: LazyL
                         modifier = Modifier.size(28.dp),
                     ) {
                         Icon(
-                            imageVector = ImageVector.vectorResource(R.drawable.ic_copy),
+                            imageVector = com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_copy),
                             contentDescription = "复制输出",
                             tint = scheme.onSurfaceVariant,
                             modifier = Modifier.size(14.dp),
@@ -1034,7 +1036,7 @@ internal fun ToolRow(
             Box(Modifier.size(24.dp), contentAlignment = Alignment.Center) {
                 if (line.done) {
                     Icon(
-                        imageVector = ImageVector.vectorResource(icon),
+                        imageVector = com.suixing.agent.ui.components.suixingIcon(icon),
                         contentDescription = null,
                         tint = tone,
                         modifier = Modifier.size(16.dp),
@@ -1042,8 +1044,8 @@ internal fun ToolRow(
                 } else if (running && !line.preparing) {
                     // A call in flight is a spinner, not a dot: the row has to say "still
                     // working" while the model waits on it.
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(12.dp),
+                    SuixingCircularProgressIndicator(
+                        size = 12.dp,
                         strokeWidth = 1.5.dp,
                         color = tone,
                     )
@@ -1051,7 +1053,7 @@ internal fun ToolRow(
                     // 历史遗留的 done=false（run 被杀后落盘）：静态类型图标，不再转。
                     // 不定式进度圈按屏幕刷新率重绘，常驻卡片挂着它 = 读历史一直烧帧。
                     Icon(
-                        imageVector = ImageVector.vectorResource(icon),
+                        imageVector = com.suixing.agent.ui.components.suixingIcon(icon),
                         contentDescription = null,
                         tint = tone,
                         modifier = Modifier.size(14.dp),
@@ -1342,7 +1344,7 @@ private fun TurnSummaryProcessCard(
         }.joinToString(" · ")
     }
     ProcessCard(
-        icon = ImageVector.vectorResource(R.drawable.ic_chart_column),
+        icon = com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_chart_column),
         title = header,
         expandable = expandable,
         expanded = expanded,

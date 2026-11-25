@@ -1,6 +1,5 @@
 package com.suixing.agent.ui.chat.markdown
 
-import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -119,6 +118,7 @@ internal object NativeMarkdown {
         val result = LinkedHashMap<String, List<MdBlock>>()
         for (batch in texts.chunked(BATCH_SIZE)) {
             val encoded = batch.mapNotNull { text ->
+                if (text.length > MAX_DOCUMENT_BYTES) return@mapNotNull null
                 val bytes = text.toByteArray(Charsets.UTF_8)
                 if (bytes.size <= MAX_DOCUMENT_BYTES && bytes.toString(Charsets.UTF_8) == text) text to bytes else null
             }
@@ -132,11 +132,10 @@ internal object NativeMarkdown {
                     to++
                 }
                 val candidates = encoded.subList(from, to)
-                val request = ByteArrayOutputStream(weight.toInt())
-                fun integer(value: Int) { repeat(4) { request.write(value ushr (8 * it) and 0xff) } }
-                integer(MAGIC); integer(candidates.size)
-                candidates.forEach { (_, bytes) -> integer(bytes.size); request.write(bytes) }
-                result.putAll(call(request.toByteArray(), candidates.map { it.first }))
+                val request = ByteBuffer.allocate(weight.toInt()).order(ByteOrder.LITTLE_ENDIAN)
+                request.putInt(MAGIC).putInt(candidates.size)
+                candidates.forEach { (_, bytes) -> request.putInt(bytes.size).put(bytes) }
+                result.putAll(call(request.array(), candidates.map { it.first }))
                 from = to
             }
         }
@@ -160,7 +159,7 @@ internal object NativeMarkdown {
             }
         }
 
-    private fun decode(bytes: ByteArray, sources: List<String>): Map<String, List<MdBlock>> {
+    internal fun decode(bytes: ByteArray, sources: List<String>): Map<String, List<MdBlock>> {
         if (bytes.size !in 8..MAX_RESPONSE_BYTES) throw IOException("原生 Markdown 结果大小无效")
         val reader = Reader(ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN))
         reader.valid(reader.integer() == MAGIC && reader.integer() == sources.size)
@@ -205,9 +204,10 @@ internal object NativeMarkdown {
         fun string(): String {
             val size = integer()
             valid(size >= 0 && size <= input.remaining())
-            val bytes = ByteArray(size)
-            input.get(bytes)
-            return bytes.toString(Charsets.UTF_8)
+            val start = input.position()
+            val text = String(input.array(), input.arrayOffset() + start, size, Charsets.UTF_8)
+            input.position(start + size)
+            return text
         }
         fun blocks(depth: Int): List<MdBlock> { valid(depth <= 8); return List(count()) { block(depth) } }
         private fun block(depth: Int): MdBlock {

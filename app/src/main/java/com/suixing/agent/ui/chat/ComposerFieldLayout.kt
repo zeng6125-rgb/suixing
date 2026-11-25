@@ -36,6 +36,21 @@ internal val ComposerStackMeasurePolicy = MeasurePolicy { measurables, constrain
     }
 }
 
+/** Size once for the larger inset, then follow the live keyboard in placement. */
+internal fun MeasureScope.measureComposerImeViewport(
+    measurable: Measurable,
+    constraints: Constraints,
+    navigationPx: Int,
+    reservedImePx: Int,
+    imePx: () -> Int,
+): MeasureResult {
+    val reservedBottom = maxOf(navigationPx, reservedImePx)
+    val child = measurable.measure(constraints.offset(vertical = -reservedBottom))
+    return layout(child.width, child.height) {
+        child.placeRelativeWithLayer(0, -maxOf(navigationPx, imePx()))
+    }
+}
+
 /** Stabilizes the single-line baseline while preserving the multiline editor viewport. */
 internal fun Modifier.composerFieldHeight(
     lineHeightPx: Float,

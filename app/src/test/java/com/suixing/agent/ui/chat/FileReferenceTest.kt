@@ -15,6 +15,7 @@ import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -72,6 +73,19 @@ class FileReferenceTest {
         val (completed, end) = replaceFileReference(text, nested, file)
         assertEquals(listOf(file.path), fileReferences(completed).map { it.path })
         assertNull(activeFileReference(completed, end))
+    }
+
+    @Test fun completionDecodesOnlyThePathBeforeTheCaret() {
+        val prefix = "先看之前的内容 ".repeat(200)
+        val token = fileReferenceToken("/workspace/a\"b.txt")
+        val text = prefix + token + " 最后看 @other"
+        val escape = text.indexOf("\\\"")
+        val end = prefix.length + token.length
+
+        assertNull(activeFileReference(text, prefix.length))
+        assertEquals(FileReferenceQuery(prefix.length, end, "/workspace/a\\"), activeFileReference(text, escape + 1))
+        assertEquals(FileReferenceQuery(prefix.length, end, "/workspace/a\""), activeFileReference(text, escape + 2))
+        assertNull(activeFileReference(text, end))
     }
 
     @Test fun directorySuggestionsFilterLocallyAndExposeFoldersForDrilling() = runBlocking {
@@ -178,9 +192,10 @@ class FileReferenceTest {
         assertEquals(32, label.codePointCount(0, label.length))
         assertTrue(label.endsWith("…"))
         assertFalse(label.dropLast(1).last().isHighSurrogate())
-        val input = "hello 你好\n/goal finish"
-        val transformed = FileReferenceTransformation(Color.Blue).filter(AnnotatedString(input))
-        assertEquals(input, transformed.text.text)
+        val input = "hello 你好\nmail@example.com"
+        val original = AnnotatedString(input)
+        val transformed = FileReferenceTransformation(Color.Blue).filter(original)
+        assertSame(original, transformed.text)
         for (offset in 0..input.length) {
             assertEquals(offset, transformed.offsetMapping.originalToTransformed(offset))
             assertEquals(offset, transformed.offsetMapping.transformedToOriginal(offset))

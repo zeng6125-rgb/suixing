@@ -33,7 +33,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.CircularProgressIndicator
+import com.suixing.agent.ui.components.SuixingCircularProgressIndicator
 import com.suixing.agent.ui.components.ActionMenu
 import com.suixing.agent.ui.components.ActionMenuItem
 import androidx.compose.material3.Icon
@@ -248,8 +248,8 @@ fun FilesScreen(onBack: () -> Unit, onReference: (File) -> Unit) {
                 // 一个按钮承担不了这些。菜单把三个根一次列全，被闸门挡住的那支也能就地说明。
                 Box {
                     PageTopBarAction(
-                        icon = ImageVector.vectorResource(R.drawable.ic_folder_open),
-                        glyphSize = 18.dp,
+                        icon = com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_folder_open),
+                        glyphSize = if (com.suixing.agent.ui.theme.LocalUseMiuix.current) 20.dp else 18.dp,
                         contentDescription = "切换目录根（当前：$rootLabel）",
                         onClick = { rootMenu = true },
                     )
@@ -302,7 +302,7 @@ fun FilesScreen(onBack: () -> Unit, onReference: (File) -> Unit) {
                     }
                 }
                 PageTopBarAction(
-                    icon = ImageVector.vectorResource(R.drawable.ic_rotate_cw),
+                    icon = com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_rotate_cw),
                     contentDescription = "刷新",
                     onClick = { reload++ },
                 )
@@ -310,9 +310,9 @@ fun FilesScreen(onBack: () -> Unit, onReference: (File) -> Unit) {
                     // 夹在当前根之内：/sdcard 的上一级是 /storage/emulated，走出去之后面包屑就
                     // 不是一条祖先链了。
                     PageTopBarAction(
-                        icon = ImageVector.vectorResource(R.drawable.ic_arrow_up),
+                        icon = com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_arrow_up),
                         contentDescription = "上一级",
-                        glyphSize = 22.dp,
+                        glyphSize = if (com.suixing.agent.ui.theme.LocalUseMiuix.current) 20.dp else 22.dp,
                         onClick = {
                             current = parentDirectory ?: root
                         },
@@ -353,7 +353,7 @@ fun FilesScreen(onBack: () -> Unit, onReference: (File) -> Unit) {
 
         if (listing || loading) {
             Box(Modifier.fillMaxWidth().padding(vertical = 12.dp), contentAlignment = Alignment.Center) {
-                CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                SuixingCircularProgressIndicator(size = 20.dp, strokeWidth = 2.dp)
             }
         }
 
@@ -503,7 +503,7 @@ private fun Breadcrumbs(root: File, current: File, rootLabel: String, onJump: (F
             }
             if (!last) {
                 Icon(
-                    ImageVector.vectorResource(R.drawable.ic_chevron_right),
+                    com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_chevron_right),
                     contentDescription = null,
                     modifier = Modifier.size(16.dp),
                     tint = MaterialTheme.colorScheme.outline,
@@ -519,7 +519,7 @@ private fun EntryRow(entry: FileListingEntry, timeFormat: SimpleDateFormat, onCl
     val subtitle = remember(entry, timeFormat) {
         "${entry.sizeLabel()} · ${entry.modifiedLabel(timeFormat)}"
     }
-    val icon = ImageVector.vectorResource(iconRes)
+    val icon = com.suixing.agent.ui.components.suixingIcon(iconRes)
     // 行本身只有一份实现（Common.SettingRow）。横向 16dp 放进点击区内的 contentPadding，
     // 保留图标和文字的缩进，同时让涟漪铺到列表左右边缘；纵向 12dp、标题 bodyLarge、
     // 副标题 bodySmall 都是全站统一值。
@@ -582,7 +582,7 @@ private fun PreviewDialog(
                     Text("引用")
                 }
                 TextButton(onClick = onCopy) {
-                    Icon(ImageVector.vectorResource(R.drawable.ic_copy), contentDescription = null, modifier = Modifier.size(16.dp))
+                    Icon(com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_copy), contentDescription = null, modifier = Modifier.size(16.dp))
                     Spacer(Modifier.width(6.dp))
                     Text("复制")
                 }

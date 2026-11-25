@@ -51,10 +51,7 @@ import androidx.compose.runtime.setValue
 internal fun TodoSheet(todos: List<TodoItem>, onDismiss: () -> Unit) {
     val scheme = MaterialTheme.colorScheme
     val done = todos.count { it.status == TODO_COMPLETED }
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        containerColor = scheme.surface,
-    ) {
+    val sheetContent: @Composable () -> Unit = {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -79,6 +76,18 @@ internal fun TodoSheet(todos: List<TodoItem>, onDismiss: () -> Unit) {
             }
         }
     }
+    if (com.suixing.agent.ui.theme.LocalUseMiuix.current) {
+        com.suixing.agent.ui.components.MiuixBottomSheetHost(onDismiss = onDismiss) {
+            sheetContent()
+        }
+    } else {
+        ModalBottomSheet(
+            onDismissRequest = onDismiss,
+            containerColor = scheme.surface,
+        ) {
+            sheetContent()
+        }
+    }
 }
 
 /**
@@ -97,10 +106,7 @@ internal fun PathActionSheet(
     onAskModel: () -> Unit,
 ) {
     val scheme = MaterialTheme.colorScheme
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        containerColor = scheme.surface,
-    ) {
+    val sheetContent: @Composable () -> Unit = {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -117,15 +123,27 @@ internal fun PathActionSheet(
             )
             Spacer(Modifier.height(12.dp))
             MenuItemRow(
-                icon = ImageVector.vectorResource(R.drawable.ic_copy),
+                icon = com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_copy),
                 label = "复制路径",
                 onClick = onCopy,
             )
             MenuItemRow(
-                icon = ImageVector.vectorResource(R.drawable.ic_bot),
+                icon = com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_bot),
                 label = "让JAgent读取并总结",
                 onClick = onAskModel,
             )
+        }
+    }
+    if (com.suixing.agent.ui.theme.LocalUseMiuix.current) {
+        com.suixing.agent.ui.components.MiuixBottomSheetHost(onDismiss = onDismiss) {
+            sheetContent()
+        }
+    } else {
+        ModalBottomSheet(
+            onDismissRequest = onDismiss,
+            containerColor = scheme.surface,
+        ) {
+            sheetContent()
         }
     }
 }
@@ -146,7 +164,7 @@ internal fun TodoSheetRow(item: TodoItem) {
         verticalAlignment = Alignment.Top,
     ) {
         Icon(
-            imageVector = ImageVector.vectorResource(
+            imageVector = com.suixing.agent.ui.components.suixingIcon(
                 when {
                     done -> R.drawable.ic_circle_check
                     // 没有专门的「进行中」图标：箭头朝右＝正在往前走，比再画一个圆点更不含糊。
@@ -192,7 +210,13 @@ internal fun TodoSheetRow(item: TodoItem) {
  */
 @Composable
 internal fun QueueAction(icon: Int, label: String, onClick: () -> Unit) =
-    CircleIconAction(painterResource(icon), label, onClick, size = 32.dp, enforceTouchTarget = false)
+    CircleIconAction(
+        com.suixing.agent.ui.components.suixingIconPainter(icon),
+        label,
+        onClick,
+        size = 32.dp,
+        enforceTouchTarget = false,
+    )
 
 /**
  * Rewrites a message. A question can also be re-asked from the edited text, which

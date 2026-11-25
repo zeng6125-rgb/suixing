@@ -193,7 +193,7 @@ fun ToolsScreen(onBack: () -> Unit) {
                     // 插件页现在只有一个说明（还没有可装卸的东西）。
                     if (tab == 1 || tab == 2) {
                         PageTopBarAction(
-                            icon = ImageVector.vectorResource(R.drawable.ic_rotate_cw),
+                            icon = com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_rotate_cw),
                             contentDescription = "刷新",
                             onClick = {
                                 if (tab == 1) {
@@ -208,9 +208,9 @@ fun ToolsScreen(onBack: () -> Unit) {
                         )
                         Box {
                             PageTopBarAction(
-                                icon = ImageVector.vectorResource(if (tab == 1) R.drawable.ic_download else R.drawable.ic_plus),
+                                icon = com.suixing.agent.ui.components.suixingIcon(if (tab == 1) R.drawable.ic_download else R.drawable.ic_plus),
                                 contentDescription = if (tab == 1) "导入技能" else "添加服务器",
-                                glyphSize = if (tab == 1) 20.dp else 22.dp,
+                                glyphSize = if (tab == 1 || com.suixing.agent.ui.theme.LocalUseMiuix.current) 20.dp else 22.dp,
                                 onClick = {
                                     if (tab == 1) {
                                         skillImportMenu = true
@@ -229,7 +229,7 @@ fun ToolsScreen(onBack: () -> Unit) {
                                 ActionMenuItem(
                                     text = { Text("选文件夹（批量）") },
                                     leadingIcon = {
-                                        Icon(ImageVector.vectorResource(R.drawable.ic_folder_open), null, modifier = Modifier.size(20.dp))
+                                        Icon(com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_folder_open), null, modifier = Modifier.size(20.dp))
                                     },
                                     onClick = {
                                         skillImportMenu = false
@@ -239,7 +239,7 @@ fun ToolsScreen(onBack: () -> Unit) {
                                 ActionMenuItem(
                                     text = { Text("选 .md 文件") },
                                     leadingIcon = {
-                                        Icon(ImageVector.vectorResource(R.drawable.ic_file_text), null, modifier = Modifier.size(20.dp))
+                                        Icon(com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_file_text), null, modifier = Modifier.size(20.dp))
                                     },
                                     onClick = {
                                         skillImportMenu = false
@@ -249,7 +249,7 @@ fun ToolsScreen(onBack: () -> Unit) {
                                 ActionMenuItem(
                                     text = { Text("从链接导入") },
                                     leadingIcon = {
-                                        Icon(ImageVector.vectorResource(R.drawable.ic_download), null, modifier = Modifier.size(20.dp))
+                                        Icon(com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_download), null, modifier = Modifier.size(20.dp))
                                     },
                                     onClick = {
                                         skillImportMenu = false

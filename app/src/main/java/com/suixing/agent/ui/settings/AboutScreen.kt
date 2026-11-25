@@ -28,7 +28,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
-import androidx.compose.material3.CircularProgressIndicator
+import com.suixing.agent.ui.components.SuixingCircularProgressIndicator
 import androidx.compose.material3.TextButton
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.heightIn
@@ -150,7 +150,7 @@ fun AboutScreen(onBack: () -> Unit) {
                     shape = MaterialTheme.shapes.large,
                     contentPadding = PaddingValues(horizontal = SettingsStyle.CardPadding),
                     control = {
-                        if (checking) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                        if (checking) SuixingCircularProgressIndicator(size = 18.dp, strokeWidth = 2.dp)
                         else RowChevron()
                     },
                 )
@@ -169,7 +169,7 @@ fun AboutScreen(onBack: () -> Unit) {
                 Spacer(Modifier.height(8.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(
-                        imageVector = ImageVector.vectorResource(R.drawable.ic_badge_check),
+                        imageVector = com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_badge_check),
                         contentDescription = null,
                         tint = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.height(15.dp),

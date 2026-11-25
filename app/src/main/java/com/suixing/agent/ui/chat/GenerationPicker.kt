@@ -18,11 +18,11 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material3.Button
+import com.suixing.agent.ui.components.SuixingButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.RadioButton
+import com.suixing.agent.ui.components.SuixingRadioButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.ripple
@@ -149,7 +149,7 @@ internal fun UnifiedSelector(
             )
         }
         Icon(
-            imageVector = ImageVector.vectorResource(R.drawable.ic_chevron_down),
+            imageVector = com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_chevron_down),
             contentDescription = null,
             tint = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.size(16.dp),
@@ -332,7 +332,7 @@ private fun GenerationSheetContent(
                 )
                 Spacer(Modifier.width(6.dp))
                 Icon(
-                    imageVector = ImageVector.vectorResource(R.drawable.ic_chevron_right),
+                    imageVector = com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_chevron_right),
                     contentDescription = "选择模型",
                     tint = scheme.onSurfaceVariant,
                     modifier = Modifier.size(18.dp),
@@ -368,7 +368,7 @@ private fun GenerationSheetContent(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 IconButton(onClick = { onPickingChange(false) }, modifier = Modifier.size(28.dp)) {
                     Icon(
-                        imageVector = ImageVector.vectorResource(R.drawable.ic_arrow_left),
+                        imageVector = com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_arrow_left),
                         contentDescription = "返回",
                         tint = scheme.onSurfaceVariant,
                         modifier = Modifier.size(18.dp),
@@ -391,7 +391,7 @@ private fun GenerationSheetContent(
                     color = scheme.onSurfaceVariant,
                 )
                 Spacer(Modifier.height(8.dp))
-                Button(onClick = onOpenSettings, shape = RoundedCornerShape(12.dp)) {
+                SuixingButton(onClick = onOpenSettings, shape = RoundedCornerShape(12.dp)) {
                     Text("去设置里拉取")
                 }
             } else {
@@ -440,11 +440,9 @@ private fun GenerationSheetContent(
                                     modifier = Modifier.weight(1f, fill = false),
                                 )
                                 Icon(
-                                    imageVector = if (open) {
-                                        ImageVector.vectorResource(R.drawable.ic_chevron_up)
-                                    } else {
-                                        ImageVector.vectorResource(R.drawable.ic_chevron_down)
-                                    },
+                                    imageVector = com.suixing.agent.ui.components.suixingIcon(
+                                        if (open) R.drawable.ic_chevron_up else R.drawable.ic_chevron_down,
+                                    ),
                                     contentDescription = if (open) "折叠" else "展开",
                                     tint = scheme.onSurfaceVariant,
                                     modifier = Modifier.size(16.dp),
@@ -486,7 +484,7 @@ private fun GenerationSheetContent(
                                         .padding(vertical = 8.dp, horizontal = 4.dp),
                                     verticalAlignment = Alignment.CenterVertically,
                                 ) {
-                                    RadioButton(
+                                    SuixingRadioButton(
                                         // Ticked on the resolved choice, never on the raw
                                         // settings: a conversation that picked its own model
                                         // shows that one, and one that never picked shows

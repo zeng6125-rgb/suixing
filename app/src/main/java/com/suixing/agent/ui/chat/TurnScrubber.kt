@@ -4,6 +4,7 @@ package com.suixing.agent.ui.chat
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.AnimationVector1D
@@ -128,6 +129,24 @@ internal suspend fun animateScrubberNudge(
         ) { nudgeVelocity[0] = velocity }
     }
     nudgeVelocity[0] = 0f
+}
+
+/**
+ * Keep the gliding active capsule attached to the previous turn's slot when the displayed
+ * window slides or jumps, so transitions glide continuously into the new active row.
+ */
+internal fun scrubberIndicatorSnapRow(
+    previousTurn: Int,
+    previousRows: List<Int>,
+    currentTurn: Int,
+    currentRows: List<Int>,
+    currentAnimatedRow: Float,
+): Float? {
+    if (currentRows.isEmpty()) return null
+    if (previousRows == currentRows) return null
+    val prevInCurrent = currentRows.indexOf(previousTurn)
+    if (prevInCurrent >= 0) return prevInCurrent.toFloat()
+    return if (currentTurn > previousTurn) 0f else currentRows.lastIndex.toFloat()
 }
 
 /** How far the finger travels before a press turns into a drag. Aether's own threshold. */
@@ -407,6 +426,33 @@ internal fun TurnScrubber(
     // already observed while the finger was down.
     val lastReadingStart = remember(conversationId) { intArrayOf(readingWindowStart) }
     val railInteracting = pressRow >= 0 || shown
+    val activeTurn = (if (shown) rows.getOrNull(selected) else null) ?: currentTurn
+    val activeRowIndex = rows.indexOf(activeTurn).coerceIn(0, (rowCount - 1).coerceAtLeast(0))
+    val indicatorRow = remember(conversationId) { Animatable(activeRowIndex.toFloat()) }
+    val lastIndicatorTurn = remember(conversationId) { intArrayOf(activeTurn) }
+    val lastIndicatorRows = remember(conversationId) { arrayOf(rows) }
+    LaunchedEffect(conversationId, activeTurn, rows, settling, railInteracting) {
+        val prevTurn = lastIndicatorTurn[0]
+        val prevRows = lastIndicatorRows[0]
+        lastIndicatorTurn[0] = activeTurn
+        lastIndicatorRows[0] = rows
+        val targetRow = activeRowIndex.toFloat()
+        if (settling || currentCoroutineContext()[MotionDurationScale]?.scaleFactor == 0f) {
+            indicatorRow.snapTo(targetRow)
+            return@LaunchedEffect
+        }
+        scrubberIndicatorSnapRow(prevTurn, prevRows, activeTurn, rows, indicatorRow.value)?.let { snap ->
+            indicatorRow.snapTo(snap)
+        }
+        if (indicatorRow.value != targetRow) {
+            val spec = if (railInteracting) {
+                spring<Float>(dampingRatio = 0.85f, stiffness = 900f)
+            } else {
+                spring<Float>(dampingRatio = 0.78f, stiffness = 460f)
+            }
+            indicatorRow.animateTo(targetRow, spec)
+        }
+    }
     LaunchedEffect(conversationId, readingWindowStart, settling, railInteracting) {
         val previous = lastReadingStart[0]
         lastReadingStart[0] = readingWindowStart
@@ -477,6 +523,22 @@ internal fun TurnScrubber(
                 // The touch area is the rail and nothing else: exactly the width of the longest
                 // line drawn, and the height of the rows plus their gaps.
                 .width(SCRUBBER_RAIL)
+                .drawWithContent {
+                    drawContent()
+                    val scale = rowScales.value(activeTurn)
+                    val width = (20f * scale).dp.toPx().coerceIn(0f, size.width)
+                    val height = (3f * scale).dp.toPx().coerceAtLeast(0f)
+                    val pitchPx = (SCRUBBER_ROW + SCRUBBER_GAP).toPx()
+                    val rowCenterOffsetPx = SCRUBBER_ROW.toPx() / 2f
+                    val currentSlot = if (settling) activeRowIndex.toFloat() else indicatorRow.value
+                    val centerY = currentSlot * pitchPx + rowCenterOffsetPx
+                    drawRoundRect(
+                        color = scheme.primary,
+                        topLeft = Offset((size.width - width) / 2f, centerY - height / 2f),
+                        size = Size(width, height),
+                        cornerRadius = CornerRadius(width / 20f, height / 2f),
+                    )
+                }
                 .align(Alignment.CenterEnd)
                 .semantics {
                     val oldestLoaded = (totalTurns - drawnTurns + 1).coerceAtLeast(1)
@@ -646,24 +708,26 @@ internal fun TurnScrubber(
         ) {
             rows.forEachIndexed { row, turn ->
                 val exists = turn > 0
-                val active = exists && turn == currentTurn
-                val chosen = exists && shown && row == selected
-                val distance = abs(turn.toLong() - currentTurn)
+                val active = exists && turn == activeTurn
+                val distance = abs(turn.toLong() - activeTurn)
                 // Animate visual properties inside a fixed slot; hit boxes and
                 // conversation positioning never participate in these springs.
+                // Active highlight moves smoothly via the gliding primary capsule in Column.drawWithContent;
+                // slots underneath draw the graduated resting/neighbor scale so the transition reads as
+                // continuous travel along the rail even within fixed or edge-clamped windows.
                 val targetWidth = when {
-                    active -> 20f
-                    exists && distance == 1L -> 16f
-                    exists && distance <= 3L -> 12f
+                    active -> 14f
+                    exists && distance == 1L -> 15f
+                    exists && distance <= 3L -> 11f
                     else -> 8f
                 }
-                val targetHeight = if (active) 3f else 2f
+                val targetHeight = 2f
                 val targetColor = when {
                     !exists -> scheme.outlineVariant.copy(alpha = 0.35f)
-                    chosen || active -> scheme.primary
-                    distance == 1L -> scheme.primary.copy(alpha = 0.48f)
-                    distance <= 3L -> scheme.primary.copy(alpha = 0.32f)
-                    else -> scheme.primary.copy(alpha = 0.22f)
+                    active -> scheme.primary.copy(alpha = 0.28f)
+                    distance == 1L -> scheme.primary.copy(alpha = 0.44f)
+                    distance <= 3L -> scheme.primary.copy(alpha = 0.30f)
+                    else -> scheme.primary.copy(alpha = 0.20f)
                 }
                 val targetStyle = ScrubberTickStyle(targetWidth, targetHeight, targetColor)
                 val tickStyle = scrubberTickStyle(conversationId, targetStyle, settling)

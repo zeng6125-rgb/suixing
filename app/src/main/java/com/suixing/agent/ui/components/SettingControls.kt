@@ -34,6 +34,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.IntrinsicSize
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.sizeIn
@@ -45,10 +46,21 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.semantics.Role
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.ProgressIndicatorDefaults
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.ripple
 import androidx.compose.material3.Text
+import androidx.compose.ui.graphics.Color
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
@@ -104,6 +116,20 @@ fun SettingRow(
     contentPadding: PaddingValues = PaddingValues(0.dp),
     verticalPadding: Dp = SettingsStyle.RowPadding,
 ) {
+    if (com.suixing.agent.ui.theme.LocalUseMiuix.current) {
+        MiuixSettingRow(
+            title = title,
+            subtitle = subtitle,
+            leading = leading,
+            control = control,
+            onClick = onClick,
+            modifier = modifier,
+            titleMaxLines = titleMaxLines,
+            contentPadding = contentPadding,
+            verticalPadding = verticalPadding,
+        )
+        return
+    }
     Row(
         modifier = modifier
             .fillMaxWidth()
@@ -151,8 +177,12 @@ fun SettingRow(
 /** 行的「后面还有一页」标记：一个 18dp 的 chevron、一种颜色，全站只有这一份。 */
 @Composable
 fun RowChevron() {
+    if (com.suixing.agent.ui.theme.LocalUseMiuix.current) {
+        MiuixRowChevron()
+        return
+    }
     Icon(
-        painter = painterResource(R.drawable.ic_chevron_right),
+        painter = suixingIconPainter(R.drawable.ic_chevron_right),
         contentDescription = null,
         tint = MaterialTheme.colorScheme.onSurfaceVariant,
         modifier = Modifier.size(18.dp),
@@ -224,7 +254,30 @@ fun SegmentedPill(
     trackTint: Float = 0.08f,
 ) {
     val colors = MaterialTheme.colorScheme
-    val shape = MaterialTheme.shapes.small
+    val useMiuix = com.suixing.agent.ui.theme.LocalUseMiuix.current
+    val isDark = com.suixing.agent.ui.theme.LocalDarkTheme.current
+    val shape = if (useMiuix) {
+        androidx.compose.foundation.shape.RoundedCornerShape(
+            com.suixing.agent.ui.theme.miuixScaledCorner(10.dp, com.suixing.agent.ui.theme.LocalMiuixCornerScale.current),
+        )
+    } else {
+        MaterialTheme.shapes.small
+    }
+    val trackColor = if (useMiuix) {
+        if (isDark) {
+            lerp(colors.surfaceContainer, androidx.compose.ui.graphics.Color.White, (trackTint * 0.6f).coerceAtLeast(0.05f))
+        } else {
+            lerp(colors.surfaceContainerHigh, androidx.compose.ui.graphics.Color.Black, trackTint.coerceAtLeast(0.06f))
+        }
+    } else {
+        lerp(colors.surface, colors.onSurface, trackTint)
+    }
+    val pillColor = if (useMiuix) {
+        if (isDark) lerp(colors.surfaceContainerHighest, androidx.compose.ui.graphics.Color.White, 0.08f)
+        else lerp(colors.surfaceContainerLowest, androidx.compose.ui.graphics.Color.White, 0.7f)
+    } else {
+        colors.surface
+    }
     val rtl = LocalLayoutDirection.current == LayoutDirection.Rtl
     val selectNow by rememberUpdatedState(onSelect)
     val rippleIndication = remember(colors.onSurface) { TapRipple(ripple(color = colors.onSurface)) }
@@ -325,8 +378,11 @@ fun SegmentedPill(
             Modifier.matchParentSize().padding(vertical = 4.dp)
                 // 0.06 → 0.08（用户先要更明显，再看整体觉得 0.12 偏深，定为 0.08）：
                 // 只把槽提亮一档，不改变选中块的对比；边线另外收到 0.5dp。
-                .clip(shape).background(lerp(colors.surface, colors.onSurface, trackTint))
-                .border(0.5.dp, colors.outlineVariant.copy(alpha = 0.5f), shape),
+                .clip(shape).background(trackColor)
+                .then(
+                    if (useMiuix) Modifier
+                    else Modifier.border(0.5.dp, colors.outlineVariant.copy(alpha = 0.5f), shape),
+                ),
         ) {
             if (options.isNotEmpty() && showHighlight) Box(
                 Modifier.align(Alignment.CenterStart).fillMaxHeight().fillMaxWidth(1f / options.size)
@@ -335,8 +391,11 @@ fun SegmentedPill(
                     }
                     .padding(3.dp)
                     .shadow(1.dp, shape)
-                    .background(colors.surface, shape)
-                    .border(1.dp, colors.outlineVariant.copy(alpha = 0.5f), shape),
+                    .background(pillColor, shape)
+                    .then(
+                        if (useMiuix) Modifier
+                        else Modifier.border(1.dp, colors.outlineVariant.copy(alpha = 0.5f), shape),
+                    ),
             )
         }
         Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min)) {
@@ -414,6 +473,15 @@ fun SettingsSwitch(
     /** 关态轨道深浅：默认 0.08（与分段槽一致）；抽屉里的悬浮控制台单独加深。 */
     offTrackTint: Float = 0.08f,
 ) {
+    if (com.suixing.agent.ui.theme.LocalUseMiuix.current) {
+        MiuixSwitchControl(
+            checked = checked,
+            onCheckedChange = onCheckedChange,
+            modifier = modifier,
+            enabled = enabled,
+        )
+        return
+    }
     val colors = MaterialTheme.colorScheme
     val rtl = LocalLayoutDirection.current == LayoutDirection.Rtl
     val interactive = onCheckedChange != null && enabled
@@ -553,6 +621,267 @@ fun SettingsSwitch(
                     translationX = (progressNow() - 0.5f) * 18.dp.toPx() * if (rtl) -1f else 1f
                 }
                 .indication(source, rippleIndication),
+        )
+    }
+}
+
+@Composable
+internal fun SuixingCheckbox(
+    checked: Boolean,
+    onCheckedChange: ((Boolean) -> Unit)?,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+) {
+    if (com.suixing.agent.ui.theme.LocalUseMiuix.current) {
+        MiuixCheckboxControl(
+            checked = checked,
+            onCheckedChange = onCheckedChange,
+            modifier = modifier,
+            enabled = enabled,
+        )
+        return
+    }
+    Checkbox(
+        checked = checked,
+        onCheckedChange = onCheckedChange,
+        modifier = modifier,
+        enabled = enabled,
+    )
+}
+
+@Composable
+internal fun SuixingRadioButton(
+    selected: Boolean,
+    onClick: (() -> Unit)?,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+) {
+    if (com.suixing.agent.ui.theme.LocalUseMiuix.current) {
+        MiuixRadioButtonControl(
+            selected = selected,
+            onClick = onClick,
+            modifier = modifier,
+            enabled = enabled,
+        )
+        return
+    }
+    RadioButton(
+        selected = selected,
+        onClick = onClick,
+        modifier = modifier,
+        enabled = enabled,
+    )
+}
+
+@Composable
+internal fun SuixingButton(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    shape: Shape? = null,
+    cornerRadius: Dp = 12.dp,
+    contentPadding: PaddingValues = ButtonDefaults.ContentPadding,
+    containerColor: Color = Color.Unspecified,
+    contentColor: Color = Color.Unspecified,
+    content: @Composable RowScope.() -> Unit,
+) {
+    if (com.suixing.agent.ui.theme.LocalUseMiuix.current) {
+        MiuixButtonControl(
+            onClick = onClick,
+            modifier = modifier,
+            enabled = enabled,
+            variant = MiuixButtonVariant.Primary,
+            cornerRadius = cornerRadius,
+            contentPadding = contentPadding,
+            containerColor = containerColor,
+            contentColor = contentColor,
+            content = content,
+        )
+        return
+    }
+    val resolvedColors = if (containerColor == Color.Unspecified && contentColor == Color.Unspecified) {
+        ButtonDefaults.buttonColors()
+    } else {
+        ButtonDefaults.buttonColors(
+            containerColor = if (containerColor != Color.Unspecified) containerColor else MaterialTheme.colorScheme.primary,
+            contentColor = if (contentColor != Color.Unspecified) contentColor else MaterialTheme.colorScheme.onPrimary,
+        )
+    }
+    Button(
+        onClick = onClick,
+        modifier = modifier,
+        enabled = enabled,
+        shape = shape ?: ButtonDefaults.shape,
+        colors = resolvedColors,
+        contentPadding = contentPadding,
+        content = content,
+    )
+}
+
+@Composable
+internal fun SuixingOutlinedButton(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    shape: Shape? = null,
+    cornerRadius: Dp = 12.dp,
+    contentPadding: PaddingValues = ButtonDefaults.ContentPadding,
+    content: @Composable RowScope.() -> Unit,
+) {
+    if (com.suixing.agent.ui.theme.LocalUseMiuix.current) {
+        MiuixButtonControl(
+            onClick = onClick,
+            modifier = modifier,
+            enabled = enabled,
+            variant = MiuixButtonVariant.Outlined,
+            cornerRadius = cornerRadius,
+            contentPadding = contentPadding,
+            content = content,
+        )
+        return
+    }
+    OutlinedButton(
+        onClick = onClick,
+        modifier = modifier,
+        enabled = enabled,
+        shape = shape ?: ButtonDefaults.outlinedShape,
+        contentPadding = contentPadding,
+        content = content,
+    )
+}
+
+@Composable
+internal fun SuixingFilledTonalButton(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    shape: Shape? = null,
+    cornerRadius: Dp = 12.dp,
+    contentPadding: PaddingValues = ButtonDefaults.ContentPadding,
+    content: @Composable RowScope.() -> Unit,
+) {
+    if (com.suixing.agent.ui.theme.LocalUseMiuix.current) {
+        MiuixButtonControl(
+            onClick = onClick,
+            modifier = modifier,
+            enabled = enabled,
+            variant = MiuixButtonVariant.Tonal,
+            cornerRadius = cornerRadius,
+            contentPadding = contentPadding,
+            content = content,
+        )
+        return
+    }
+    FilledTonalButton(
+        onClick = onClick,
+        modifier = modifier,
+        enabled = enabled,
+        shape = shape ?: ButtonDefaults.filledTonalShape,
+        contentPadding = contentPadding,
+        content = content,
+    )
+}
+
+@Composable
+internal fun SuixingFilterChip(
+    selected: Boolean,
+    onClick: () -> Unit,
+    label: @Composable () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+) {
+    if (com.suixing.agent.ui.theme.LocalUseMiuix.current) {
+        MiuixFilterChip(
+            selected = selected,
+            onClick = onClick,
+            label = label,
+            modifier = modifier,
+            enabled = enabled,
+        )
+        return
+    }
+    FilterChip(
+        selected = selected,
+        onClick = onClick,
+        label = label,
+        modifier = modifier,
+        enabled = enabled,
+    )
+}
+
+@Composable
+internal fun SuixingLinearProgressIndicator(
+    progress: (() -> Float)? = null,
+    modifier: Modifier = Modifier,
+    color: Color = Color.Unspecified,
+    trackColor: Color = Color.Unspecified,
+    height: Dp = 4.dp,
+) {
+    if (com.suixing.agent.ui.theme.LocalUseMiuix.current) {
+        MiuixLinearProgressControl(
+            progress = progress,
+            modifier = modifier,
+            color = color,
+            trackColor = trackColor,
+            height = height,
+        )
+        return
+    }
+    val c = if (color != Color.Unspecified) color else ProgressIndicatorDefaults.linearColor
+    val tc = if (trackColor != Color.Unspecified) trackColor else ProgressIndicatorDefaults.linearTrackColor
+    if (progress != null) {
+        LinearProgressIndicator(
+            progress = progress,
+            modifier = modifier,
+            color = c,
+            trackColor = tc,
+        )
+    } else {
+        LinearProgressIndicator(
+            modifier = modifier,
+            color = c,
+            trackColor = tc,
+        )
+    }
+}
+
+@Composable
+internal fun SuixingCircularProgressIndicator(
+    modifier: Modifier = Modifier,
+    progress: (() -> Float)? = null,
+    color: Color = Color.Unspecified,
+    trackColor: Color = Color.Unspecified,
+    strokeWidth: Dp = ProgressIndicatorDefaults.CircularStrokeWidth,
+    size: Dp = 20.dp,
+) {
+    if (com.suixing.agent.ui.theme.LocalUseMiuix.current) {
+        MiuixCircularProgressControl(
+            modifier = modifier,
+            progress = progress,
+            color = color,
+            trackColor = trackColor,
+            strokeWidth = strokeWidth,
+            size = size,
+        )
+        return
+    }
+    val c = if (color != Color.Unspecified) color else ProgressIndicatorDefaults.circularColor
+    if (progress != null) {
+        val tc = if (trackColor != Color.Unspecified) trackColor else ProgressIndicatorDefaults.circularDeterminateTrackColor
+        CircularProgressIndicator(
+            progress = progress,
+            modifier = modifier.size(size),
+            strokeWidth = strokeWidth,
+            color = c,
+            trackColor = tc,
+        )
+    } else {
+        val tc = if (trackColor != Color.Unspecified) trackColor else ProgressIndicatorDefaults.circularIndeterminateTrackColor
+        CircularProgressIndicator(
+            modifier = modifier.size(size),
+            strokeWidth = strokeWidth,
+            color = c,
+            trackColor = tc,
         )
     }
 }

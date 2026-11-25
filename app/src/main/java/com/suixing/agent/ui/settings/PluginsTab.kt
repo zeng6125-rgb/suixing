@@ -612,9 +612,15 @@ internal fun PluginsSection(onNotify: (String) -> Unit) {
 
 @Composable
 private fun PluginsIntroCard() {
-    SuixingCard(containerColor = MaterialTheme.colorScheme.surfaceContainerLow) {
+    SuixingCard(
+        containerColor = if (com.suixing.agent.ui.theme.LocalUseMiuix.current) {
+            MaterialTheme.colorScheme.surfaceContainer
+        } else {
+            MaterialTheme.colorScheme.surfaceContainerLow
+        },
+    ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            SoftIcon(ImageVector.vectorResource(R.drawable.ic_cpu), size = 34.dp, tint = MaterialTheme.colorScheme.secondary)
+            SoftIcon(com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_cpu), size = 34.dp, tint = MaterialTheme.colorScheme.secondary)
             Spacer(Modifier.width(12.dp))
             Text("什么是插件", style = SettingsStyle.cardTitle)
         }

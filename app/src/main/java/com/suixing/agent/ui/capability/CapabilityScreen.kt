@@ -30,11 +30,11 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.Button
+import com.suixing.agent.ui.components.SuixingButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
+import com.suixing.agent.ui.components.SuixingOutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -151,7 +151,7 @@ fun CapabilityScreen(onBack: () -> Unit, onOpen: (String) -> Unit = {}) {
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             Icon(
-                                ImageVector.vectorResource(R.drawable.ic_circle_alert),
+                                com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_circle_alert),
                                 contentDescription = null,
                                 modifier = Modifier.size(18.dp),
                             )
@@ -180,7 +180,7 @@ fun CapabilityScreen(onBack: () -> Unit, onOpen: (String) -> Unit = {}) {
             item(key = "capability-3", contentType = "capability-card") {
                 CapabilityCard(
                 title = "标准档（默认）",
-                icon = ImageVector.vectorResource(R.drawable.ic_bot),
+                icon = com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_bot),
                 summary = "装上就有，不需要任何授权",
                 granted = true,
                 lines = tierLines(TIER_NONE, state, settings.rootCheckedAt),
@@ -193,7 +193,7 @@ fun CapabilityScreen(onBack: () -> Unit, onOpen: (String) -> Unit = {}) {
             item(key = "capability-4", contentType = "capability-card") {
                 CapabilityCard(
                 title = "无障碍",
-                icon = ImageVector.vectorResource(R.drawable.ic_pointer),
+                icon = com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_pointer),
                 summary = "读屏、点击、滑动、输入文字、截图",
                 granted = state.accessibility,
                 lines = tierLines(TIER_ACCESSIBILITY, state, settings.rootCheckedAt),
@@ -205,7 +205,7 @@ fun CapabilityScreen(onBack: () -> Unit, onOpen: (String) -> Unit = {}) {
             item(key = "capability-5", contentType = "capability-card") {
                 CapabilityCard(
                 title = "Shizuku（ADB 级）",
-                icon = ImageVector.vectorResource(R.drawable.ic_terminal),
+                icon = com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_terminal),
                 summary = "am / pm / input / dumpsys，读写 /sdcard 与 Android/data",
                 granted = state.shellReady,
                 lines = tierLines(TIER_SHELL, state, settings.rootCheckedAt),
@@ -237,7 +237,7 @@ fun CapabilityScreen(onBack: () -> Unit, onOpen: (String) -> Unit = {}) {
             item(key = "capability-6", contentType = "capability-card") {
                 CapabilityCard(
                 title = "Root",
-                icon = ImageVector.vectorResource(R.drawable.ic_shield_user),
+                icon = com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_shield_user),
                 summary = "最高权限，可直接读写系统文件",
                 granted = state.rootReady,
                 lines = tierLines(TIER_ROOT, state, settings.rootCheckedAt),
@@ -257,7 +257,7 @@ fun CapabilityScreen(onBack: () -> Unit, onOpen: (String) -> Unit = {}) {
             item(key = "capability-7", contentType = "capability-card") {
                 CapabilityCard(
                 title = "悬浮窗控制台",
-                icon = ImageVector.vectorResource(R.drawable.ic_picture_in_picture_2),
+                icon = com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_picture_in_picture_2),
                 summary = "agent 跑起来时，屏幕上有个能停止、能插话的悬浮球",
                 granted = overlayGranted,
                 lines = if (overlayGranted) {
@@ -293,7 +293,7 @@ fun CapabilityScreen(onBack: () -> Unit, onOpen: (String) -> Unit = {}) {
             item(key = "capability-8", contentType = "capability-card") {
                 CapabilityCard(
                 title = "后台运行",
-                icon = ImageVector.vectorResource(R.drawable.ic_shield_user),
+                icon = com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_shield_user),
                 summary = "息屏或切到别的应用时，长任务与流式回答继续跑",
                 granted = batteryExempt,
                 lines = if (batteryExempt) {
@@ -330,7 +330,7 @@ fun CapabilityScreen(onBack: () -> Unit, onOpen: (String) -> Unit = {}) {
             item(key = "capability-9", contentType = "capability-card") {
                 SuixingCard {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    SoftIcon(ImageVector.vectorResource(R.drawable.ic_folder_cog), tint = MaterialTheme.colorScheme.tertiary)
+                    SoftIcon(com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_folder_cog), tint = MaterialTheme.colorScheme.tertiary)
                     Spacer(Modifier.width(12.dp))
                     Column(Modifier.weight(1f)) {
                         Text("所有文件访问权限", style = SettingsStyle.cardTitle)
@@ -348,7 +348,7 @@ fun CapabilityScreen(onBack: () -> Unit, onOpen: (String) -> Unit = {}) {
                 }
                 Spacer(Modifier.height(12.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    OutlinedButton(
+                    SuixingOutlinedButton(
                         onClick = {
                             // Started through the launcher, not through the hub: the launcher
                             // is what reports that the user came back. The global list is the
@@ -367,7 +367,7 @@ fun CapabilityScreen(onBack: () -> Unit, onOpen: (String) -> Unit = {}) {
                         onClick = { scope.launch { withContext(Dispatchers.IO) { Core.capabilities.refresh() } } },
                     ) {
                         Icon(
-                            ImageVector.vectorResource(R.drawable.ic_rotate_cw),
+                            com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_rotate_cw),
                             contentDescription = null,
                             modifier = Modifier.size(17.dp),
                         )
@@ -381,7 +381,7 @@ fun CapabilityScreen(onBack: () -> Unit, onOpen: (String) -> Unit = {}) {
             item(key = "capability-10", contentType = "capability-card") {
                 SectionCard(
                 title = "这四档权限分别能做什么",
-                icon = ImageVector.vectorResource(R.drawable.ic_circle_question_mark),
+                icon = com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_circle_question_mark),
                 subtitle = if (explainerOpen) "点右侧按钮收起" else "点右侧按钮展开",
                 trailing = {
                     TextButton(onClick = { explainerOpen = !explainerOpen }) {
@@ -456,7 +456,7 @@ private fun CapabilityHero(state: CapabilityState) {
                     ) {
                         Box(contentAlignment = Alignment.Center) {
                             Icon(
-                                ImageVector.vectorResource(R.drawable.ic_shield_alert),
+                                com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_shield_alert),
                                 contentDescription = null,
                                 tint = scheme.onPrimary,
                                 modifier = Modifier.size(22.dp),
@@ -716,7 +716,7 @@ private fun CapabilityCard(
             StatusPill(
                 text = if (granted) "已就绪" else "未就绪",
                 tone = if (granted) Tone.OK else Tone.WARN,
-                icon = if (granted) ImageVector.vectorResource(R.drawable.ic_circle_check) else null,
+                icon = if (granted) com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_circle_check) else null,
             )
         }
         Spacer(Modifier.height(8.dp))
@@ -738,20 +738,20 @@ private fun CapabilityCard(
         }
         Spacer(Modifier.height(8.dp))
         if (!actionEnabled) {
-            OutlinedButton(
+            SuixingOutlinedButton(
                 onClick = {},
                 enabled = false,
                 modifier = Modifier.height(36.dp),
                 contentPadding = PaddingValues(horizontal = 16.dp, vertical = 0.dp),
             ) { Text(actionLabel) }
         } else if (granted) {
-            OutlinedButton(
+            SuixingOutlinedButton(
                 onClick = onAction,
                 modifier = Modifier.height(36.dp),
                 contentPadding = PaddingValues(horizontal = 16.dp, vertical = 0.dp),
             ) { Text(actionLabel) }
         } else {
-            Button(
+            SuixingButton(
                 onClick = onAction,
                 modifier = Modifier.height(36.dp),
                 contentPadding = PaddingValues(horizontal = 16.dp, vertical = 0.dp),

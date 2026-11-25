@@ -61,6 +61,22 @@ internal fun ActionMenu(
         Modifier.widthIn(min = ActionMenuStyle.MinWidth.coerceAtMost(maxWidth), max = maxWidth)
     }
     val maxHeight = (configuration.screenHeightDp.dp * 0.6f).coerceAtMost(ActionMenuStyle.MaxHeight)
+    if (com.suixing.agent.ui.theme.LocalUseMiuix.current) {
+        val minWidth = if (anchorWidth != null && anchorWidth > 0.dp) {
+            anchorWidth.coerceAtMost(availableWidth)
+        } else {
+            ActionMenuStyle.MinWidth.coerceAtMost(maxWidth)
+        }
+        MiuixActionMenu(
+            expanded = expanded,
+            onDismissRequest = onDismissRequest,
+            modifier = widthModifier.then(modifier),
+            minWidth = minWidth,
+            maxHeight = maxHeight,
+            content = content,
+        )
+        return
+    }
     val colors = MaterialTheme.colorScheme
     val border = remember(colors.outlineVariant) { BorderStroke(1.dp, colors.outlineVariant) }
     DropdownMenu(
@@ -92,6 +108,18 @@ internal fun ActionMenuItem(
         horizontal = ActionMenuStyle.HorizontalPadding, vertical = ActionMenuStyle.VerticalPadding,
     ),
 ) {
+    if (com.suixing.agent.ui.theme.LocalUseMiuix.current) {
+        MiuixActionMenuItem(
+            text = text,
+            onClick = onClick,
+            modifier = modifier,
+            leadingIcon = leadingIcon,
+            trailingIcon = trailingIcon,
+            enabled = enabled,
+            selected = selected,
+        )
+        return
+    }
     val feedback = rememberMenuRippleItem(RectangleShape)
     val configuration = if (feedback == null) rememberMenuRippleConfiguration() else null
     val colors = MaterialTheme.colorScheme
@@ -99,7 +127,7 @@ internal fun ActionMenuItem(
         .background(if (selected) colors.onSurface.copy(alpha = 0.06f) else Color.Transparent)
     val selectionModifier = if (selected) rowModifier.semantics { this.selected = true } else rowModifier
     val check: (@Composable () -> Unit)? = trailingIcon ?: if (selected) {
-        { Icon(ImageVector.vectorResource(R.drawable.ic_check), "已选中", Modifier.size(16.dp)) }
+        { Icon(suixingIcon(R.drawable.ic_check), "已选中", Modifier.size(16.dp)) }
     } else null
     CompositionLocalProvider(LocalRippleConfiguration provides configuration) {
         DropdownMenuItem(

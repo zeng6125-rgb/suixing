@@ -66,7 +66,7 @@ internal fun ProviderApiKeyField(
         trailingIcon = {
             IconButton(enabled = value.isNotEmpty(), onClick = { revealed = !revealed }, colors = actionIconButtonColors()) {
                 Icon(
-                    ImageVector.vectorResource(if (revealed) R.drawable.ic_eye_off else R.drawable.ic_eye),
+                    com.suixing.agent.ui.components.suixingIcon(if (revealed) R.drawable.ic_eye_off else R.drawable.ic_eye),
                     if (revealed) "隐藏 API Key" else "显示 API Key",
                     Modifier.size(18.dp),
                 )
@@ -81,6 +81,18 @@ internal fun ModelActionButton(
     text: String, onClick: () -> Unit, modifier: Modifier = Modifier,
     primary: Boolean = false, enabled: Boolean = true, busy: Boolean = false, icon: Int? = null,
 ) {
+    if (com.suixing.agent.ui.theme.LocalUseMiuix.current) {
+        com.suixing.agent.ui.components.MiuixActionButton(
+            text = text,
+            onClick = onClick,
+            modifier = modifier,
+            primary = primary,
+            enabled = enabled,
+            busy = busy,
+            icon = icon,
+        )
+        return
+    }
     val colors = MaterialTheme.colorScheme
     Button(
         onClick = onClick, enabled = enabled && !busy,
@@ -95,7 +107,7 @@ internal fun ModelActionButton(
             CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp, color = LocalContentColor.current)
             Spacer(Modifier.width(6.dp))
         } else if (icon != null) {
-            Icon(ImageVector.vectorResource(icon), null, Modifier.size(16.dp))
+            Icon(com.suixing.agent.ui.components.suixingIcon(icon), null, Modifier.size(16.dp))
             Spacer(Modifier.width(6.dp))
         }
         Text(text, style = SettingsStyle.controlLabel, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -141,7 +153,7 @@ internal fun AddProviderDialog(onDismiss: () -> Unit, onAdd: (ProviderConfig) ->
                                     Text(template?.let { providerEndpointLabel(it.baseUrl) } ?: "局域网服务或兼容网关", style = SettingsStyle.description,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 }
-                                Icon(ImageVector.vectorResource(R.drawable.ic_chevron_right), null, Modifier.size(16.dp))
+                                Icon(com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_chevron_right), null, Modifier.size(16.dp))
                             }
                         }
                     }
@@ -196,7 +208,7 @@ internal fun EnabledModelCard(
             Column(Modifier.weight(1f).padding(vertical = 4.dp),
                 verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    if (testModel) Icon(ImageVector.vectorResource(R.drawable.ic_circle_check), null, Modifier.size(15.dp),
+                    if (testModel) Icon(com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_circle_check), null, Modifier.size(15.dp),
                         tint = MaterialTheme.colorScheme.primary)
                     Text(alias.ifBlank { id }, style = SettingsStyle.body, fontWeight = FontWeight.Medium,
                         maxLines = 2, overflow = TextOverflow.Ellipsis)
@@ -208,7 +220,7 @@ internal fun EnabledModelCard(
                 if (testModel) Text("测试连接使用此模型", style = SettingsStyle.badge, color = MaterialTheme.colorScheme.primary)
             }
             IconButton(onClick = { editing = true }) {
-                Icon(ImageVector.vectorResource(R.drawable.ic_sliders_horizontal), "编辑模型参数", Modifier.size(18.dp),
+                Icon(com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_sliders_horizontal), "编辑模型参数", Modifier.size(18.dp),
                     tint = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }

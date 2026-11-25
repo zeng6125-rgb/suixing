@@ -250,4 +250,4 @@ private fun scheduleLine(schedule: Schedule): String {
  */
 @Composable
 private fun RowAction(icon: Int, label: String, onClick: () -> Unit) =
-    CircleIconAction(painterResource(icon), label, onClick)
+    CircleIconAction(com.suixing.agent.ui.components.suixingIconPainter(icon), label, onClick)

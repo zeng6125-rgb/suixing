@@ -48,7 +48,7 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Icon
-import androidx.compose.material3.LinearProgressIndicator
+import com.suixing.agent.ui.components.SuixingLinearProgressIndicator
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -519,7 +519,7 @@ internal fun ContextPanelCard(used: Int?, estimated: Boolean, window: Int, split
         if (known && used != null) {
             // 标题与进度条之间留大一点的空（用户：「离下面那个进度条间距再大一点点」）。
             Spacer(Modifier.height(6.dp))
-            LinearProgressIndicator(
+            SuixingLinearProgressIndicator(
                 progress = { (percent / 100f).coerceIn(0f, 1f) },
                 modifier = Modifier.fillMaxWidth(),
             )

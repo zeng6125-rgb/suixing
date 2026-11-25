@@ -93,7 +93,7 @@ pub struct RustApplication {
     drawer_open: bool,
     drawer_motion: drawer::DrawerMotion,
     drawer_transcript: Option<drawer::FrozenTranscript>,
-    rendered_dark_mode: Option<(bool, i32, i32, i32, Option<[Color32; 12]>, f32)>,
+    rendered_dark_mode: Option<(bool, i32, i32, i32, i32, i32, Option<[Color32; 12]>, f32)>,
     memory_editor: Option<Memory>,
     memory_delete: Option<String>,
     conversation_delete: Option<String>,
@@ -1465,7 +1465,7 @@ impl RustApplication {
             _ => system_dark,
         };
         let palette = match behavior.palette_mode {
-            1..=3 => behavior.palette_mode,
+            1 | 2 | 4 => behavior.palette_mode,
             _ => 2,
         };
         #[cfg(target_os = "android")]
@@ -1479,7 +1479,9 @@ impl RustApplication {
         let wallpaper: Option<[Color32; 12]> = None;
         let appearance = (
             dark,
+            behavior.ui_theme,
             palette,
+            behavior.font_preset,
             behavior.font_scale,
             behavior.corner_scale,
             wallpaper,
@@ -1615,11 +1617,11 @@ impl RustApplication {
                     |hex: u32| Color32::from_rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8);
                 let (background, text, weak, container, high, outline, primary) =
                     match (palette, dark) {
-                        (3, false) => (
-                            0xffffff, 0x1a1c1f, 0x606163, 0xf6f6f6, 0xffffff, 0xededee, 0x000000,
+                        (4, false) => (
+                            0xf7f7f7, 0x000000, 0x5c5c5c, 0xffffff, 0xf0f0f0, 0xe5e5ea, 0x3482ff,
                         ),
-                        (3, true) => (
-                            0x181818, 0xffffff, 0xbcbcbc, 0x242424, 0x2d2d2d, 0x2b2b2b, 0xffffff,
+                        (4, true) => (
+                            0x000000, 0xf2f2f2, 0x9c9ca3, 0x1c1c1e, 0x242426, 0x2c2c2e, 0x277af7,
                         ),
                         (_, false) => (
                             0xfaf9f5, 0x22211e, 0x635f55, 0xf2f0e9, 0xedebe3, 0xdedcd2, 0xa94728,
@@ -1660,7 +1662,7 @@ impl RustApplication {
             style.spacing.button_padding = egui::vec2(12.0, 10.0);
             style.spacing.interact_size = egui::vec2(48.0, 48.0);
             style.animation_time = 0.16 * motion_scale;
-            let family = if palette == 2 {
+            let family = if behavior.font_preset != 0 {
                 egui::FontFamily::Name("chat-serif".into())
             } else {
                 egui::FontFamily::Proportional

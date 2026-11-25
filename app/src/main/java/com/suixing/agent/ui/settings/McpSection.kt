@@ -124,9 +124,15 @@ internal fun McpSection(
 
 @Composable
 private fun McpIntroCard() {
-    SuixingCard(containerColor = MaterialTheme.colorScheme.surfaceContainerLow) {
+    SuixingCard(
+        containerColor = if (com.suixing.agent.ui.theme.LocalUseMiuix.current) {
+            MaterialTheme.colorScheme.surfaceContainer
+        } else {
+            MaterialTheme.colorScheme.surfaceContainerLow
+        },
+    ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            SoftIcon(ImageVector.vectorResource(R.drawable.ic_info), size = 34.dp, tint = MaterialTheme.colorScheme.secondary)
+            SoftIcon(com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_info), size = 34.dp, tint = MaterialTheme.colorScheme.secondary)
             Spacer(Modifier.width(12.dp))
             Text("什么是 MCP", style = SettingsStyle.cardTitle)
         }
@@ -169,7 +175,7 @@ private fun ServerCard(
     }
     SuixingCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            SoftIcon(ImageVector.vectorResource(R.drawable.ic_server), tint = tone.color(dark))
+            SoftIcon(com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_server), tint = tone.color(dark))
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
                 Text(
@@ -236,10 +242,10 @@ private fun ServerCard(
                 }
             }
             IconButton(onClick = onEdit, colors = actionIconButtonColors()) {
-                Icon(ImageVector.vectorResource(R.drawable.ic_square_pen), contentDescription = "编辑", modifier = Modifier.size(20.dp))
+                Icon(com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_square_pen), contentDescription = "编辑", modifier = Modifier.size(20.dp))
             }
             IconButton(onClick = onDelete, colors = actionIconButtonColors()) {
-                Icon(ImageVector.vectorResource(R.drawable.ic_trash), contentDescription = "删除", modifier = Modifier.size(20.dp))
+                Icon(com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_trash), contentDescription = "删除", modifier = Modifier.size(20.dp))
             }
         }
     }

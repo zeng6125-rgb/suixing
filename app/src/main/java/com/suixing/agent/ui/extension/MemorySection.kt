@@ -129,7 +129,7 @@ fun MemorySection(
                                 modifier = Modifier.minimumInteractiveComponentSize().size(30.dp),
                             ) {
                                 Icon(
-                                    ImageVector.vectorResource(R.drawable.ic_x),
+                                    com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_x),
                                     contentDescription = "删除 ${row.key}",
                                     modifier = Modifier.size(16.dp),
                                     tint = MaterialTheme.colorScheme.onSurfaceVariant,

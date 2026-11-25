@@ -289,7 +289,7 @@ internal fun ConversationSettingsPage(onBack: () -> Unit) {
                         )
                         IconButton(onClick = { Core.gate.forgetAlways(name) }) {
                             Icon(
-                                ImageVector.vectorResource(R.drawable.ic_x),
+                                com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_x),
                                 contentDescription = "忘记 $name",
                                 modifier = Modifier.size(18.dp),
                                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -334,7 +334,7 @@ internal fun ConversationSettingsPage(onBack: () -> Unit) {
                         )
                         IconButton(onClick = { Core.gate.forgetDenied(name) }) {
                             Icon(
-                                ImageVector.vectorResource(R.drawable.ic_x),
+                                com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_x),
                                 contentDescription = "不再拒绝 $name",
                                 modifier = Modifier.size(18.dp),
                                 tint = MaterialTheme.colorScheme.onSurfaceVariant,

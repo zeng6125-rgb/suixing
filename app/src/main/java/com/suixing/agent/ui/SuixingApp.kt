@@ -512,11 +512,17 @@ fun SuixingApp() {
         // 把窗口底色刷成主题 surface：键盘圆角/键盘后面那条缝露的就是这个颜色；删掉之后窗口是透明的，
         // 缝里露的是壁纸 —— 用户不要那个效果。
         val activity = LocalActivity.current
-        val surfaceArgb = MaterialTheme.colorScheme.surface.toArgb()
+        val useMiuix = com.suixing.agent.ui.theme.LocalUseMiuix.current
+        val pageCanvasColor = if (useMiuix) {
+            MaterialTheme.colorScheme.background
+        } else {
+            MaterialTheme.colorScheme.surface
+        }
+        val surfaceArgb = pageCanvasColor.toArgb()
         LaunchedEffect(activity, surfaceArgb) {
             activity?.window?.setBackgroundDrawable(ColorDrawable(surfaceArgb))
         }
-        val surfaceColor = MaterialTheme.colorScheme.surface
+        val surfaceColor = pageCanvasColor
         val canvasTint = MaterialTheme.colorScheme.primary.copy(alpha = 0.06f)
         val screenHeightPx = with(rootDensity) {
             LocalConfiguration.current.screenHeightDp.dp.toPx()
@@ -535,7 +541,7 @@ fun SuixingApp() {
                     val keyboardTop = Offset(0f, canvasHeight)
                     val keyboardSize = Size(size.width, size.height - canvasHeight)
                     // Only the strip behind the IME can show the shell gradient.
-                    val keyboardGradient = if (canvasHeight < size.height && !darkShell) {
+                    val keyboardGradient = if (!useMiuix && canvasHeight < size.height && !darkShell) {
                         Brush.verticalGradient(
                             colors = listOf(surfaceColor, canvasTint),
                             startY = 0f,
@@ -586,8 +592,9 @@ fun SuixingApp() {
                             drawerState.observeContentUpdates { drawerUpdatesAllowed = it }
                         }
                     }
-                    val drawerCanUpdate = route == "empty" && !drawerState.isMoving && drawerUpdatesAllowed
-                    val drawerLifecycle = com.suixing.agent.ui.chat.rememberChatUiLifecycleOwner(drawerCanUpdate)
+                    val drawerLifecycle = com.suixing.agent.ui.chat.rememberChatUiLifecycleOwner {
+                        route == "empty" && !drawerState.isMoving && drawerUpdatesAllowed
+                    }
                     val drawerConversations by chat.conversations.collectAsStateWithLifecycle(
                         lifecycleOwner = drawerLifecycle,
                     )
@@ -717,7 +724,9 @@ fun SuixingApp() {
                     // 盖一层引导不能把常驻的 chat 拆了。
                     if (!(showOnboarding && onboardingIsFirstRun)) {
                         val chatVisible = route == "empty" && !showOnboarding && editorAssistantId == null
-                        val chatLifecycle = com.suixing.agent.ui.chat.rememberChatUiLifecycleOwner(chatVisible && !chatFrozen.value)
+                        val chatLifecycle = com.suixing.agent.ui.chat.rememberChatUiLifecycleOwner {
+                            chatVisible && !chatFrozen.value
+                        }
                         ObserveConversationRead(chat, visible = chatVisible)
                         CompositionLocalProvider(androidx.lifecycle.compose.LocalLifecycleOwner provides chatLifecycle) {
                             ChatScreen(

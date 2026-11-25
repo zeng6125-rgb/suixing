@@ -12,9 +12,8 @@ internal fun annotatedUserMessage(
     onPathClick: ((String) -> Unit)? = null,
 ): AnnotatedString {
     val linked = plainTextLinks(text, highlightColor, onPathClick)
-    val commandEnd = slashTokenEnd(text)?.takeIf { parseSlashCommand(text) != null } ?: return linked
-    val commandStart = text.indexOfFirst { !it.isWhitespace() }
+    val command = slashCommandToken(text) ?: return linked
     return AnnotatedString.Builder(linked).apply {
-        addStyle(SpanStyle(color = highlightColor), commandStart, commandEnd)
+        addStyle(SpanStyle(color = highlightColor), command.first, command.last + 1)
     }.toAnnotatedString()
 }

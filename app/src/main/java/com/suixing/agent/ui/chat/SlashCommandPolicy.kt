@@ -18,11 +18,12 @@ internal fun slashTokenEnd(text: String): Int? {
 
 /** True while the user is still naming the command (no argument typed yet). */
 internal fun slashQuery(text: String): String? {
-    val trimmed = text.trimStart()
-    if (!trimmed.startsWith("/")) return null
-    val token = trimmed.drop(1)
-    if (token.any { it.isWhitespace() }) return null
-    return token
+    val start = text.indexOfFirst { !it.isWhitespace() }
+    if (start < 0 || text[start] != '/') return null
+    for (index in start + 1 until text.length) {
+        if (text[index].isWhitespace()) return null
+    }
+    return text.substring(start + 1)
 }
 
 /**

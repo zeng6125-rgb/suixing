@@ -28,6 +28,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
@@ -412,12 +413,17 @@ internal fun Drawer(
                 IconButton(onClick = onNew, modifier = Modifier.size(38.dp)) {
                     // Match the chat header's new conversation action.
                     Icon(
-                        painter = painterResource(R.drawable.ic_square_pen),
+                        painter = com.suixing.agent.ui.components.suixingPainter(
+                            R.drawable.ic_square_pen,
+                            com.suixing.agent.ui.components.MiuixExtraIcons.Create,
+                        ),
                         contentDescription = "新对话",
                         // **与排序按钮同色**（用户：「新对话的颜色改为和排序一样颜色」）：
                         // 排序键常态就是 `onSurfaceVariant`，两个并列的图标按钮不该一深一亮。
                         tint = scheme.onSurfaceVariant,
-                        modifier = Modifier.size(18.dp),
+                        modifier = Modifier.size(
+                            if (com.suixing.agent.ui.theme.LocalUseMiuix.current) 20.dp else 18.dp,
+                        ),
                     )
                 }
             }
@@ -647,19 +653,19 @@ drawerRow(
             // （route = "assistants"），两个宿主共用同一份 AssistantListContent。
             DrawerAction(
                 label = "助手",
-                icon = painterResource(R.drawable.ic_bot),
+                icon = com.suixing.agent.ui.components.suixingIconPainter(R.drawable.ic_bot),
                 selected = route == "assistants",
                 onClick = onAssistants,
             )
             DrawerAction(
                 label = "定时任务",
-                icon = painterResource(R.drawable.ic_clock),
+                icon = com.suixing.agent.ui.components.suixingIconPainter(R.drawable.ic_clock),
                 selected = route == "schedules",
                 onClick = { onNavigate("schedules") },
             )
             DrawerAction(
                 label = "文件",
-                icon = painterResource(R.drawable.ic_folder_open),
+                icon = com.suixing.agent.ui.components.suixingIconPainter(R.drawable.ic_folder_open),
                 selected = route == "files",
                 onClick = { onNavigate("files") },
             )
@@ -668,7 +674,7 @@ drawerRow(
             // page comes first and the switch flips when the grant lands.
             DrawerAction(
                 label = "悬浮窗控制台",
-                icon = painterResource(R.drawable.ic_picture_in_picture_2),
+                icon = com.suixing.agent.ui.components.suixingIconPainter(R.drawable.ic_picture_in_picture_2),
                 selected = false,
                 // The whole row toggles, both ways: this row is the app's only
                 // console switch (the settings page is text only), so a row that
@@ -689,7 +695,7 @@ drawerRow(
             )
             DrawerAction(
                 label = "设置",
-                icon = painterResource(R.drawable.ic_settings),
+                icon = com.suixing.agent.ui.components.suixingIconPainter(R.drawable.ic_settings),
                 selected = route == "settings",
                 onClick = { onNavigate("settings") },
             )
@@ -799,6 +805,7 @@ internal fun DrawerMenuAction(
     destructive: Boolean = false,
     /** 行首图标；没有就只画文字。 */
     iconRes: Int? = null,
+    miuixIcon: androidx.compose.ui.graphics.vector.ImageVector? = null,
     onClick: () -> Unit,
 ) {
     val scheme = MaterialTheme.colorScheme
@@ -812,10 +819,15 @@ internal fun DrawerMenuAction(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         iconRes?.let { res ->
+            val iconPainter = if (miuixIcon != null && com.suixing.agent.ui.theme.LocalUseMiuix.current) {
+                androidx.compose.ui.graphics.vector.rememberVectorPainter(miuixIcon)
+            } else {
+                com.suixing.agent.ui.components.suixingIconPainter(res)
+            }
             Icon(
-                painter = painterResource(res),
+                painter = iconPainter,
                 contentDescription = null,
-                modifier = Modifier.size(18.dp),
+                modifier = Modifier.size(18.dp).offset(x = (-2).dp),
                 tint = if (destructive) scheme.error else scheme.onSurfaceVariant,
             )
             Spacer(Modifier.width(10.dp))
@@ -933,6 +945,15 @@ private class DrawerDragTracker {
  */
 @Composable
 internal fun DrawerMoreIcon(tint: Color, modifier: Modifier = Modifier.size(18.dp)) {
+    if (com.suixing.agent.ui.theme.LocalUseMiuix.current) {
+        Icon(
+            imageVector = com.suixing.agent.ui.components.MiuixExtraIcons.More,
+            contentDescription = null,
+            tint = tint,
+            modifier = modifier,
+        )
+        return
+    }
     Canvas(modifier) {
         val radius = 1.5.dp.toPx()
         val step = size.width / 4f

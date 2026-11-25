@@ -7,6 +7,42 @@ import org.junit.Test
 
 class TableRowReuseTest {
     @Test
+    fun `initial mount and a changed streaming tail never scan completed rows`() {
+        val header = cells("value")
+        val completed = List(10_000) { cells("row $it") }
+        var reads = 0
+        val counted = object : AbstractList<List<String>>() {
+            override val size get() = completed.size
+            override fun get(index: Int): List<String> {
+                reads++
+                return completed[index]
+            }
+        }
+        val first = CompletedTableRows(counted, counted.size, cells("tail"))
+        val mounted = reuseTableRows(null, header, first)
+        val second = CompletedTableRows(counted, counted.size, cells("tail grows"))
+        val after = reuseTableRows(mounted, header, second)
+
+        assertSame(first, mounted.rows)
+        assertSame(second, after.rows)
+        assertEquals(0, reads)
+        assertEquals(listOf("tail grows"), after.rows.last())
+    }
+
+    @Test
+    fun `equal but replaced partial rows keep their original cell list`() {
+        val header = cells("value")
+        val completed = listOf(cells("first"))
+        val tail = cells("partial")
+        val before = reuseTableRows(null, header, CompletedTableRows(completed, 1, tail))
+        val next = CompletedTableRows(completed, 1, cells("partial"))
+        val after = reuseTableRows(before, header, next)
+
+        assertSame(tail, after.rows.last())
+        assertNotSame(next.last(), after.rows.last())
+    }
+
+    @Test
     fun `a new parsed snapshot with identical content reuses header and row lists`() {
         val oldHeader = cells("name", "value")
         val oldRows = listOf(cells("alpha", "1"), cells("beta", "2"))

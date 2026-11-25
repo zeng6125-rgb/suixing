@@ -32,10 +32,10 @@ import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.FilterChip
+import com.suixing.agent.ui.components.SuixingFilterChip
 import androidx.compose.material3.LocalMinimumInteractiveComponentSize
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
+import com.suixing.agent.ui.components.SuixingOutlinedButton
 import com.suixing.agent.ui.components.CompactOutlinedTextField as OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
@@ -302,7 +302,7 @@ fun AssistantEditor(
                         )
                     }
                     if (onDelete != null) {
-                        OutlinedButton(
+                        SuixingOutlinedButton(
                             onClick = { confirmingDelete = true },
                             modifier = Modifier.fillMaxWidth(),
                         ) {
@@ -400,7 +400,7 @@ private fun IdentitySection(
     onClearPicture: () -> Unit,
     onPickEmoji: (String) -> Unit,
 ) {
-    SectionCard(title = "身份", icon = ImageVector.vectorResource(R.drawable.ic_id_card), subtitle = "名字与头像") {
+    SectionCard(title = "身份", icon = com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_id_card), subtitle = "名字与头像") {
         // The picture first, and apart from the emoji grid: the two are the same choice, and a
         // photo is what most users reach for. The emoji below stays the fallback for anyone who
         // does not want to hand over a picture.
@@ -519,7 +519,7 @@ private fun PromptSection(
 ) {
     SectionCard(
         title = "系统提示词",
-        icon = ImageVector.vectorResource(R.drawable.ic_sliders_horizontal),
+        icon = com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_sliders_horizontal),
         subtitle = "这个助手是谁、该怎么做事",
         trailing = {
             TextButton(onClick = onRestoreDefault) { Text("用默认") }
@@ -544,7 +544,7 @@ private fun TemperatureSection(
 ) {
     // **助手不再指定模型**（用户：「助手不要指定有模型这种东西，模型只靠用户选，
     // 模型选中会话隔离」）：模型是会话级的选择，人设只管它自己的温度。
-    SectionCard(title = "生成参数", icon = ImageVector.vectorResource(R.drawable.ic_cpu), subtitle = "模型在对话里选，这里只定温度") {
+    SectionCard(title = "生成参数", icon = com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_cpu), subtitle = "模型在对话里选，这里只定温度") {
         Spacer(Modifier.height(6.dp))
         SettingRow(
             title = "单独设置温度",
@@ -566,13 +566,23 @@ private fun TemperatureSection(
             var local by remember { mutableFloatStateOf(value.toFloat()) }
             // 外部值变化（重置草稿）时同步进来；拖动期间外部不会变。
             LaunchedEffect(value) { local = value.toFloat() }
-            Slider(
-                value = local,
-                onValueChange = { local = it },
-                onValueChangeFinished = { onDraft(draft.copy(temperature = local.toDouble())) },
-                valueRange = 0f..2f,
-                steps = 19,
-            )
+            if (com.suixing.agent.ui.theme.LocalUseMiuix.current) {
+                com.suixing.agent.ui.components.MiuixSettingsSlider(
+                    value = local,
+                    range = 0f..2f,
+                    steps = 19,
+                    onValueChange = { local = it },
+                    onValueChangeFinished = { onDraft(draft.copy(temperature = local.toDouble())) },
+                )
+            } else {
+                Slider(
+                    value = local,
+                    onValueChange = { local = it },
+                    onValueChangeFinished = { onDraft(draft.copy(temperature = local.toDouble())) },
+                    valueRange = 0f..2f,
+                    steps = 19,
+                )
+            }
             Text(
                 text = "温度 ${"%.1f".format(local)}",
                 style = SettingsStyle.metadata,
@@ -595,7 +605,7 @@ private fun ToolSection(
     val off = remember(draft.disabledTools) { draft.disabledTools.toSet() }
     SectionCard(
         title = "工具",
-        icon = ImageVector.vectorResource(R.drawable.ic_wrench),
+        icon = com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_wrench),
         subtitle = "关掉的工具这个助手不能调用",
         trailing = {
             TextButton(onClick = { onDraft(draft.copy(disabledTools = emptyList())) }) {
@@ -616,7 +626,7 @@ private fun ToolSection(
             ) {
                 toolNames.forEach { name ->
                     val enabled = name !in off
-                    FilterChip(
+                    SuixingFilterChip(
                         selected = enabled,
                         onClick = {
                             onDraft(

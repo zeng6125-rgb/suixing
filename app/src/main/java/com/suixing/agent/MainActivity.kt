@@ -109,15 +109,21 @@ class MainActivity : ComponentActivity() {
             // **按字段订阅**（性能审计 P0.2）：整份 `AppSettings` 订阅 ⇒ 任何一次写设置都让
             // 根重组，而根一重组，下面那份 ColorScheme 也跟着重建（见 Theme 的 remember）。
             // 这里只订阅根真正用到的四个字段，其余设置变动与根无关。
+            val uiTheme by remember {
+                Core.settings.flow.map { it.uiTheme }.distinctUntilChanged()
+            }.collectAsStateWithLifecycle(initialValue = 0)
             val themeMode by remember {
                 Core.settings.flow.map { it.themeMode }.distinctUntilChanged()
             }.collectAsStateWithLifecycle(initialValue = 0)
             val paletteMode by remember {
                 Core.settings.flow.map { it.paletteMode }.distinctUntilChanged()
-            }.collectAsStateWithLifecycle(initialValue = 0)
+            }.collectAsStateWithLifecycle(initialValue = 2)
             val fontScale by remember {
                 Core.settings.flow.map { it.fontScale }.distinctUntilChanged()
             }.collectAsStateWithLifecycle(initialValue = 1)
+            val fontPreset by remember {
+                Core.settings.flow.map { it.fontPreset }.distinctUntilChanged()
+            }.collectAsStateWithLifecycle(initialValue = com.suixing.agent.data.FONT_PRESET_JAGENT)
             val cornerScale by remember {
                 Core.settings.flow.map { it.cornerScale }.distinctUntilChanged()
             }.collectAsStateWithLifecycle(initialValue = 1)
@@ -153,7 +159,9 @@ class MainActivity : ComponentActivity() {
             }
             SuixingTheme(
                 darkTheme = dark,
+                uiTheme = uiTheme,
                 paletteMode = paletteMode,
+                fontPreset = fontPreset,
                 fontScale = fontScale,
                 cornerScale = cornerScale,
             ) {

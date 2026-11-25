@@ -140,7 +140,14 @@ internal const val MAX_LIST_START = 9999
  */
 internal fun listStart(digits: String): Int = (digits.toIntOrNull() ?: 1).coerceIn(0, MAX_LIST_START)
 
-fun parseMarkdown(source: String): List<MdBlock> = parseMarkdown(source, null)
+fun parseMarkdown(source: String): List<MdBlock> {
+    if (source.length < SettledBlocks.MIN_CHARS && '\n' !in source && '\r' !in source) {
+        val line = source.trim()
+        if (line.isEmpty()) return emptyList()
+        if (ordinaryParagraphLine(line)) return listOf(MdBlock.Paragraph(line))
+    }
+    return parseMarkdown(source, null)
+}
 
 internal fun parseMarkdown(source: String, checkpoint: (() -> Unit)?): List<MdBlock> =
     parseMarkdownBlocks(source, checkpoint)
@@ -468,7 +475,7 @@ internal fun plainTextLinks(
     text: String,
     linkColor: Color = Color.Unspecified,
     onPathClick: ((String) -> Unit)? = null,
-): AnnotatedString = InlineScanner(
+): AnnotatedString = if ('/' !in text) AnnotatedString(text) else InlineScanner(
     text = text,
     codeBackground = Color.Unspecified,
     codeColor = Color.Unspecified,
@@ -929,9 +936,9 @@ internal fun rememberGrowingMarkdown(
     sourceId: Int = 0,
 ): List<MdBlock> {
     val retained = LocalRetainedLiveMarkdown.current
-    val owned = remember { retained ?: LiveBlocks() }
-    val live = retained ?: owned
-    if (settled) live.cachedBlocksFor(text)?.let { blocks ->
+    val owned = remember { retained?.let(::lazyOf) ?: lazy(LazyThreadSafetyMode.NONE) { LiveBlocks() } }
+    val live = retained ?: owned.takeIf { it.isInitialized() }?.value
+    if (settled) live?.cachedBlocksFor(text)?.let { blocks ->
         SideEffect { SettledBlocks.putIfSettled(true, text, blocks) }
         return blocks
     }
@@ -949,15 +956,16 @@ internal fun rememberGrowingMarkdown(
     if (settled && retained == null && text.length < SettledBlocks.MIN_CHARS) {
         return remember(text) { parseMarkdown(text) }
     }
+    val parser = live ?: owned.value
     val source = androidx.compose.runtime.rememberUpdatedState(GrowingMarkdownSource(text, appendFrom, sourceId))
-    val blocks = remember(live, settled, if (settled) text else null, sourceId) {
-        mutableStateOf(live.cachedPrefixBlocksFor(text).orEmpty(), referentialEqualityPolicy())
+    val blocks = remember(parser, settled, if (settled) text else null, sourceId) {
+        mutableStateOf(parser.cachedPrefixBlocksFor(text).orEmpty(), referentialEqualityPolicy())
     }
-    LaunchedEffect(live, blocks) {
+    LaunchedEffect(parser, blocks) {
         // One parser owns its mutable prefix. Cold settled rows use the same background path.
         snapshotFlow { source.value }.conflate().collect { requested ->
             val parsed = withContext(Dispatchers.Default) {
-                live.blocksFor(requested.text, requested.version, requested.id)
+                parser.blocksFor(requested.text, requested.version, requested.id)
             }
             val current = source.value
             if (current == requested || requested.id != 0 && current.id == requested.id &&
@@ -1893,7 +1901,7 @@ private fun CodeBlock(block: MdBlock.Code, palette: MarkdownPalette, cursor: Boo
                     contentAlignment = Alignment.Center,
                 ) {
                     Icon(
-                        imageVector = if (copied) ImageVector.vectorResource(R.drawable.ic_check) else ImageVector.vectorResource(R.drawable.ic_copy),
+                        imageVector = com.suixing.agent.ui.components.suixingIcon(if (copied) R.drawable.ic_check else R.drawable.ic_copy),
                         contentDescription = if (copied) "已复制" else "复制代码",
                         tint = if (copied) {
                             MaterialTheme.colorScheme.primary
@@ -2051,18 +2059,24 @@ internal fun reuseTableRows(
     header: List<String>,
     rows: List<List<String>>,
 ): ReusableTableRows {
-    if (previous != null && previous.sourceHeader === header && previous.sourceRows === rows) {
+    if (previous == null) return ReusableTableRows(header, rows, header, rows)
+    if (previous.sourceHeader === header && previous.sourceRows === rows) {
         return previous
     }
 
-    val stableHeader = previous?.header?.takeIf { it === header || it == header } ?: header
-    val previousInputRows = previous?.sourceRows
-    val previousStableRows = previous?.rows
+    val stableHeader = previous.header.takeIf { it === header || it == header } ?: header
+    val previousInputRows = previous.sourceRows
+    val previousStableRows = previous.rows
+    if (previousStableRows === previousInputRows && rows is CompletedTableRows &&
+        previousInputRows is CompletedTableRows && rows.preservesRowReferencesFrom(previousInputRows)
+    ) {
+        return ReusableTableRows(stableHeader, rows, header, rows)
+    }
     var stableRows: MutableList<List<String>>? = null
 
     rows.forEachIndexed { index, incoming ->
-        val oldCells = previousStableRows?.getOrNull(index)
-        val oldInputCells = previousInputRows?.getOrNull(index)
+        val oldCells = previousStableRows.getOrNull(index)
+        val oldInputCells = previousInputRows.getOrNull(index)
         val stableCells = when {
             oldCells == null -> incoming
             // This row's parser input is the same immutable list as last time. It may already

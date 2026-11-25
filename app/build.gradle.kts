@@ -17,14 +17,9 @@ android {
         targetSdk = 37
         rustAbi?.let { ndk.abiFilters.add(it) }
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        versionCode = 739
-        versionName = "0.9.11"
+        versionCode = 740
+        versionName = "0.9.12"
         resourceConfigurations += listOf("zh", "en")
-        externalNativeBuild {
-            cmake {
-                arguments += "-DSX_NATIVE_JOBS=${gradle.startParameter.maxWorkerCount.coerceIn(1, 4)}"
-            }
-        }
     }
 
     signingConfigs {
@@ -141,6 +136,9 @@ dependencies {
     implementation("androidx.compose.ui:ui-graphics")
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material3:material3")
+    implementation("top.yukonga.miuix.kmp:miuix-ui-android:0.9.4")
+    implementation("top.yukonga.miuix.kmp:miuix-preference-android:0.9.4")
+    implementation("top.yukonga.miuix.kmp:miuix-icons-android:0.9.4")
     // 不再需要 material-icons-extended（issue #57 P1-b）：全仓只用到 5 个图标，
     // 已全部换成本仓 `res/drawable/ic_*.xml` 的 Lucide 图形（ic_rotate_cw / ic_eye /
     // ic_eye_off / ic_circle_check / ic_circle）。那个 AAR 的 classes.jar 是 36MB / 11,105 个

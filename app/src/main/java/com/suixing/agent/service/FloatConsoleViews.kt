@@ -20,7 +20,7 @@ import android.widget.TextView
 import androidx.compose.ui.graphics.toArgb
 import com.suixing.agent.R
 import com.suixing.agent.core.Core
-import com.suixing.agent.ui.theme.AppearancePalette
+import com.suixing.agent.ui.theme.resolvedScheme
 import com.suixing.agent.service.FloatConsoleService.Companion.THEME_SYSTEM
 import com.suixing.agent.service.FloatConsoleService.Companion.THEME_DARK
 import com.suixing.agent.service.FloatConsoleService.Companion.BALL_SIZE_DP
@@ -249,13 +249,13 @@ internal fun FloatConsoleService.actionButton(label: String, accent: Boolean = f
 
 /**
  * 悬浮面板的颜色整份取自当前配色，不再写死一套墨绿：会话行、完成/运行标记和悬浮球
- * 跟的是同一个 primary，切到 JAgent 配色（陶土橙）或 Codex 时一起变。
+ * 跟的是同一个 primary，切到 JAgent 配色（陶土橙）或 MIUIX 默认时一起变。
  */
-internal fun FloatConsoleService.paletteFor(themeMode: Int, paletteMode: Int): Palette {
+internal fun FloatConsoleService.paletteFor(uiTheme: Int, themeMode: Int, paletteMode: Int): Palette {
     val night = (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
         Configuration.UI_MODE_NIGHT_YES
     val dark = themeMode == THEME_DARK || (themeMode == THEME_SYSTEM && night)
-    val scheme = AppearancePalette.fromId(paletteMode).scheme(dark)
+    val scheme = resolvedScheme(uiTheme, paletteMode, dark)
     fun Int.withAlpha(alpha: Float): Int =
         (this and 0x00FFFFFF) or ((alpha * 255).toInt() shl 24)
     return Palette(

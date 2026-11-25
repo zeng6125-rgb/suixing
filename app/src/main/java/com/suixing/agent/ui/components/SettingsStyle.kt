@@ -57,6 +57,14 @@ fun SettingSectionTitle(
         bottom = SettingsStyle.SectionBottom,
     ),
 ) {
+    if (com.suixing.agent.ui.theme.LocalUseMiuix.current) {
+        MiuixSmallSectionTitle(
+            text = text,
+            modifier = modifier,
+            contentPadding = contentPadding,
+        )
+        return
+    }
     Text(
         text = text,
         style = SettingsStyle.sectionTitle,

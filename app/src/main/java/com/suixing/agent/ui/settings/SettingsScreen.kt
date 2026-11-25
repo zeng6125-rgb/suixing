@@ -372,7 +372,7 @@ internal fun SettingsStatusCard() {
     }
     SuixingCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            SoftIcon(ImageVector.vectorResource(R.drawable.ic_shield_user))
+            SoftIcon(com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_shield_user))
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
                 Text("当前能力", style = SettingsStyle.cardTitle)
@@ -413,6 +413,29 @@ internal class SettingsGroupRow(
 internal fun SettingsGroup(title: String, rows: List<SettingsGroupRow>) {
     Column(Modifier.fillMaxWidth()) {
         com.suixing.agent.ui.components.SettingSectionTitle(title)
+        if (com.suixing.agent.ui.theme.LocalUseMiuix.current) {
+            com.suixing.agent.ui.components.MiuixCardContainer(
+                contentPadding = PaddingValues(0.dp),
+            ) {
+                val dividerColor = top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme.dividerLine
+                rows.forEachIndexed { index, row ->
+                    if (index > 0) {
+                        top.yukonga.miuix.kmp.basic.HorizontalDivider(
+                            modifier = Modifier.padding(horizontal = SettingsStyle.PageMargin),
+                            thickness = 0.5.dp,
+                            color = dividerColor,
+                        )
+                    }
+                    SettingsLink(
+                        title = row.title,
+                        subtitle = row.summary,
+                        onClick = row.onClick,
+                        contentPadding = PaddingValues(horizontal = SettingsStyle.PageMargin),
+                    )
+                }
+            }
+            return
+        }
         val outline = MaterialTheme.colorScheme.outlineVariant
         Surface(
             modifier = Modifier.fillMaxWidth(),
@@ -536,7 +559,10 @@ internal fun ConversationRow(
                     }
                     if (pinned) {
                         Icon(
-                            imageVector = ImageVector.vectorResource(R.drawable.ic_star),
+                            imageVector = com.suixing.agent.ui.components.suixingVector(
+                                R.drawable.ic_star,
+                                com.suixing.agent.ui.components.MiuixExtraIcons.Pin,
+                            ),
                             contentDescription = "已置顶",
                             tint = MaterialTheme.colorScheme.primary,
                             modifier = Modifier.size(13.dp),
@@ -560,7 +586,7 @@ internal fun ConversationRow(
             }
             IconButton(onClick = onInfo, colors = actionIconButtonColors()) {
                 Icon(
-                    imageVector = ImageVector.vectorResource(R.drawable.ic_info),
+                    imageVector = com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_info),
                     contentDescription = "详情",
                     modifier = Modifier.size(18.dp),
                 )
@@ -569,7 +595,7 @@ internal fun ConversationRow(
             onUnarchive?.let { unarchive ->
                 IconButton(onClick = unarchive, colors = actionIconButtonColors()) {
                     Icon(
-                        imageVector = ImageVector.vectorResource(R.drawable.ic_folder_open),
+                        imageVector = com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_folder_open),
                         contentDescription = "取消归档",
                         modifier = Modifier.size(18.dp),
                     )
@@ -577,14 +603,14 @@ internal fun ConversationRow(
             }
             IconButton(onClick = onExport, colors = actionIconButtonColors()) {
                 Icon(
-                    imageVector = ImageVector.vectorResource(R.drawable.ic_download),
+                    imageVector = com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_download),
                     contentDescription = "导出",
                     modifier = Modifier.size(18.dp),
                 )
             }
             IconButton(onClick = onDelete, colors = actionIconButtonColors()) {
                 Icon(
-                    imageVector = ImageVector.vectorResource(R.drawable.ic_trash),
+                    imageVector = com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_trash),
                     contentDescription = "删除",
                     modifier = Modifier.size(18.dp),
                 )
@@ -675,7 +701,7 @@ internal fun AdvancedSection(content: @Composable ColumnScope.() -> Unit) {
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Icon(
-                    imageVector = ImageVector.vectorResource(R.drawable.ic_sliders_horizontal),
+                    imageVector = com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_sliders_horizontal),
                     contentDescription = null,
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.size(18.dp),
@@ -688,11 +714,9 @@ internal fun AdvancedSection(content: @Composable ColumnScope.() -> Unit) {
                     modifier = Modifier.weight(1f),
                 )
                 Icon(
-                    imageVector = if (expanded) {
-                        ImageVector.vectorResource(R.drawable.ic_chevron_up)
-                    } else {
-                        ImageVector.vectorResource(R.drawable.ic_chevron_down)
-                    },
+                    imageVector = com.suixing.agent.ui.components.suixingIcon(
+                        if (expanded) R.drawable.ic_chevron_up else R.drawable.ic_chevron_down,
+                    ),
                     contentDescription = null,
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.size(18.dp),
@@ -736,7 +760,9 @@ internal fun OutcomeCard(outcome: TestOutcome, onDismiss: () -> Unit) {
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Icon(
-                imageVector = if (outcome.ok) ImageVector.vectorResource(R.drawable.ic_circle_check) else ImageVector.vectorResource(R.drawable.ic_circle_alert),
+                imageVector = com.suixing.agent.ui.components.suixingIcon(
+                    if (outcome.ok) R.drawable.ic_circle_check else R.drawable.ic_circle_alert,
+                ),
                 contentDescription = null,
                 tint = tint,
                 modifier = Modifier.size(18.dp),
@@ -751,7 +777,7 @@ internal fun OutcomeCard(outcome: TestOutcome, onDismiss: () -> Unit) {
             Spacer(Modifier.width(SettingsStyle.FieldGap))
             IconButton(onClick = onDismiss, modifier = Modifier.size(24.dp)) {
                 Icon(
-                    imageVector = ImageVector.vectorResource(R.drawable.ic_x),
+                    imageVector = com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_x),
                     contentDescription = "关闭",
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.size(15.dp),
@@ -890,12 +916,22 @@ internal fun LabeledSlider(
         var local by remember(range) { mutableFloatStateOf(value) }
         // 外部值变化（重置/切换配置）时同步进来；拖动期间外部不会变。
         LaunchedEffect(value) { local = value }
-        Slider(
-            value = local,
-            onValueChange = { local = it },
-            onValueChangeFinished = { onValueChange(local) },
-            valueRange = range,
-            steps = steps,
-        )
+        if (com.suixing.agent.ui.theme.LocalUseMiuix.current) {
+            com.suixing.agent.ui.components.MiuixSettingsSlider(
+                value = local,
+                range = range,
+                steps = steps,
+                onValueChange = { local = it },
+                onValueChangeFinished = { onValueChange(local) },
+            )
+        } else {
+            Slider(
+                value = local,
+                onValueChange = { local = it },
+                onValueChangeFinished = { onValueChange(local) },
+                valueRange = range,
+                steps = steps,
+            )
+        }
     }
 }

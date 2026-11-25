@@ -6,6 +6,8 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -14,6 +16,40 @@ import org.junit.Test
 // Plain JVM tests: both parser entry points are free of Android/Compose runtime
 // types, so they run without Robolectric.
 class MarkdownTest {
+
+    @Test
+    fun `native batch strings decode from each document offset`() {
+        val wire = ByteBuffer.allocate(128).order(ByteOrder.LITTLE_ENDIAN)
+        fun paragraph(text: String) {
+            val bytes = text.toByteArray()
+            wire.putInt(0).putInt(16 + bytes.size)
+            wire.putInt(1).putInt(2).putInt(bytes.size).put(bytes).putInt(0)
+        }
+        wire.putInt(0x314d5853).putInt(3)
+        paragraph("中文🙂")
+        wire.putInt(4)
+        paragraph("")
+
+        val parsed = NativeMarkdown.decode(
+            wire.array().copyOf(wire.position()), listOf("one", "fallback", "last"),
+        )
+        assertEquals(
+            mapOf("one" to listOf(MdBlock.Paragraph("中文🙂")), "last" to listOf(MdBlock.Paragraph(""))),
+            parsed,
+        )
+    }
+
+    @Test
+    fun `short line parsing matches the complete block parser`() {
+        val lines = listOf(
+            "", "  \t  ", " \t普通话🙂和 **粗体**  ", "a | b", "x\u2028y",
+            "> quote", "# title", "---", "1. ordered", "- item", "```kt",
+            "first\rsecond", "first\nlast", "x".repeat(SettledBlocks.MIN_CHARS),
+        )
+        for (line in lines) {
+            assertEquals(line, parseMarkdown(line, checkpoint = null), parseMarkdown(line))
+        }
+    }
 
     private val codeBackground = Color(0xFF102030)
     private val codeColor = Color(0xFF203040)

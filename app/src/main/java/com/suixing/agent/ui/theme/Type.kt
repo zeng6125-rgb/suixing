@@ -12,10 +12,10 @@ import androidx.compose.ui.unit.isUnspecified
 import androidx.compose.ui.unit.sp
 
 /** 小 / 标准 / 大 / 特大 → the multiplier applied to every length in the type ramp. */
-private val FONT_SCALES = listOf(0.88f, 1f, 1.12f, 1.26f)
+internal val FONT_SCALES = listOf(0.88f, 1f, 1.12f, 1.26f)
 
 /** 方正 / 标准 / 圆润 → the multiplier applied to the card-sized corners. */
-private val CORNER_SCALES = listOf(0.55f, 1f, 1.5f)
+internal val CORNER_SCALES = listOf(0.55f, 1f, 1.5f)
 
 private val Sans = FontFamily.Default
 

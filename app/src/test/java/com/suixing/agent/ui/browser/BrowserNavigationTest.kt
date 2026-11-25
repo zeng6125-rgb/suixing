@@ -14,6 +14,7 @@ import io.mockk.verify
 import java.net.URLDecoder
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -50,6 +51,35 @@ class BrowserNavigationTest {
             engineReady.complete(Unit)
             opening.join()
         }
+    }
+
+    @Test fun `reopening during startup shares it and later openings reuse the ready engine`() = runBlocking {
+        val engine = BrowserEngineStartup()
+        lateinit var startup: CompletableDeferred<Unit>
+        val first = launch(start = CoroutineStart.UNDISPATCHED) {
+            engine.awaitReady { startup = it }
+        }
+        first.cancelAndJoin()
+        val reopened = launch(start = CoroutineStart.UNDISPATCHED) {
+            engine.awaitReady { error("The system is still starting WebView") }
+        }
+        assertTrue(startup.isActive)
+        assertFalse(reopened.isCompleted)
+        startup.complete(Unit)
+        reopened.join()
+        engine.awaitReady { error("WebView is already ready") }
+    }
+
+    @Test fun `a failed engine startup can be retried`() = runBlocking {
+        val engine = BrowserEngineStartup()
+        val failure = IllegalStateException("WebView startup failed")
+        val reported = runCatching {
+            engine.awaitReady { it.completeExceptionally(failure) }
+        }.exceptionOrNull()
+        assertTrue(reported is IllegalStateException)
+        assertEquals(failure.message, reported?.message)
+        engine.awaitReady { it.complete(Unit) }
+        engine.awaitReady { error("A successful retry must be reused") }
     }
 
     @Test fun `opening feedback stays until WebView can draw the main page`() {

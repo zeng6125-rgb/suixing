@@ -14,6 +14,23 @@ internal class EarlierPageReveal(
 
 internal data class EarlierPageTarget(val index: Int, val scrollOffset: Int)
 
+internal data class EarlierPageAnchor(val key: Any, val offset: Int)
+
+internal fun captureEarlierPageAnchor(
+    visibleItems: List<LazyListItemInfo>,
+): EarlierPageAnchor? {
+    val item = visibleItems.firstOrNull { it.key != "load-earlier" } ?: return null
+    return EarlierPageAnchor(key = item.key, offset = item.offset)
+}
+
+internal fun earlierAnchorDriftPx(
+    visibleItems: List<LazyListItemInfo>,
+    anchor: EarlierPageAnchor,
+): Int? {
+    val current = visibleItems.firstOrNull { it.key == anchor.key } ?: return null
+    return current.offset - anchor.offset
+}
+
 /**
  * Resolve an old, still-laid-out message against the incoming keyed projection. The paging
  * header is deliberately absent from [incomingIndices]: keeping that header in place would

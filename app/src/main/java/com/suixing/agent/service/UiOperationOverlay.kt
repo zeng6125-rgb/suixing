@@ -27,6 +27,7 @@ import com.suixing.agent.ui.components.ChatTitleShadowColor
 import com.suixing.agent.ui.components.ChatTitleShadowElevationDp
 import com.suixing.agent.ui.components.PopupShadowMarginDp
 import com.suixing.agent.ui.theme.AppearancePalette
+import com.suixing.agent.ui.theme.resolvedScheme
 import kotlin.math.roundToInt
 
 /** A touchable window limited to the controls; the full-screen effects remain untouchable. */
@@ -47,10 +48,10 @@ internal object UiOperationOverlay {
 
     val isAttached: Boolean get() = root?.isAttachedToWindow == true
 
-    fun setAppearance(context: Context, themeMode: Int, paletteMode: Int) {
+    fun setAppearance(context: Context, uiTheme: Int, themeMode: Int, paletteMode: Int) {
         val night = context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK ==
             Configuration.UI_MODE_NIGHT_YES
-        val next = AppearancePalette.fromId(paletteMode).scheme(themeMode == 2 || (themeMode == 0 && night))
+        val next = resolvedScheme(uiTheme, paletteMode, themeMode == 2 || (themeMode == 0 && night))
         if (colorScheme == next) return
         colorScheme = next
         capsule?.let { container ->

@@ -50,14 +50,14 @@ fun ExtensionScreen(onBack: () -> Unit) {
                 onBack = onBack,
                 actions = {
                     PageTopBarAction(
-                        icon = ImageVector.vectorResource(R.drawable.ic_rotate_cw),
+                        icon = com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_rotate_cw),
                         contentDescription = "刷新",
                         onClick = { memoryRefresh++ },
                     )
                     PageTopBarAction(
-                        icon = ImageVector.vectorResource(R.drawable.ic_plus),
+                        icon = com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_plus),
                         contentDescription = "新增记忆",
-                        glyphSize = 22.dp,
+                        glyphSize = if (com.suixing.agent.ui.theme.LocalUseMiuix.current) 20.dp else 22.dp,
                         onClick = { memoryNew++ },
                     )
                 },

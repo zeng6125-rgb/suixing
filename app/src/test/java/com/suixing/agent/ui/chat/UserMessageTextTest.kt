@@ -5,11 +5,23 @@ import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.style.TextDecoration
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class UserMessageTextTest {
     private val highlight = Color(0xFF304050)
+
+    @Test
+    fun `a long literal message reuses its original string`() {
+        val source = "这段正文有 **星号**、emoji 🙂 和换行\n".repeat(512)
+
+        val result = annotatedUserMessage(source, highlight)
+
+        assertSame(source, result.text)
+        assertTrue(result.spanStyles.isEmpty())
+        assertTrue(result.getLinkAnnotations(0, result.length).isEmpty())
+    }
 
     @Test
     fun `markdown markers escapes and whitespace remain literal`() {

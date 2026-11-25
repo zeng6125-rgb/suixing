@@ -270,7 +270,13 @@ fun FlatIconButton(
                     spotColor = Color.Black.copy(alpha = 0.12f),
                 )
                 .clip(CircleShape)
-                .background(MaterialTheme.colorScheme.surfaceContainerHigh),
+                .background(
+                    if (com.suixing.agent.ui.theme.LocalUseMiuix.current) {
+                        MaterialTheme.colorScheme.surfaceContainer
+                    } else {
+                        MaterialTheme.colorScheme.surfaceContainerHigh
+                    },
+                ),
             contentAlignment = Alignment.Center,
         ) {
             Icon(
@@ -291,11 +297,19 @@ fun FlatIconButton(
  * drawer handle flip together instead of drifting apart.
  */
 @Composable
-private fun handleDisc(): Color = MaterialTheme.colorScheme.surfaceContainerHigh
+private fun handleDisc(): Color = if (com.suixing.agent.ui.theme.LocalUseMiuix.current) {
+    MaterialTheme.colorScheme.surfaceContainer
+} else {
+    MaterialTheme.colorScheme.surfaceContainerHigh
+}
 
 /** The other half of [handleDisc]: the ink that reads on that disc. */
 @Composable
-private fun handleInk(): Color = MaterialTheme.colorScheme.onSurfaceVariant
+private fun handleInk(): Color = if (com.suixing.agent.ui.theme.LocalUseMiuix.current) {
+    MaterialTheme.colorScheme.onSurface
+} else {
+    MaterialTheme.colorScheme.onSurfaceVariant
+}
 
 /**
  * The same disc as [FlatIconButton] for glyphs that are vectors of our own rather
@@ -553,7 +567,7 @@ fun DrawerButton(size: Dp = 44.dp, shape: Shape = CircleShape) {
     val open = LocalOpenSidebar.current ?: return
     // One glyph, drawn once: the chat header's handle is this same drawable through
     // FlatPainterButton, so the two headers cannot drift into two hamburgers.
-    val handle = painterResource(R.drawable.ic_menu_soft)
+    val handle = suixingIconPainter(R.drawable.ic_menu_soft)
     if (shape == CircleShape) {
         CircleActionButton(
             painter = handle,

@@ -135,6 +135,7 @@ internal class PreparedMarkdownCache(
             }
             throw failure
         }
+        if (owners.size == lookups.size && owners.isNotEmpty()) return computed
         return buildMap {
             for ((text, lookup) in lookups) {
                 context.ensureActive()
@@ -204,30 +205,43 @@ internal class PreparedMarkdownCache(
 private val preparedMarkdownCache = PreparedMarkdownCache()
 
 internal suspend fun prepareMarkdownTexts(texts: List<String>): Map<String, List<MdBlock>> {
+    if (texts.isEmpty()) return emptyMap()
     return withContext(Dispatchers.Default) {
-        val required = texts.filter { it.length >= SettledBlocks.MIN_CHARS }.distinct()
-        if (required.isEmpty()) return@withContext emptyMap()
+        var requiredSet: LinkedHashSet<String>? = null
+        for (text in texts) {
+            if (text.length >= SettledBlocks.MIN_CHARS) {
+                val set = requiredSet ?: LinkedHashSet<String>().also { requiredSet = it }
+                set.add(text)
+            }
+        }
+        val required = requiredSet ?: return@withContext emptyMap()
         val context = currentCoroutineContext()
-        val ready = LinkedHashMap<String, List<MdBlock>>()
-        val cold = ArrayList<String>()
+        val ready = LinkedHashMap<String, List<MdBlock>>(required.size)
+        var cold: ArrayList<String>? = null
         for (text in required) {
             context.ensureActive()
             val settled = SettledBlocks.get(text)
             if (settled != null) {
                 preparedMarkdownCache.remove(text)
                 ready[text] = settled
-            } else cold += text
-        }
-        ready.putAll(preparedMarkdownCache.getOrParseBatch(cold) { owners ->
-            context.ensureActive()
-            val native = NativeMarkdown.parseBatch(owners)
-            buildMap {
-                for (text in owners) {
-                    context.ensureActive()
-                    put(text, native[text] ?: parseMarkdown(text) { context.ensureActive() })
-                }
+            } else {
+                val missing = cold ?: ArrayList<String>(required.size).also { cold = it }
+                missing += text
             }
-        })
-        required.associateWith { ready.getValue(it) }
+        }
+        val uncached = cold
+        if (uncached != null) {
+            ready.putAll(preparedMarkdownCache.getOrParseBatch(uncached) { owners ->
+                context.ensureActive()
+                val native = NativeMarkdown.parseBatch(owners)
+                buildMap(owners.size) {
+                    for (text in owners) {
+                        context.ensureActive()
+                        put(text, native[text] ?: parseMarkdown(text) { context.ensureActive() })
+                    }
+                }
+            })
+        }
+        ready
     }
 }

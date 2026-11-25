@@ -26,7 +26,6 @@ internal fun appendFileReference(text: String, path: String): String =
         fileReferenceToken(path) + " "
 
 private fun referenceStart(text: String, index: Int): Boolean {
-    if (text[index] != '@') return false
     if (index == 0) return true
     val previous = text[index - 1]
     return previous !in 'a'..'z' && previous !in 'A'..'Z' && previous !in '0'..'9' &&
@@ -35,17 +34,17 @@ private fun referenceStart(text: String, index: Int): Boolean {
 
 private data class ReferenceToken(val end: Int, val path: String, val closed: Boolean)
 
-private fun referenceToken(text: String, start: Int): ReferenceToken {
-    val quoted = text.getOrNull(start + 1) == '"'
+private fun referenceToken(text: String, start: Int, limit: Int = text.length): ReferenceToken {
+    val quoted = start + 1 < limit && text[start + 1] == '"'
     var index = start + if (quoted) 2 else 1
     val path = StringBuilder()
-    while (index < text.length) {
+    while (index < limit) {
         val char = text[index]
         if (quoted && char == '"') return ReferenceToken(index + 1, path.toString(), true)
         if (!quoted && char.isWhitespace()) break
-        val next = text.getOrNull(index + 1)
-        if (quoted && char == '\\' && (next == '\\' || next == '"')) {
-            index++
+        if (quoted && char == '\\' && index + 1 < limit) {
+            val next = text[index + 1]
+            if (next == '\\' || next == '"') index++
         }
         path.append(text[index++])
     }
@@ -56,18 +55,19 @@ private fun absoluteReferencePath(path: String): Boolean = path.startsWith("/") 
     (path.length > 2 && path[1] == ':' && (path[2] == '/' || path[2] == '\\'))
 
 internal fun fileReferences(text: String): List<FileReference> {
+    var index = text.indexOf('@')
+    if (index < 0) return emptyList()
     val references = ArrayList<FileReference>()
-    var index = 0
-    while (index < text.length) {
+    while (index >= 0) {
         if (!referenceStart(text, index)) {
-            index++
+            index = text.indexOf('@', index + 1)
             continue
         }
         val token = referenceToken(text, index)
         if (token.closed && absoluteReferencePath(token.path)) {
             references += FileReference(index, token.end, token.path)
         }
-        index = token.end.coerceAtLeast(index + 1)
+        index = text.indexOf('@', token.end)
     }
     return references
 }
@@ -75,21 +75,22 @@ internal fun fileReferences(text: String): List<FileReference> {
 /** Only the token containing the caret is completed; email addresses are ordinary text. */
 internal fun activeFileReference(text: String, cursor: Int): FileReferenceQuery? {
     if (cursor !in 0..text.length) return null
-    var index = 0
-    while (index < text.length) {
+    var index = text.indexOf('@')
+    while (index >= 0 && index < cursor) {
         if (!referenceStart(text, index)) {
-            index++
+            index = text.indexOf('@', index + 1)
             continue
         }
         val token = referenceToken(text, index)
         val quoted = text.getOrNull(index + 1) == '"'
-        if (cursor > index && cursor <= token.end &&
+        if (cursor <= token.end &&
             !(quoted && token.closed && cursor == token.end)
         ) {
-            val prefix = referenceToken(text.substring(0, cursor), index).path
+            val prefix = if (cursor == token.end) token.path else referenceToken(text, index, cursor).path
             return FileReferenceQuery(index, token.end, prefix)
         }
-        index = token.end.coerceAtLeast(index + 1)
+        if (token.end >= cursor) break
+        index = text.indexOf('@', token.end)
     }
     return null
 }

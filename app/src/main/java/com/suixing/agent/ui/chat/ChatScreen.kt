@@ -110,9 +110,7 @@ fun ChatScreen(
     // The composer stack's own measured height: the node inside all of its paddings, so the
     // gesture bar's strip and its own 12dp of air are not in it (they are added back below).
     var composerH by remember { mutableStateOf(0.dp) }
-    // The keyboard's clamped inset, and the gesture bar's own: the composer's bottom padding is
-    // the difference between them (see the stack's own modifier), and it is the one term of the
-    // stack's footprint that moves while the keyboard does.
+    // The composer is placed above the larger of the keyboard and gesture-bar insets.
     // 键盘高度通过 State 引用下传，在底部避让的布局节点读；动画不逐帧订阅整页组合。
     val imePxState = LocalHeldImePx.current
     // 手势条高度在组合期算一次：它是 @Composable 调用（`WindowInsets.navigationBars`），
@@ -191,6 +189,11 @@ fun ChatScreen(
     // composition local 只能在组合里读：先在组合层捕获，守护协程里用这个引用。
     val setSelectionActive = LocalSetSelectionActive.current
     // **分批填充**（打开/切换会话时 12 轮一次性组合 = 100~150ms，frame.log 实测：
+    val useMiuix = com.suixing.agent.ui.theme.LocalUseMiuix.current
+    val overscrollHost = rememberVerticalMiuixOverscrollHost(enabled = useMiuix)
+    val overscrollActiveNow: () -> Boolean = remember(overscrollHost) {
+        { overscrollHost?.active == true }
+    }
     val scroll = rememberChatScroll(
         // 内容版本：消息条数 + 流式/思考字符数。只在真正"长高"时变，滚动本身不会触发。
         listState = listState,
@@ -199,16 +202,22 @@ fun ChatScreen(
         guardNow = { gesture.pressGuardOn },
         conversationId = state.conversationId,
         initialFollowing = openingBookmark?.followLatest != false,
+        overscrollActiveNow = overscrollActiveNow,
     )
 
 
-    val transcriptPosition = rememberChatReadingPosition(state, settings, transcript, gesture, scroll, reasoningExpansion)
+    val transcriptPosition = rememberChatReadingPosition(
+        state, settings, transcript, gesture, scroll, reasoningExpansion, overscrollActiveNow,
+    )
 
-    val earlierPaging = rememberChatEarlierPaging(state, transcript, actions, scope, scroll, gesture, live)
-    val loadingEarlier by earlierPaging.loading
-    val loadEarlier = earlierPaging.onLoad
     val prepareRows = rememberChatMarkdownPreparation(state, transcript, actions)
     val contentReadiness = remember(viewport) { ViewportContentReadiness() }
+    val earlierPaging = rememberChatEarlierPaging(
+        state, transcript, actions, scope, scroll, gesture, live,
+        transcriptPosition, prepareRows, contentReadiness,
+    )
+    val loadingEarlier by earlierPaging.loading
+    val loadEarlier = earlierPaging.onLoad
     key(state.conversationId) {
         BindConversationViewport(
             viewport, actions, scroll, visible, rowKeys, rowKeyIndices, rowOffset, itemCount, shownTurns, state.turnCount,
@@ -282,7 +291,7 @@ fun ChatScreen(
     ) { padding ->
         // The top fade layer needs one solid colour: the canvas brush's own top stop.
         val canvasColor = MaterialTheme.colorScheme.surface
-        val canvas = if (!LocalDarkTheme.current) {
+        val canvas = if (!useMiuix && !LocalDarkTheme.current) {
             val tint = MaterialTheme.colorScheme.primary
             remember(canvasColor, tint) {
                 Brush.verticalGradient(listOf(canvasColor, tint.copy(alpha = 0.06f)))
@@ -304,14 +313,28 @@ fun ChatScreen(
                 .padding(padding),
         ) {
 
-            CompositionLocalProvider(LocalViewportContentReadiness provides contentReadiness) {
-            ChatTranscriptViewport(
-                state, settings, transcript, contextReadout, runPresentation, actions, inputBindings,
-                transcriptPosition, revealGuardSpec, gesture, scroll, selectionTracker, viewConfig,
-                selectionFocus, setSelectionActive, composerH, navBarPx, imePxState,
-                { heldFootprint }, stackFootprint, bubbleMaxWidth, live,
-                loadingEarlier, loadEarlier, editMessage, onOpenSettings,
-            )
+            val renderViewport: @Composable () -> Unit = {
+                ChatTranscriptViewport(
+                    state, settings, transcript, contextReadout, runPresentation, actions, inputBindings,
+                    transcriptPosition, revealGuardSpec, gesture, scroll, selectionTracker, viewConfig,
+                    selectionFocus, setSelectionActive, composerH, navBarPx, imePxState,
+                    { heldFootprint }, stackFootprint, bubbleMaxWidth, live,
+                    loadingEarlier, loadEarlier, editMessage, onOpenSettings,
+                )
+            }
+            if (overscrollHost != null) {
+                CompositionLocalProvider(
+                    LocalViewportContentReadiness provides contentReadiness,
+                    // 保留 Miuix 弹性过卷体验，同时通过 VerticalOnlyOverscrollFactory 锁死纯纵向过卷，
+                    // 并把弹簧回弹状态同步给 TranscriptPosition / ChatScroll，让弹性与锚定完美融合。
+                    androidx.compose.foundation.LocalOverscrollFactory provides overscrollHost.factory,
+                    content = renderViewport,
+                )
+            } else {
+                CompositionLocalProvider(
+                    LocalViewportContentReadiness provides contentReadiness,
+                    content = renderViewport,
+                )
             }
 
             ChatScreenHeader(state, actions, contextReadout, subagentUi, canvasColor, onOpenBrowser, onOpenTerminal)
@@ -321,7 +344,7 @@ fun ChatScreen(
 
             ChatComposerPanel(
                 state, settings, actions, inputBindings, dialogs, contextReadout, subagentUi,
-                slashTools, latestUserAt, scope, snackbarHostState, scroll, itemCount, imePxState,
+                slashTools, latestUserAt, scope, snackbarHostState, scroll, itemCount, navBarPx, imePxState,
                 onOpenSettings, ::jumpToLatest, onHeightChanged = { composerH = it },
             )
             JumpToLatestButton(

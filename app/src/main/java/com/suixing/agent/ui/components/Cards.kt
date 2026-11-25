@@ -30,6 +30,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.suixing.agent.ui.theme.LocalDarkTheme
+import com.suixing.agent.ui.theme.LocalUseMiuix
 import com.suixing.agent.ui.theme.Tone
 import com.suixing.agent.ui.theme.color
 /**
@@ -44,6 +45,16 @@ fun SuixingCard(
     contentPadding: PaddingValues = PaddingValues(SettingsStyle.CardPadding),
     content: @Composable ColumnScope.() -> Unit,
 ) {
+    if (LocalUseMiuix.current) {
+        MiuixCardContainer(
+            modifier = modifier,
+            onClick = onClick,
+            containerColor = containerColor,
+            contentPadding = contentPadding,
+            content = content,
+        )
+        return
+    }
     val shape = MaterialTheme.shapes.large
     // 全站每张卡都走这里：BorderStroke 每次新建（值相等类型，可直接 remember）。
     // `MaterialTheme.colorScheme` 是 @Composable 读取，必须先取值再 remember。

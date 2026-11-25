@@ -2,11 +2,12 @@ package com.suixing.agent.ui.chat
 
 import com.suixing.agent.ui.chat.markdown.SettledBlocks
 import com.suixing.agent.ui.chat.markdown.MessageSegment
-import com.suixing.agent.ui.chat.markdown.prepareMarkdownTexts
 import com.suixing.agent.ui.chat.markdown.parseMarkdown
+import com.suixing.agent.ui.chat.markdown.prepareMarkdownTexts
 import com.suixing.agent.ui.chat.markdown.splitImageSegments
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -131,6 +132,54 @@ class ViewportPreparationTest {
         assertEquals(
             listOf(shortText, cachedText, missingText),
             markdownTextsToPrepare(parts, mapOf(cachedText to Unit)),
+        )
+    }
+
+    @Test fun `imageSegmentsToPrepare preserves cached map identity when markers match and detects duplicates or removals`() {
+        val first = "prefix ![one](https://example.com/1.png) suffix"
+        val second = "prefix ![two](https://example.com/2.png) suffix"
+        val cachedFirst = mapOf(first to splitImageSegments(first))
+        assertSame(cachedFirst, imageSegmentsToPrepare(listOf(Part.Text(first)), cachedFirst))
+        assertEquals(emptyMap<String, List<MessageSegment>>(), imageSegmentsToPrepare(listOf(Part.Text("plain")), cachedFirst))
+
+        val cachedBoth = mapOf(first to splitImageSegments(first), second to splitImageSegments(second))
+        assertSame(cachedBoth, imageSegmentsToPrepare(listOf(Part.Text(first), Part.Text(second)), cachedBoth))
+        assertEquals(
+            setOf(first),
+            imageSegmentsToPrepare(listOf(Part.Text(first), Part.Text(first)), cachedBoth).keys,
+        )
+    }
+
+    @Test fun `planRowMarkdown separates cached, settled-ready, short-ready, and cold rows`() {
+        val longA = "settled paragraph ".repeat(40)
+        val longB = "cold paragraph ".repeat(40)
+        val blocksA = parseMarkdown(longA)
+        val cachedDocs = mapOf(longA to blocksA)
+
+        assertSame(
+            RowMarkdownPlan.Cached,
+            planRowMarkdown(listOf(Part.Text("short"), Part.Text(longA)), cachedDocs, emptyMap()) {
+                error("cached row must not query settled cache")
+            },
+        )
+
+        val shortReady = planRowMarkdown(listOf(Part.Text("short")), null, emptyMap()) {
+            error("short row must not query settled cache")
+        } as RowMarkdownPlan.Ready
+        assertTrue(shortReady.documents.isEmpty())
+
+        val settledReady = planRowMarkdown(listOf(Part.Text(longA)), null, emptyMap()) { text ->
+            if (text == longA) blocksA else null
+        } as RowMarkdownPlan.Ready
+        assertSame(blocksA, settledReady.documents[longA])
+
+        assertSame(
+            RowMarkdownPlan.NeedsBackground,
+            planRowMarkdown(listOf(Part.Text(longB)), null, emptyMap()) { null },
+        )
+        assertSame(
+            RowMarkdownPlan.NeedsBackground,
+            planRowMarkdown(listOf(Part.Text("![img](https://example.com/a.png)")), cachedDocs, emptyMap()) { null },
         )
     }
 

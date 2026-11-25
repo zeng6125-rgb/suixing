@@ -40,7 +40,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
+import com.suixing.agent.ui.components.SuixingOutlinedButton
 import com.suixing.agent.ui.components.CompactOutlinedTextField as OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
@@ -241,10 +241,10 @@ internal fun NetworkVoiceSettingsPage(onBack: () -> Unit) {
             if (stored.speakReplies) {
                 item {
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        OutlinedButton(onClick = { Core.speaker.speak("你好，我是 JAgent。") }) {
+                        SuixingOutlinedButton(onClick = { Core.speaker.speak("你好，我是 JAgent。") }) {
                             Text("试听")
                         }
-                        OutlinedButton(onClick = { Core.speaker.stop() }) { Text("停止朗读") }
+                        SuixingOutlinedButton(onClick = { Core.speaker.stop() }) { Text("停止朗读") }
                     }
                 }
             }

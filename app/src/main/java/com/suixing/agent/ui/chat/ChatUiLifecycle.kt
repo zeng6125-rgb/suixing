@@ -2,8 +2,11 @@ package com.suixing.agent.ui.chat
 
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.snapshots.Snapshot
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.LifecycleOwner
@@ -30,9 +33,10 @@ internal class ChatUiLifecycleOwner(
 }
 
 @Composable
-internal fun rememberChatUiLifecycleOwner(visible: Boolean): LifecycleOwner {
+internal fun rememberChatUiLifecycleOwner(visible: () -> Boolean): LifecycleOwner {
     val parent = LocalLifecycleOwner.current
-    val owner = remember(parent) { ChatUiLifecycleOwner(visible) }
+    val owner = remember(parent) { ChatUiLifecycleOwner(Snapshot.withoutReadObservation(visible)) }
+    val visibleNow = rememberUpdatedState(visible)
     DisposableEffect(parent, owner) {
         val observer = LifecycleEventObserver { source, _ -> owner.parentChanged(source.lifecycle.currentState) }
         parent.lifecycle.addObserver(observer)
@@ -41,6 +45,8 @@ internal fun rememberChatUiLifecycleOwner(visible: Boolean): LifecycleOwner {
             owner.destroy()
         }
     }
-    SideEffect { owner.visibilityChanged(visible) }
+    LaunchedEffect(owner) {
+        snapshotFlow { visibleNow.value() }.collect(owner::visibilityChanged)
+    }
     return owner
 }

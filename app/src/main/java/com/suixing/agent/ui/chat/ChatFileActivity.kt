@@ -137,7 +137,7 @@ internal fun ChatFileActivity(activities: List<FileActivity>, modifier: Modifier
     Column(modifier.fillMaxWidth()) {
         val header: @Composable () -> Unit = {
             Row(Modifier.padding(horizontal = 12.dp, vertical = 9.dp), verticalAlignment = Alignment.CenterVertically) {
-                Icon(ImageVector.vectorResource(R.drawable.ic_file), contentDescription = null,
+                Icon(com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_file), contentDescription = null,
                     modifier = Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
                 Spacer(Modifier.width(8.dp))
                 Column(Modifier.weight(1f)) {
@@ -148,7 +148,7 @@ internal fun ChatFileActivity(activities: List<FileActivity>, modifier: Modifier
                 }
                 if (collapsible) {
                     Spacer(Modifier.width(8.dp))
-                    Icon(ImageVector.vectorResource(if (expanded) R.drawable.ic_chevron_up else R.drawable.ic_chevron_down),
+                    Icon(com.suixing.agent.ui.components.suixingIcon(if (expanded) R.drawable.ic_chevron_up else R.drawable.ic_chevron_down),
                         contentDescription = if (expanded) "收起文件" else "展开文件", modifier = Modifier.size(16.dp),
                         tint = MaterialTheme.colorScheme.onSurfaceVariant)
                 }

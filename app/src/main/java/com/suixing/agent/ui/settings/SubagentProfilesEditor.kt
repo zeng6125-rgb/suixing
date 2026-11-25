@@ -16,7 +16,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Checkbox
+import com.suixing.agent.ui.components.SuixingCheckbox
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -132,7 +132,7 @@ internal fun SubagentProfilesCard(settings: AppSettings) {
                 control = {
                     Box {
                         IconButton(onClick = { menu = true }, colors = actionIconButtonColors()) {
-                            Icon(ImageVector.vectorResource(R.drawable.ic_more_vertical), "${profile.name}的操作", Modifier.size(18.dp))
+                            Icon(com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_more_vertical), "${profile.name}的操作", Modifier.size(18.dp))
                         }
                         ActionMenu(expanded = menu, onDismissRequest = { menu = false }) {
                             ActionMenuItem(text = { Text("编辑") }, onClick = { menu = false; editing = profile })
@@ -333,7 +333,7 @@ internal fun SubagentConfigEditor(
                         SettingRow(title = name, titleMaxLines = 2,
                             subtitle = if (name in toolNames) Core.tools.groupOf(name).ifBlank { if (name.startsWith("mcp_")) "MCP" else "插件或扩展" }
                                 else "当前未连接或不可用",
-                            onClick = { setSelected(!checked) }, control = { Checkbox(checked, { setSelected(it) }) })
+                            onClick = { setSelected(!checked) }, control = { SuixingCheckbox(checked, { setSelected(it) }) })
                     }
                 }
             }
@@ -356,7 +356,7 @@ internal fun SubagentConfigEditor(
                 actions.forEach { action ->
                     val checked = action in profile.allowedActions[name].orEmpty()
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Checkbox(checked, { selected ->
+                        SuixingCheckbox(checked, { selected ->
                             val values = if (selected) (profile.allowedActions[name].orEmpty() + action).distinct() else profile.allowedActions[name].orEmpty() - action
                             onChange(profile.copy(allowedActions = profile.allowedActions + (name to values)))
                         })

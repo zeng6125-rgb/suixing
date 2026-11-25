@@ -35,7 +35,7 @@ import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.CircularProgressIndicator
+import com.suixing.agent.ui.components.SuixingCircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -264,17 +264,17 @@ internal fun ProcessStatus(text: String, tone: Color = MaterialTheme.colorScheme
 @Composable
 internal fun ProcessSpinner(tone: Color) {
     if (!com.suixing.agent.ui.components.LocalDecorationMotion.current()) {
-        CircularProgressIndicator(
+        SuixingCircularProgressIndicator(
             progress = { 0.75f },
-            modifier = Modifier.size(13.dp),
+            size = 13.dp,
             strokeWidth = 2.dp,
             color = tone,
             trackColor = Color.Transparent,
         )
         return
     }
-    CircularProgressIndicator(
-        modifier = Modifier.size(13.dp),
+    SuixingCircularProgressIndicator(
+        size = 13.dp,
         strokeWidth = 2.dp,
         color = tone,
     )
@@ -308,7 +308,7 @@ internal fun TraceBlock(note: String, modifier: Modifier = Modifier) {
             Icon(
                 // `material-icons-extended` 的最后一个非必要用途（issue #57 P1-b）：
                 // 仓库现成的 Lucide `ic_rotate_cw` 就是同一个图形，去掉那 36MB 依赖。
-                painter = painterResource(R.drawable.ic_rotate_cw),
+                painter = com.suixing.agent.ui.components.suixingIconPainter(R.drawable.ic_rotate_cw),
                 contentDescription = null,
                 modifier = Modifier.size(16.dp),
                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -340,7 +340,7 @@ internal fun CompressionBlock(
 ) {
     val expanded = expansion.stored(blockId) ?: false
     ProcessCard(
-        icon = ImageVector.vectorResource(R.drawable.ic_minimize_2),
+        icon = com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_minimize_2),
         title = "已压缩上下文",
         expanded = expanded,
         onToggle = { expansion.set(blockId, !expanded) },

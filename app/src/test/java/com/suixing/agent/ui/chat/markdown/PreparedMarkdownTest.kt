@@ -173,4 +173,19 @@ class PreparedMarkdownTest {
             if (++checks == 10) throw CancellationException("replaced chat")
         }
     }
+
+    @Test fun `prepareMarkdownTexts reuses SettledBlocks hits cleanly without redundant maps`() = runBlocking {
+        SettledBlocks.clearForTest()
+        val text = ("settled document for batch fast path ").repeat(30)
+        val blocks = parseMarkdown(text)
+        SettledBlocks.put(text, blocks)
+        try {
+            val prepared = prepareMarkdownTexts(listOf(text, "short", text))
+            assertEquals(setOf(text), prepared.keys)
+            assertSame(blocks, prepared[text])
+            assertTrue(prepareMarkdownTexts(emptyList()).isEmpty())
+        } finally {
+            SettledBlocks.clearForTest()
+        }
+    }
 }

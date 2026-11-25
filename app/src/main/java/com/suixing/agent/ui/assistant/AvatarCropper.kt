@@ -16,8 +16,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
+import com.suixing.agent.ui.components.SuixingButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -158,7 +157,7 @@ fun AvatarCropper(
                 ) {
                     IconButton(onClick = onCancel) {
                         Icon(
-                            imageVector = ImageVector.vectorResource(R.drawable.ic_arrow_left),
+                            imageVector = com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_arrow_left),
                             contentDescription = "取消裁剪",
                             tint = Color.White,
                         )
@@ -191,18 +190,16 @@ fun AvatarCropper(
                     // 取消要有背景、两个按钮都要够高（用户：「按钮能不能画高一点？取消怎么没有
                     // 背景？」）。黑底上的裸 TextButton 读起来像一行字而不是按钮；给取消一个半透
                     // 明白底胶囊，与确定同高（48dp），两个才是一对。
-                    Button(
+                    SuixingButton(
                         onClick = onCancel,
                         shape = MaterialTheme.shapes.medium,
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = Color.White.copy(alpha = 0.16f),
-                            contentColor = Color.White,
-                        ),
+                        containerColor = Color.White.copy(alpha = 0.16f),
+                        contentColor = Color.White,
                         modifier = Modifier.height(48.dp),
                     ) {
                         Text("取消")
                     }
-                    Button(
+                    SuixingButton(
                         onClick = {
                             onConfirm(
                                 avatarCropRect(

@@ -82,11 +82,15 @@ private fun MeasuredTableRow(
         val width = constraints.constrainWidth(naturalWidth)
         val columns = cache.get(width, cells.size, divider)
         check(measurables.size == cells.size)
-        val placeables = measurables.mapIndexed { index, measurable ->
+        var height = 0
+        val placeables = Array(measurables.size) { index ->
             val cellWidth = columns.widths[index]
-            measurable.measure(Constraints(minWidth = cellWidth, maxWidth = cellWidth, maxHeight = maximumHeight))
+            val cell = measurables[index].measure(
+                Constraints(minWidth = cellWidth, maxWidth = cellWidth, maxHeight = maximumHeight),
+            )
+            height = maxOf(height, cell.height)
+            cell
         }
-        val height = placeables.maxOfOrNull { it.height } ?: 0
         drawing[0] = TableRowDrawing(width, inset, columns)
         layout(width, constraints.constrainHeight(height + inset)) {
             placeables.forEachIndexed { index, cell -> cell.placeRelative(columns.starts[index], inset) }

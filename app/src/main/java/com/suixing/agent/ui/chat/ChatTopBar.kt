@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -46,6 +47,9 @@ import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.PopupPositionProvider
 import com.suixing.agent.R
+import com.suixing.agent.ui.components.suixingIcon
+import com.suixing.agent.ui.components.suixingIconPainter
+import com.suixing.agent.ui.components.suixingPainter
 import com.suixing.agent.ui.components.FlatPainterButton
 import com.suixing.agent.ui.components.LocalOpenSidebar
 import com.suixing.agent.ui.components.MenuCard
@@ -82,7 +86,7 @@ internal fun ChatTopBar(
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         FlatPainterButton(
-            painter = painterResource(R.drawable.ic_menu_soft),
+            painter = suixingIconPainter(R.drawable.ic_menu_soft),
             contentDescription = "打开侧边栏",
             onClick = { openDrawer?.invoke() },
         )
@@ -122,24 +126,33 @@ internal fun ChatTopBar(
                     ),
                 shape = capsuleShape,
                 // 与左侧抽屉按钮（FlatPainterButton → handleDisc）同一个色 token：
-                // surface 在浅色主题是纯白，会跟旁边两枚 surfaceContainerHigh 圆盘脱节。
-                color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                // MIUIX 模式下统一使用 surfaceContainer（浅色纯白、深色抬升灰），避免左右灰白脱节。
+                color = if (com.suixing.agent.ui.theme.LocalUseMiuix.current) {
+                    MaterialTheme.colorScheme.surfaceContainer
+                } else {
+                    MaterialTheme.colorScheme.surfaceContainerHigh
+                },
             ) {
+                val useMiuix = com.suixing.agent.ui.theme.LocalUseMiuix.current
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     // Plain clickable Boxes, not IconButton: M3's IconButton forces a 48dp
                     // minimum touch target, which would overflow this 40dp capsule. The
                     // drawables carry a black android:tint, so pass the theme action ink
                     // explicitly, matching FlatPainterButton and page-header actions.
                     CapsuleAction(
-                        painter = painterResource(R.drawable.ic_square_pen),
+                        painter = suixingPainter(
+                            R.drawable.ic_square_pen,
+                            com.suixing.agent.ui.components.MiuixExtraIcons.Create,
+                        ),
                         description = "新对话",
                         onClick = onNew,
-                        glyphSize = 18.dp,
+                        glyphSize = if (useMiuix) 21.dp else 18.dp,
                     )
                     CapsuleAction(
-                        painter = painterResource(R.drawable.ic_more_vertical),
+                        painter = suixingIconPainter(R.drawable.ic_more_vertical),
                         description = "更多",
                         onClick = { overflow = ChatOverflow.Open },
+                        glyphSize = if (useMiuix) 20.dp else 22.dp,
                     )
                 }
             }
@@ -179,9 +192,11 @@ internal fun ChatTopBar(
                 focusable = false,
                 compactMotion = true,
             ) {
+                val iconInset = Modifier.offset(x = (-2).dp)
                 MenuItemRow(
-                    icon = ImageVector.vectorResource(R.drawable.ic_globe),
+                    icon = suixingIcon(R.drawable.ic_globe),
                     label = "内置浏览器",
+                    iconModifier = iconInset,
                     onClick = {
                         overflow = ChatOverflow.Navigating
                         onOpenBrowser()
@@ -189,8 +204,9 @@ internal fun ChatTopBar(
                 )
                 onViewSubagents?.let { view ->
                     MenuItemRow(
-                        icon = ImageVector.vectorResource(R.drawable.ic_bot),
+                        icon = suixingIcon(R.drawable.ic_bot),
                         label = "查看子智能体",
+                        iconModifier = iconInset,
                         onClick = {
                             overflow = ChatOverflow.Navigating
                             view()
@@ -198,8 +214,9 @@ internal fun ChatTopBar(
                     )
                 }
                 MenuItemRow(
-                    icon = ImageVector.vectorResource(R.drawable.ic_terminal),
+                    icon = suixingIcon(R.drawable.ic_terminal),
                     label = "打开终端",
+                    iconModifier = iconInset,
                     onClick = {
                         overflow = ChatOverflow.Navigating
                         onOpenTerminal()

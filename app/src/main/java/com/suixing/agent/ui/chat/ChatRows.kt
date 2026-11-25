@@ -384,11 +384,16 @@ internal fun EmptyHero(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 SUGGESTIONS.forEach { suggestion ->
+                    val useMiuix = com.suixing.agent.ui.theme.LocalUseMiuix.current
                     Surface(
                         onClick = { onPick(suggestion) },
                         shape = CircleShape,
-                        color = MaterialTheme.colorScheme.surfaceContainerHigh,
-                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                        color = if (useMiuix) {
+                            MaterialTheme.colorScheme.surfaceContainer
+                        } else {
+                            MaterialTheme.colorScheme.surfaceContainerHigh
+                        },
+                        border = if (useMiuix) null else BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
                     ) {
                         Text(
                             text = suggestion,
@@ -601,11 +606,11 @@ internal fun MessageActions(message: StoredMessage, onEdit: (StoredMessage) -> U
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(1.dp),
     ) {
-        TinyAction(ImageVector.vectorResource(R.drawable.ic_copy), "复制") {
+        TinyAction(com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_copy), "复制") {
             copy(message.text)
         }
         if (!LocalChatReadOnly.current) {
-            TinyAction(ImageVector.vectorResource(R.drawable.ic_square_pen), "修改") { onEdit(message) }
+            TinyAction(com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_square_pen), "修改") { onEdit(message) }
         }
     }
 }
@@ -1020,19 +1025,29 @@ internal fun AssistantRow(
     // 宽度上限（bubbleMaxWidth）两边都保留，所以「气泡宽度」这个设置在新样式下仍然有效。
     Column(Modifier.widthIn(max = bubbleMaxWidth).fillMaxWidth()) {
         if (card) {
+            val useMiuix = com.suixing.agent.ui.theme.LocalUseMiuix.current
+            val miuixShape = RoundedCornerShape(
+                com.suixing.agent.ui.theme.miuixScaledCorner(16.dp, com.suixing.agent.ui.theme.LocalMiuixCornerScale.current),
+            )
             Surface(
                 // 外观 → 气泡宽度 first, then fillMaxWidth: the cap has to be the outer
                 // constraint, or the inner fill would win and the card could never narrow.
                 modifier = Modifier
                     .widthIn(max = bubbleMaxWidth)
                     .fillMaxWidth(),
-                shape = BubbleShape,
-                color = MaterialTheme.colorScheme.surfaceContainerLow,
+                shape = if (useMiuix) miuixShape else BubbleShape,
+                color = if (useMiuix) {
+                    MaterialTheme.colorScheme.surfaceContainer
+                } else {
+                    MaterialTheme.colorScheme.surfaceContainerLow
+                },
                 // A hairline instead of a shadow: elevation 0 keeps a long transcript flat, and
                 // the outline is what separates a near-white card from a white canvas in light
                 // mode, where the two surfaces are 8% apart.
                 // 每帧新建 BorderStroke ⇒ remember 住（颜色变才重建；颜色在组合期先读）。
-                border = run {
+                border = if (useMiuix) {
+                    null
+                } else {
                     val outline = MaterialTheme.colorScheme.outlineVariant
                     remember(outline) { BorderStroke(1.dp, outline) }
                 },
@@ -1165,7 +1180,7 @@ internal fun imageSegmentReadingKey(partKey: String, index: Int): String = "$par
 @Composable
 internal fun RegenerateAction(onRegenerate: () -> Unit) {
     BranchArrow(
-        icon = ImageVector.vectorResource(R.drawable.ic_rotate_cw),
+        icon = com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_rotate_cw),
         label = "重新回答",
         enabled = true,
         onClick = onRegenerate,
