@@ -54,6 +54,7 @@ impl RustApplication {
             && self.state.loaded
             && self.state.page == Page::Chat
             && !self.drawer_open
+            && !self.drawer_motion.active()
             && self.child_viewer.is_none()
             && !self.state.conversation_pending
             && !self.avatar_view.modal_open()

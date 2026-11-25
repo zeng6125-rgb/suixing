@@ -636,6 +636,17 @@ mod unix {
         }
         let resolved = crate::web::download::resolve_user_path(&workspace, &prepared.path)?;
         let path = resolved.as_path();
+        #[cfg(target_os = "android")]
+        if matches!(
+            prepared.operation,
+            Operation::Write { .. } | Operation::Edit { .. }
+        ) && let Some(paths) = crate::platform::android::paths()
+            && let Ok(files) = std::fs::canonicalize(paths.files_dir)
+            && workspace == files
+            && crate::store::workspace::managed_file_path(&files, path)
+        {
+            return Err("文件工具不能覆写应用内部状态文件".into());
+        }
         let alias = crate::store::workspace::alias_for_workspace(&workspace, path)?;
         let external = alias.is_none() && path.is_absolute() && !path.starts_with(&workspace);
         let anchor = if external {

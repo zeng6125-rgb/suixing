@@ -118,27 +118,8 @@ impl Target {
         #[cfg(target_os = "android")]
         {
             let paths = crate::platform::android::paths().ok_or("Android路径未初始化")?;
-            let directories = ["chats", "datastore", "jobs", "plugins"];
-            let files = [
-                "todos.json",
-                "schedules.json",
-                "mcp.json",
-                "memory.json",
-                "profile.md",
-                "profile.state.json",
-                "usage.json",
-                "perf.json",
-            ];
-            if directories
-                .iter()
-                .any(|name| path.starts_with(paths.files_dir.join(name)))
-                || files.iter().any(|name| path == paths.files_dir.join(name))
-                || paths.files_dir.parent().is_some_and(|data| {
-                    ["databases", "shared_prefs"]
-                        .iter()
-                        .any(|name| path.starts_with(data.join(name)))
-                })
-            {
+            let files = std::fs::canonicalize(&paths.files_dir).unwrap_or(paths.files_dir);
+            if crate::store::workspace::managed_file_path(&files, &path) {
                 return Err("下载不能覆盖原应用内部状态文件".into());
             }
         }

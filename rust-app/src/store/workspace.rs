@@ -1,6 +1,125 @@
 //! User workspace assets are materialized before generation publication.
 use super::*;
 use crate::legacy_migration::{AssetMapping, MigrationPlan, WorkspaceDirectoryMapping};
+
+pub(super) fn select_workspace(
+    private: PathBuf,
+    shared_files: Option<&Path>,
+) -> Result<PathBuf, String> {
+    let Some(files) = shared_files else {
+        return Ok(private);
+    };
+    #[cfg(target_os = "android")]
+    if let Some(external) =
+        crate::platform::android::paths().and_then(|paths| paths.external_files_dir)
+    {
+        return fs::canonicalize(&external)
+            .map_err(|error| fs_error("解析共用工作区", &external, error));
+    }
+    Ok(files.to_owned())
+}
+
+pub(crate) fn private_workspace_for(workspace: &Path) -> PathBuf {
+    #[cfg(target_os = "android")]
+    if let Some(paths) =
+        crate::platform::android::paths().filter(|paths| paths.package_name == "com.suixing.agent")
+    {
+        let shared = paths
+            .external_files_dir
+            .as_deref()
+            .unwrap_or(&paths.files_dir);
+        if let Ok(shared) = fs::canonicalize(shared)
+            && shared == workspace
+        {
+            let files = fs::canonicalize(&paths.files_dir).unwrap_or(paths.files_dir);
+            let private = files.join("rust-state/workspace");
+            return if private.is_dir() {
+                private
+            } else {
+                files.join("workspace")
+            };
+        }
+    }
+    workspace.to_owned()
+}
+
+#[cfg(target_os = "android")]
+pub(crate) fn managed_file_path(files: &Path, path: &Path) -> bool {
+    let Some(relative) = path.strip_prefix(files).ok() else {
+        return files.parent().is_some_and(|app| {
+            ["databases", "shared_prefs"]
+                .iter()
+                .any(|name| path.starts_with(app.join(name)))
+        });
+    };
+    if relative.starts_with("rust-state") {
+        return !relative.starts_with("rust-state/workspace");
+    }
+    [
+        "chats",
+        "datastore",
+        "jobs",
+        "plugins",
+        "assistants",
+        "linux",
+        "subagent_records",
+        "deleted-usage",
+    ]
+    .iter()
+    .any(|name| relative.starts_with(name))
+        || [
+            "todos.json",
+            "goal.json",
+            "skill-state.json",
+            "skill-origin.json",
+            "schedules.json",
+            "mcp.json",
+            "memory.json",
+            "profile.md",
+            "profile.state.json",
+            "usage.json",
+            "perf.json",
+            "drawer-order",
+        ]
+        .iter()
+        .any(|name| relative == Path::new(name))
+}
+
+#[cfg(all(test, not(target_os = "android")))]
+#[test]
+fn shared_file_assets_uses_compose_workspace_and_preserves_old_files() {
+    let files =
+        std::env::temp_dir().join(format!("jagent-files-{}", crate::controller::unique_id()));
+    let state = files.join("rust-state");
+    fs::create_dir_all(state.join("workspace")).unwrap();
+    fs::write(files.join("shared.txt"), "Compose").unwrap();
+    fs::write(state.join("workspace/old.txt"), "Rust").unwrap();
+
+    let store = Store::open_with_shared_files(state, Some(files.clone())).unwrap();
+    let root = fs::canonicalize(&files).unwrap();
+    let (_, entries) = store.list_files(PathBuf::new()).unwrap();
+    assert_eq!(store.workspace(), root);
+    assert!(entries.iter().any(|entry| entry.name == "shared.txt"));
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry.path == store.private_workspace())
+    );
+    assert_eq!(
+        store.preview_file("shared.txt".into()).unwrap().1,
+        "Compose"
+    );
+    assert_eq!(
+        store
+            .preview_file(store.private_workspace().join("old.txt"))
+            .unwrap()
+            .1,
+        "Rust"
+    );
+    assert!(!files.join("old.txt").exists());
+
+    fs::remove_dir_all(files).unwrap();
+}
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(crate) struct WorkspaceMappings {
     pub assets: Vec<AssetMapping>,
@@ -72,6 +191,7 @@ pub(crate) fn alias_for_workspace(
     {
         return Ok(None);
     }
+    let requested = requested.strip_prefix("~").unwrap_or(requested);
     if !requested.is_absolute() {
         match fs::symlink_metadata(workspace.join(requested)) {
             Ok(_) => return Ok(None),
@@ -79,7 +199,11 @@ pub(crate) fn alias_for_workspace(
             Err(_) => return Err("无法核对当前工作区路径".into()),
         }
     }
-    let namespace = workspace.parent().ok_or("工作区namespace缺失")?;
+    let private = private_workspace_for(workspace);
+    if private != workspace && requested.starts_with(&private) {
+        return Ok(None);
+    }
+    let namespace = private.parent().ok_or("工作区namespace缺失")?;
     let active =
         crate::legacy_migration::resolve_active(namespace)?.unwrap_or_else(|| namespace.to_owned());
     let mapping = optional_json::<WorkspaceMappings>(
@@ -89,11 +213,12 @@ pub(crate) fn alias_for_workspace(
     )?
     .unwrap_or_default();
     mapping.validate()?;
-    crate::legacy_migration::resolve_workspace_path(
+    Ok(crate::legacy_migration::resolve_workspace_path(
         &mapping.assets,
         &mapping.directories,
         requested,
-    )
+    )?
+    .map(|path| private.join(path)))
 }
 pub(crate) fn publish_workspace(
     workspace: &Path,

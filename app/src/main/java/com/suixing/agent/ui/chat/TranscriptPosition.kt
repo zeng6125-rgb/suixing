@@ -35,8 +35,6 @@ internal class TranscriptPosition(private val list: LazyListState) {
     var latestStillWanted: () -> Boolean = { true }
     private var latestRequested = false
     private var invalidate: (() -> Unit)? = null
-    private var top = 0f
-    private var bottom = 0f
     private var viewportCoordinates: LayoutCoordinates? = null
     private val regions = LinkedHashMap<Any, TextRegion>()
     private val visibleRows = HashSet<Any>()
@@ -105,21 +103,18 @@ internal class TranscriptPosition(private val list: LazyListState) {
     }
 
     fun viewportPlaced(coordinates: LayoutCoordinates) {
-        val layout = list.layoutInfo
         viewportCoordinates = coordinates
-        // Reading and scroll offsets use the list's own pixels. Whole-home translation/scale
-        // must never look like text growth and trigger a compensating scroll.
-        top = layout.beforeContentPadding.toFloat()
-        bottom = (layout.viewportSize.height - layout.afterContentPadding).toFloat()
         if (latestRequested && !latestStillWanted()) latestRequested = false
         if (latestRequested || (following() && !nestedScrolling)) {
             anchor = null
             lastRepair = null
-            if (latestRequested && layout.totalItemsCount > 0 && !list.canScrollForward) {
+            val canScrollForward = list.canScrollForward
+            val count = if (latestRequested || canScrollForward) list.layoutInfo.totalItemsCount else 0
+            if (latestRequested && count > 0 && !canScrollForward) {
                 latestRequested = false
             }
-            if (list.canScrollForward && layout.totalItemsCount > 0) {
-                list.requestScrollToItem(layout.totalItemsCount - 1, TRANSCRIPT_END_OFFSET)
+            if (canScrollForward && count > 0) {
+                list.requestScrollToItem(count - 1, TRANSCRIPT_END_OFFSET)
                 // requestScrollToItem's snapshot notification alone may be delivered
                 // later. Explicitly enqueue a new measure during placement, which the
                 // owner's measure/layout pass drains before drawing this frame.
@@ -186,9 +181,14 @@ internal class TranscriptPosition(private val list: LazyListState) {
 
     private fun capture() {
         val viewport = viewportCoordinates?.takeIf { it.isAttached } ?: return
+        // Only an idle reading capture needs the transcript geometry. Reading it from
+        // viewportPlaced would subscribe that placement to every lazy scroll offset.
+        val layout = list.layoutInfo
+        val top = layout.beforeContentPadding.toFloat()
+        val bottom = (layout.viewportSize.height - layout.afterContentPadding).toFloat()
         val probe = top + 24f
         visibleRows.clear()
-        for (item in list.layoutInfo.visibleItemsInfo) visibleRows.add(item.key)
+        for (item in layout.visibleItemsInfo) visibleRows.add(item.key)
         var nearest: TextRegion? = null
         var nearestDistance = Float.POSITIVE_INFINITY
         for (candidate in regions.values) {

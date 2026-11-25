@@ -1,8 +1,18 @@
 package com.suixing.agent.ui.browser
 
+import android.os.Bundle
+import android.view.View
+import android.webkit.WebBackForwardList
+import android.webkit.WebHistoryItem
+import android.webkit.WebView
 import androidx.compose.runtime.BroadcastFrameClock
 import androidx.compose.ui.platform.UriHandler
+import io.mockk.every
+import io.mockk.mockk
+import io.mockk.slot
+import io.mockk.verify
 import java.net.URLDecoder
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -15,30 +25,65 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class BrowserNavigationTest {
-    @Test fun `initial WebView load waits for the browser shell to draw and yield its frame`() = runBlocking {
+    private val pageUrl = "https://example.com/page"
+
+    @Test fun `first WebView waits for a drawn toolbar and a ready engine`() = runBlocking {
         withTimeout(1_000) {
             val clock = BroadcastFrameClock()
             val session = BrowserSession()
-            val opening = launch(clock, start = CoroutineStart.UNDISPATCHED) { session.awaitOpeningFrame() }
+            val engineStarted = CompletableDeferred<Unit>()
+            val engineReady = CompletableDeferred<Unit>()
+            val opening = launch(clock, start = CoroutineStart.UNDISPATCHED) {
+                session.awaitEngine {
+                    engineStarted.complete(Unit)
+                    engineReady.await()
+                }
+            }
             clock.sendFrame(1L)
-            assertFalse(opening.isCompleted)
+            assertFalse(engineStarted.isCompleted)
             session.openingDrawn.complete(Unit)
             yield()
-            assertFalse(opening.isCompleted)
+            assertFalse(engineStarted.isCompleted)
             clock.sendFrame(2L)
+            engineStarted.await()
+            assertFalse(opening.isCompleted)
+            engineReady.complete(Unit)
             opening.join()
         }
     }
 
     @Test fun `opening feedback stays until WebView can draw the main page`() {
-        val session = BrowserSession()
+        val callback = slot<WebView.VisualStateCallback>()
+        val web = mockk<WebView>(relaxUnitFun = true)
+        every { web.url } returns pageUrl
+        every { web.postVisualStateCallback(0, capture(callback)) } returns Unit
+        val session = BrowserSession().apply { view = web }
         assertTrue(session.showOpening)
         session.progress = 80
         assertTrue(session.showOpening)
         session.progress = 100
         assertTrue(session.showOpening)
-        session.pageCommitted = true
+        session.showPageWhenReady(web, pageUrl)
+        session.showPageWhenReady(web, pageUrl)
+        verify(exactly = 1) { web.postVisualStateCallback(0, any()) }
+        assertTrue(session.showOpening)
+        verify(exactly = 0) { web.visibility = View.VISIBLE }
+        callback.captured.onComplete(0)
         assertFalse(session.showOpening)
+        verify(exactly = 1) { web.visibility = View.VISIBLE }
+    }
+
+    @Test fun `visual callback from a replaced WebView leaves the opening feedback visible`() {
+        val callback = slot<WebView.VisualStateCallback>()
+        val web = mockk<WebView>(relaxUnitFun = true)
+        every { web.url } returns pageUrl
+        every { web.postVisualStateCallback(0, capture(callback)) } returns Unit
+        val session = BrowserSession().apply { view = web }
+        session.showPageWhenReady(web, pageUrl)
+        session.view = mockk()
+        callback.captured.onComplete(0)
+        assertTrue(session.showOpening)
+        verify(exactly = 0) { web.visibility = View.VISIBLE }
     }
 
     @Test fun `an opening error replaces the loading feedback`() {
@@ -47,6 +92,131 @@ class BrowserNavigationTest {
         assertFalse(session.showOpening)
         session.error = null
         assertTrue(session.showOpening)
+    }
+
+    @Test fun `toolbar title updates leave the address draft and history alone`() {
+        val web = mockk<WebView>()
+        val session = BrowserSession().apply {
+            view = web
+            editing = true
+            address = "unfinished address"
+        }
+        session.titleChanged(web, "Document title")
+        session.titleChanged(mockk(), "Old view title")
+        assertEquals("Document title", session.title)
+        assertEquals("unfinished address", session.address)
+        verify(exactly = 0) { web.url }
+        verify(exactly = 0) { web.title }
+        verify(exactly = 0) { web.canGoBack() }
+        verify(exactly = 0) { web.canGoForward() }
+
+        every { web.canGoBack() } returns true
+        every { web.canGoForward() } returns false
+        session.historyUpdated(web, pageUrl)
+        assertTrue(session.canBack)
+        assertFalse(session.canForward)
+        assertEquals("unfinished address", session.address)
+        verify(exactly = 1) { web.canGoBack() }
+        verify(exactly = 1) { web.canGoForward() }
+
+        val clientRoute = "https://example.com/client-route"
+        every { web.url } returns clientRoute
+        session.editing = false
+        session.historyUpdated(web, clientRoute)
+        assertEquals(clientRoute, session.address)
+    }
+
+    @Test fun `navigation and reload cancel pending visual callbacks on the same WebView`() {
+        val nextUrl = "https://example.com/next"
+        var currentUrl: String? = null
+        val callbacks = mutableListOf<WebView.VisualStateCallback>()
+        val web = mockk<WebView>(relaxUnitFun = true)
+        every { web.url } answers { currentUrl }
+        every { web.canGoBack() } returns true
+        every { web.canGoForward() } returns false
+        every { web.postVisualStateCallback(0, capture(callbacks)) } returns Unit
+        val session = BrowserSession().apply { view = web }
+        session.load(web, BrowserPage(pageUrl, null))
+        currentUrl = pageUrl
+        session.showPageWhenReady(web, pageUrl)
+        val request = BrowserOpenRequest(BrowserTarget.Web(nextUrl))
+        session.load(web, BrowserPage(nextUrl, request))
+        callbacks[0].onComplete(0)
+        session.showPageWhenReady(web, pageUrl)
+        session.pageFinished(web, pageUrl)
+        assertEquals(1, callbacks.size)
+        verify(exactly = 0) { web.evaluateJavascript(any(), any()) }
+        assertTrue(session.showOpening)
+
+        currentUrl = nextUrl
+        session.showPageWhenReady(web, nextUrl)
+        session.reload()
+        callbacks[1].onComplete(0)
+        session.showPageWhenReady(web, nextUrl)
+        assertEquals(2, callbacks.size)
+        assertTrue(session.showOpening)
+        verify(exactly = 0) { web.visibility = View.VISIBLE }
+
+        session.historyUpdated(web, nextUrl)
+        session.showPageWhenReady(web, nextUrl)
+        callbacks[2].onComplete(0)
+        assertFalse(session.showOpening)
+        verify(exactly = 1) { web.visibility = View.VISIBLE }
+    }
+
+    @Test fun `failed opening stays hidden until the retry can draw`() {
+        val callbacks = mutableListOf<WebView.VisualStateCallback>()
+        val web = mockk<WebView>(relaxed = true)
+        every { web.url } returns pageUrl
+        every { web.postVisualStateCallback(0, capture(callbacks)) } returns Unit
+        val session = BrowserSession().apply { view = web }
+        session.showPageWhenReady(web, pageUrl)
+        session.pageFailed(web, "加载失败")
+        callbacks[0].onComplete(0)
+        session.pageFinished(web, pageUrl)
+        assertEquals(1, callbacks.size)
+        verify(exactly = 0) { web.visibility = View.VISIBLE }
+
+        session.pageStarted(web, pageUrl)
+        assertTrue(session.showOpening)
+        session.showPageWhenReady(web, pageUrl)
+        callbacks[1].onComplete(0)
+        assertFalse(session.showOpening)
+    }
+
+    @Test fun `restored history and fragment changes can finish opening without a commit callback`() {
+        val saved = mockk<Bundle>()
+        every { saved.getStringArrayList("browser-roots") } returns null
+        val item = mockk<WebHistoryItem>()
+        every { item.url } returns pageUrl
+        every { item.title } returns "Restored title"
+        val history = mockk<WebBackForwardList>()
+        every { history.currentItem } returns item
+        every { history.currentIndex } returns 1
+        every { history.size } returns 3
+        val web = mockk<WebView>(relaxed = true)
+        every { web.restoreState(saved) } returns history
+        var currentUrl = pageUrl
+        every { web.url } answers { currentUrl }
+        val callbacks = mutableListOf<WebView.VisualStateCallback>()
+        every { web.postVisualStateCallback(0, capture(callbacks)) } returns Unit
+        val session = BrowserSession(saved).apply { view = web }
+        assertTrue(session.restore(web))
+        assertEquals("Restored title", session.title)
+        assertTrue(session.canBack)
+        assertTrue(session.canForward)
+        verify(exactly = 0) { web.canGoBack() }
+        verify(exactly = 0) { web.canGoForward() }
+
+        session.pageFinished(web, pageUrl)
+        currentUrl = "$pageUrl#section"
+        session.pageFinished(web, currentUrl)
+        assertEquals(2, callbacks.size)
+        callbacks[0].onComplete(0)
+        assertTrue(session.showOpening)
+        callbacks[1].onComplete(0)
+        assertFalse(session.showOpening)
+        assertEquals(currentUrl, session.address)
     }
 
     @Test fun `chat web links open in the built-in browser`() {

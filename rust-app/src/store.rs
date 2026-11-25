@@ -1,8 +1,7 @@
 //! Actor-owned storage for the independent Rust application.
 //!
-//! This format does not import the original Android application's data. A conversation's
-//! metadata and messages share one atomic document, so there is no separately committed index.
-//! API and transcription keys are omitted by `Settings`' serialization contract.
+//! Production Android reads and writes Compose's settings, memory and committed chat logs.
+//! Independent previews retain their own documents. Settings serialization omits plaintext keys.
 //! Usage is a separate run-ID ledger: conversation deletion retains it. There is no atomic
 //! transaction between this ledger and the conversation documents.
 //! Pending records survive process death unchanged; only an explicit final result closes them.
@@ -19,6 +18,20 @@ mod reading;
 mod schedule_runtime;
 mod settings_policy;
 mod settings_transaction;
+pub(crate) mod shared_chat;
+mod shared_children;
+mod shared_goal;
+mod shared_mcp;
+mod shared_memory;
+mod shared_plugins;
+mod shared_preferences;
+mod shared_schedules;
+mod shared_settings;
+mod shared_skills;
+#[cfg(test)]
+mod shared_tests;
+mod shared_todos;
+mod shared_usage;
 mod steering_commands;
 pub(crate) mod usage;
 pub(crate) mod workspace;
@@ -73,12 +86,14 @@ pub struct Store {
     root: PathBuf,
     namespace_root: PathBuf,
     legacy_source_root: PathBuf,
+    shared_files_root: Option<PathBuf>,
     chat_directory: PathBuf,
     child_directory: PathBuf,
     plugin_directory: PathBuf,
     /// Never serialized. Android Keystore persistence is a separate migration item.
     child_usage_warning: Option<String>,
     mcp_servers: Vec<crate::mcp::ServerConfig>,
+    mcp_extra: shared_mcp::ExtraFields,
     workspace: PathBuf,
     conversations: Vec<Conversation>,
     conversation_preferences: crate::conversation_preferences::Document,
@@ -181,6 +196,18 @@ struct ChatDocument {
 
 impl Store {
     pub fn open(data_directory: PathBuf) -> Result<Self, String> {
+        Self::open_with_shared_files(data_directory, None)
+    }
+
+    pub(crate) fn open_with_shared_files(
+        data_directory: PathBuf,
+        shared_files_root: Option<PathBuf>,
+    ) -> Result<Self, String> {
+        let shared_files_root = shared_files_root
+            .map(|path| {
+                fs::canonicalize(&path).map_err(|error| fs_error("解析共用数据目录", &path, error))
+            })
+            .transpose()?;
         fs::create_dir_all(&data_directory)
             .map_err(|error| fs_error("创建数据目录", &data_directory, error))?;
         let namespace_root = fs::canonicalize(&data_directory)
@@ -189,8 +216,11 @@ impl Store {
             .unwrap_or_else(|| namespace_root.clone());
         let chat_directory = owned_directory(&root, "conversations")?;
         let child_directory = owned_directory(&root, "subagents")?;
-        let plugin_directory = owned_directory(&root, "plugins")?;
-        let workspace = owned_directory(&namespace_root, "workspace")?;
+        let plugin_directory = shared_plugins::directory(&root, shared_files_root.as_deref())?;
+        let workspace = workspace::select_workspace(
+            owned_directory(&namespace_root, "workspace")?,
+            shared_files_root.as_deref(),
+        )?;
         let mut secret_warnings = Vec::new();
         let preference_result = optional_json::<crate::conversation_preferences::Document>(
             &root,
@@ -207,8 +237,8 @@ impl Store {
             Ok(document)
         });
         let conversation_preferences_confirmed = preference_result.is_ok();
-        let conversation_preferences = preference_result.unwrap_or_default();
-        let reading_positions = optional_json::<reading::ReadingDocument>(
+        let mut conversation_preferences = preference_result.unwrap_or_default();
+        let mut reading_positions = optional_json::<reading::ReadingDocument>(
             &root,
             &root.join("reading-positions.json"),
             crate::legacy_reading::DOCUMENT_BYTES,
@@ -223,24 +253,41 @@ impl Store {
         )?
         .unwrap_or_default();
         workspace_mappings.validate()?;
-        let (mut mcp_servers, mcp_secrets) =
-            match optional_json::<McpDocument>(&root, &root.join("mcp.json"), 1024 * 1024)? {
-                Some(document) => {
-                    version(document.version)?;
-                    (
-                        crate::mcp::normalize_configs(document.servers)?,
-                        document.secrets,
-                    )
-                }
-                None => (Vec::new(), BTreeMap::new()),
-            };
+        let shared_mcp = shared_files_root.as_deref().map(shared_mcp::read).transpose()?.flatten();
+        let (mcp, mcp_extra) = if let Some(shared) = shared_mcp {
+            (Some(shared.document), shared.unknown)
+        } else {
+            let mut private = optional_json::<McpDocument>(
+                &root, &root.join("mcp.json"), shared_mcp::MAX_BYTES,
+            )?;
+            if let (Some(files), Some(document)) = (shared_files_root.as_deref(), &mut private)
+                && !document.servers.is_empty()
+            {
+                version(document.version)?;
+                shared_mcp::write(files, &document.servers, &mut document.secrets, &BTreeMap::new())
+                    .map_err(|failure| failure.message)?;
+            }
+            (private, BTreeMap::new())
+        };
+        let (mut mcp_servers, mcp_secrets) = match mcp {
+            Some(document) => {
+                version(document.version)?;
+                (crate::mcp::normalize_configs(document.servers)?, document.secrets)
+            }
+            None => (Vec::new(), BTreeMap::new()),
+        };
         let locked_mcp = hydrate_mcp_secrets(&mut mcp_servers, &mcp_secrets, &mut secret_warnings);
 
-        let (mut settings, settings_secrets, raw_settings) = match optional_json::<serde_json::Value>(
-            &root,
-            &root.join("settings.json"),
-            MAX_SETTINGS_BYTES,
-        )? {
+        let (compose_settings, rust_settings) = shared_files_root
+            .as_deref()
+            .map(shared_settings::read)
+            .transpose()?
+            .unwrap_or_default();
+        let rust_settings = match rust_settings {
+            Some(settings) => Some(settings),
+            None => optional_json(&root, &root.join("settings.json"), MAX_SETTINGS_BYTES)?,
+        };
+        let (settings, settings_secrets, raw_settings) = match rust_settings {
             Some(raw) => {
                 let document: SettingsDocument =
                     serde_json::from_value(raw.clone()).map_err(|_| "设置文档格式无法读取")?;
@@ -260,49 +307,71 @@ impl Store {
                 serde_json::json!({}),
             ),
         };
-        hydrate_settings_secrets(&mut settings, &settings_secrets, &mut secret_warnings);
-        let memories = match optional_json::<MemoryDocument>(
-            &root,
-            &root.join("memories.json"),
-            MAX_MEMORY_BYTES,
-        )? {
-            Some(document) => {
-                version(document.version)?;
-                validate_memories(&document.memories)?;
-                document.memories
-            }
-            None => Vec::new(),
-        };
-        let todos = match optional_json::<crate::todos::Board>(
-            &root,
-            &root.join("todos.json"),
-            3 * 1024 * 1024,
-        )? {
-            Some(board) => board,
-            None => {
-                let legacy = optional_json::<Vec<crate::legacy_migration::ImportedTodo>>(
-                    &root,
-                    &root.join("legacy-todos.json"),
-                    3 * 1024 * 1024,
-                )?
-                .unwrap_or_default();
-                let mut items: Vec<_> = legacy
-                    .into_iter()
-                    .map(|item| crate::todos::Item {
-                        id: item.id,
-                        subject: item.text,
-                        status: item.status,
-                        extra: item.extra,
-                    })
-                    .collect();
-                crate::todos::normalize(&mut items)?;
-                crate::todos::Board {
-                    items,
-                    ..Default::default()
+        let memories = if let Some(files) = shared_files_root.as_deref() {
+            shared_memory::read(files)?
+        } else {
+            match optional_json::<MemoryDocument>(
+                &root,
+                &root.join("memories.json"),
+                MAX_MEMORY_BYTES,
+            )? {
+                Some(document) => {
+                    version(document.version)?;
+                    validate_memories(&document.memories)?;
+                    document.memories
                 }
+                None => Vec::new(),
             }
         };
-        crate::todos::validate(&todos)?;
+        let shared_todo_items = shared_files_root
+            .as_deref()
+            .map(shared_todos::read)
+            .transpose()?
+            .flatten();
+        let todos = if let Some(items) = shared_todo_items {
+            crate::todos::Board {
+                items,
+                ..Default::default()
+            }
+        } else {
+            let board = match optional_json::<crate::todos::Board>(
+                &root,
+                &root.join("todos.json"),
+                3 * 1024 * 1024,
+            )? {
+                Some(board) => board,
+                None => {
+                    let legacy = optional_json::<Vec<crate::legacy_migration::ImportedTodo>>(
+                        &root,
+                        &root.join("legacy-todos.json"),
+                        3 * 1024 * 1024,
+                    )?
+                    .unwrap_or_default();
+                    let mut items: Vec<_> = legacy
+                        .into_iter()
+                        .map(|item| crate::todos::Item {
+                            id: item.id,
+                            subject: item.text,
+                            status: item.status,
+                            extra: item.extra,
+                        })
+                        .collect();
+                    crate::todos::normalize(&mut items)?;
+                    crate::todos::Board {
+                        items,
+                        ..Default::default()
+                    }
+                }
+            };
+            crate::todos::validate(&board)?;
+            if let Some(files) = shared_files_root
+                .as_deref()
+                .filter(|_| !board.items.is_empty())
+            {
+                shared_todos::write(files, &board).map_err(|failure| failure.message)?;
+            }
+            board
+        };
         let usage =
             match optional_json::<UsageDocument>(&root, &root.join("usage.json"), MAX_USAGE_BYTES)?
             {
@@ -316,20 +385,9 @@ impl Store {
                 None => Vec::new(),
             };
 
-        let (schedules, schedule_execution) = match optional_json::<ScheduleDocument>(
-            &root,
-            &root.join("schedules.json"),
-            16 * 1024 * 1024,
-        )? {
-            Some(document) => {
-                version(document.version)?;
-                crate::schedules::validate_board(&document.schedules)?;
-                document.execution.validate()?;
-                (document.schedules, document.execution)
-            }
-            None => (Vec::new(), ScheduleExecution::default()),
-        };
-        let (skills, skills_revision) = match optional_json::<SkillDocument>(
+        let (schedules, schedule_execution) =
+            schedule_runtime::load(&root, shared_files_root.as_deref())?;
+        let (mut skills, mut skills_revision) = match optional_json::<SkillDocument>(
             &root,
             &root.join("skills.json"),
             128 * 1024 * 1024,
@@ -349,65 +407,117 @@ impl Store {
             }
             None => (Vec::new(), 0),
         };
-        let mut goal =
-            match optional_json::<GoalDocument>(&root, &root.join("goal.json"), 256 * 1024)? {
+        if let Some(files) = shared_files_root.as_deref() {
+            let common = shared_skills::read(files, &workspace)?;
+            skills.retain(|skill| {
+                !shared_skills::is_common(skill) && !common.iter().any(|shared| shared.id == skill.id)
+            });
+            for mut skill in common {
+                skills_revision = skills_revision.checked_add(1).ok_or("技能版本已耗尽")?;
+                skill.revision = skills_revision;
+                skills.push(skill);
+            }
+        }
+        let shared_goal = shared_files_root.as_deref().map(shared_goal::read).transpose()?.flatten();
+        let seed_goal = shared_goal.is_none();
+        let mut goal = if let Some(goal) = shared_goal {
+            goal
+        } else {
+            match optional_json::<GoalDocument>(&root, &root.join("goal.json"), shared_goal::LIMIT)? {
                 Some(document) => {
                     version(document.version)?;
-                    document.goal.validate()?;
                     document.goal
                 }
                 None => crate::goal::Goal::default(),
-            };
+            }
+        };
+        goal.validate()?;
         if goal.status == crate::goal::Status::Active {
             goal.status = crate::goal::Status::Paused;
             goal.wake_at = 0;
             goal.detail = "上次运行已中断，请明确继续后恢复".into();
         }
-        let mut conversations = Vec::new();
-        let mut ids = HashSet::new();
-        let entries = fs::read_dir(&chat_directory)
-            .map_err(|error| fs_error("读取会话目录", &chat_directory, error))?;
-        for (index, entry) in entries.enumerate() {
-            if index >= MAX_DIRECTORY_ENTRIES {
-                return Err("会话目录条目超过读取预算，未加载或覆盖任何会话".into());
-            }
-            let entry =
-                entry.map_err(|error| fs_error("读取会话目录条目", &chat_directory, error))?;
-            let name = entry.file_name();
-            let name = name.to_str().ok_or("会话文件名不是 UTF-8，无法安全加载")?;
-            // An interrupted pre-rename write may leave its uniquely named temporary file.
-            if is_temporary_name(name) {
-                continue;
-            }
-            let segmented = name.ends_with(".segments.json");
-            let id = name
-                .strip_suffix(if segmented { ".segments.json" } else { ".json" })
-                .ok_or("会话目录包含未知文件，无法安全加载")?;
-            validate_id(id)?;
-            if !segmented && chat_directory.join(format!("{id}.segments.json")).exists() {
-                // The committed index supersedes a retained pre-segmentation document.
-                continue;
-            }
-            if conversations.len() >= MAX_CONVERSATIONS {
-                return Err("会话数量超过读取预算，未覆盖现有数据".into());
-            }
-            let document: ChatDocument = if segmented {
-                let (conversation, messages, queued_turns) =
-                    crate::legacy_migration::read_chat_archive(&root, id)?;
-                ChatDocument {
-                    version: VERSION,
-                    conversation,
-                    messages,
-                    queued_turns,
+        if seed_goal && !goal.text.is_empty()
+            && let Some(files) = shared_files_root.as_deref()
+        {
+            shared_goal::write(files, &goal).map_err(|failure| failure.message)?;
+        }
+        let mut conversations = shared_files_root
+            .as_deref()
+            .map(shared_chat::list)
+            .transpose()?
+            .unwrap_or_default();
+        if shared_files_root.is_none() {
+            let mut ids = HashSet::new();
+            let entries = fs::read_dir(&chat_directory)
+                .map_err(|error| fs_error("读取会话目录", &chat_directory, error))?;
+            for (index, entry) in entries.enumerate() {
+                if index >= MAX_DIRECTORY_ENTRIES {
+                    return Err("会话目录条目超过读取预算，未加载或覆盖任何会话".into());
                 }
-            } else {
-                required_json(&root, &entry.path(), MAX_CHAT_BYTES)?
-            };
-            validate_chat(&document, id)?;
-            if !ids.insert(document.conversation.id.clone()) {
-                return Err("会话记录存在重复 ID".into());
+                let entry =
+                    entry.map_err(|error| fs_error("读取会话目录条目", &chat_directory, error))?;
+                let name = entry.file_name();
+                let name = name.to_str().ok_or("会话文件名不是 UTF-8，无法安全加载")?;
+                // An interrupted pre-rename write may leave its uniquely named temporary file.
+                if is_temporary_name(name) {
+                    continue;
+                }
+                let segmented = name.ends_with(".segments.json");
+                let id = name
+                    .strip_suffix(if segmented { ".segments.json" } else { ".json" })
+                    .ok_or("会话目录包含未知文件，无法安全加载")?;
+                validate_id(id)?;
+                if !segmented && chat_directory.join(format!("{id}.segments.json")).exists() {
+                    // The committed index supersedes a retained pre-segmentation document.
+                    continue;
+                }
+                if conversations.len() >= MAX_CONVERSATIONS {
+                    return Err("会话数量超过读取预算，未覆盖现有数据".into());
+                }
+                let document: ChatDocument = if segmented {
+                    let (conversation, messages, queued_turns) =
+                        crate::legacy_migration::read_chat_archive(&root, id)?;
+                    ChatDocument {
+                        version: VERSION,
+                        conversation,
+                        messages,
+                        queued_turns,
+                    }
+                } else {
+                    required_json(&root, &entry.path(), MAX_CHAT_BYTES)?
+                };
+                validate_chat(&document, id)?;
+                if !ids.insert(document.conversation.id.clone()) {
+                    return Err("会话记录存在重复 ID".into());
+                }
+                conversations.push(document.conversation);
             }
-            conversations.push(document.conversation);
+        }
+
+        if let Some(order) = shared_files_root.as_deref().and_then(conversation_preferences::shared_order) {
+            let known = conversations.iter().map(|chat| chat.id.clone()).collect();
+            conversation_preferences.order = order.pruned(&known);
+        }
+        if let Some(files) = shared_files_root.as_deref() {
+            match shared_preferences::read(files, shared_preferences::READS) {
+                Ok(Some(mut preferences)) => {
+                    conversation_preferences.completed_unread = preferences.string_sets
+                        .remove("completed_unread").unwrap_or_default().into_iter()
+                        .filter(|id| crate::conversation_preferences::id_valid(id)).collect();
+                }
+                Ok(None) => {}
+                Err(error) => secret_warnings.push(format!("读取共用未读状态失败：{error}")),
+            }
+            match reading::shared_positions(files) {
+                Ok(Some(positions)) => {
+                    let shared_sources: HashSet<_> = positions.iter().map(|position| &position.source).collect();
+                    reading_positions.retain(|position| !shared_sources.contains(&position.source));
+                    reading_positions.extend(positions);
+                }
+                Ok(None) => {}
+                Err(error) => secret_warnings.push(format!("读取共用阅读位置失败：{error}")),
+            }
         }
 
         let mut store = Self {
@@ -418,6 +528,7 @@ impl Store {
             locked_mcp,
             secret_warnings,
             legacy_source_root: root.clone(),
+            shared_files_root,
             root,
             namespace_root,
             chat_directory,
@@ -425,6 +536,7 @@ impl Store {
             plugin_directory,
             child_usage_warning: None,
             mcp_servers,
+            mcp_extra,
             workspace,
             conversations,
             conversation_preferences,
@@ -447,6 +559,14 @@ impl Store {
             write_blocked: None,
         };
         store.reconcile_behavior_document(&raw_settings)?;
+        if let Some(raw) = compose_settings {
+            shared_settings::apply(&raw, &mut store.settings, &mut store.settings_secrets)?;
+        }
+        hydrate_settings_secrets(
+            &mut store.settings,
+            &store.settings_secrets,
+            &mut store.secret_warnings,
+        );
         store.settings.seed_legacy_provider();
         match crate::legacy_reading::from_archived(&store.namespace_root) {
             Ok(imported) => {
@@ -486,6 +606,14 @@ impl Store {
     ) -> Result<crate::conversation_manager::Target, String> {
         validate_id(id)?;
         let conversation = self.conversation(id)?;
+        if let Some(files) = self.shared_files_root.as_deref() {
+            return Ok(crate::conversation_manager::Target {
+                root: files.to_owned(),
+                document: files.join(format!("chats/store/{id}.meta")),
+                manifest: files.join(format!("chats/store/{id}.meta")),
+                conversation: conversation.clone(),
+            });
+        }
         Ok(crate::conversation_manager::Target {
             root: self.root.clone(),
             document: self.chat_directory.join(format!("{id}.json")),
@@ -504,10 +632,17 @@ impl Store {
         conversations
     }
     pub fn conversation_summaries(&self) -> Vec<crate::display::ConversationSummary> {
-        self.conversations()
+        let mut summaries: Vec<_> = self
+            .conversations
             .iter()
             .map(crate::display::ConversationSummary::from)
-            .collect()
+            .collect();
+        summaries.sort_by(|a, b| {
+            b.updated_at
+                .cmp(&a.updated_at)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        summaries
     }
     pub fn jobs(&self) -> Option<std::sync::Arc<crate::jobs::Manager>> {
         self.jobs.clone()
@@ -555,13 +690,24 @@ impl Store {
             crate::todos::Operation::Read { offset, limit } => (offset, limit),
             _ => (0, 200),
         };
-        let mutating = !matches!(operation, crate::todos::Operation::Read { .. });
-        let next = crate::todos::apply(&self.todos, operation)?;
-        if mutating {
-            self.persist(&self.root.join("todos.json"), &next, 3 * 1024 * 1024)?;
-            self.todos = next;
+        if matches!(operation, crate::todos::Operation::Read { .. }) {
+            return Ok(crate::todos::result(&self.todos, offset, limit, false));
         }
-        Ok(crate::todos::result(&self.todos, offset, limit, mutating))
+        let mut next = crate::todos::apply(&self.todos, operation)?;
+        if let Some(files) = self.shared_files_root.as_deref() {
+            self.writable()?;
+            shared_todos::preserve_item_fields(&self.todos, &mut next);
+            if let Err(failure) = shared_todos::write(files, &next) {
+                if failure.replaced {
+                    self.write_blocked = Some(failure.message.clone());
+                }
+                return Err(failure.message);
+            }
+        } else {
+            self.persist(&self.root.join("todos.json"), &next, 3 * 1024 * 1024)?;
+        }
+        self.todos = next;
+        Ok(crate::todos::result(&self.todos, offset, limit, true))
     }
 
     pub fn set_legacy_source_root(&mut self, root: PathBuf) {
@@ -596,17 +742,7 @@ impl Store {
             &crate::schedules::SystemLocalClock,
         )?;
         if result.changed {
-            let document = ScheduleDocument {
-                version: VERSION,
-                schedules: result.schedules.clone(),
-                execution: self.schedule_execution.clone(),
-            };
-            self.persist(
-                &self.root.join("schedules.json"),
-                &document,
-                16 * 1024 * 1024,
-            )?;
-            self.schedules = document.schedules;
+            self.save_schedule_state(result.schedules.clone(), self.schedule_execution.clone())?;
         }
         Ok(result)
     }
@@ -618,11 +754,22 @@ impl Store {
     fn save_goal(&mut self, mut goal: crate::goal::Goal) -> Result<(), String> {
         goal.updated_at = now()?.max(self.goal.updated_at);
         goal.validate()?;
+        if let Some(files) = self.shared_files_root.as_deref() {
+            self.writable()?;
+            if let Err(failure) = shared_goal::write(files, &goal) {
+                if failure.replaced {
+                    self.write_blocked = Some(failure.message.clone());
+                }
+                return Err(failure.message);
+            }
+            self.goal = goal;
+            return Ok(());
+        }
         let document = GoalDocument {
             version: VERSION,
             goal,
         };
-        self.persist(&self.root.join("goal.json"), &document, 256 * 1024)?;
+        self.persist(&self.root.join("goal.json"), &document, shared_goal::LIMIT)?;
         self.goal = document.goal;
         Ok(())
     }
@@ -637,6 +784,7 @@ impl Store {
         use crate::goal::{Goal, Status};
         self.conversation(chat_id)?;
         if !self.goal.text.is_empty()
+            && !self.goal.chat_id.is_empty()
             && self.goal.chat_id != chat_id
             && self.goal.status != Status::Completed
         {
@@ -652,14 +800,14 @@ impl Store {
             }
         } else {
             if expected_id != Some(self.goal.id.as_str())
-                || self.goal.chat_id != chat_id
-                || self.goal.text.is_empty()
+                || !self.goal.visible_in(Some(chat_id))
                 || !matches!(self.goal.status, Status::Paused | Status::Blocked)
             {
                 return Err("该目标已变化或当前不可继续".into());
             }
             let mut goal = self.goal.clone();
             goal.id = run_id.into();
+            goal.chat_id = chat_id.into();
             goal.status = Status::Active;
             goal.detail.clear();
             goal.wake_at = 0;
@@ -694,8 +842,7 @@ impl Store {
     ) -> Result<Option<crate::goal::Goal>, String> {
         use crate::goal::{Command, Status};
         if matches!(command, Command::Read) {
-            return Ok((!self.goal.text.is_empty() && self.goal.chat_id == chat_id)
-                .then(|| self.goal.clone()));
+            return Ok(self.goal.visible_in(Some(chat_id)).then(|| self.goal.clone()));
         }
         if self.goal.id != run_id || self.goal.chat_id != chat_id || self.goal.text.is_empty() {
             return Err("当前运行不再拥有该目标".into());
@@ -791,6 +938,11 @@ impl Store {
                 .map(|index| self.skills[index].updated_at)
                 .unwrap_or(0),
         );
+        if let Some(files) = self.shared_files_root.clone()
+            && existing.is_none_or(|index| shared_skills::is_common(&self.skills[index]))
+        {
+            return self.save_shared_skill(&files, skill, raw.as_deref(), existing);
+        }
         if skill.enabled
             && let Some(index) = existing
         {
@@ -888,6 +1040,9 @@ impl Store {
             || crate::skill_import::metadata_epoch() != epoch
         {
             return Err("工作区或技能库在扫描后已变化，请重新扫描".into());
+        }
+        if let Some(files) = self.shared_files_root.clone() {
+            return self.refresh_shared_skills(&files);
         }
         let mut skills = self.skills.clone();
         let mut revision = self.skills_revision;
@@ -1023,6 +1178,11 @@ impl Store {
         if self.skills[index].revision != expected_revision {
             return Err("技能已被修改，请重新读取后再删除".into());
         }
+        if let Some(files) = self.shared_files_root.clone()
+            && shared_skills::is_common(&self.skills[index])
+        {
+            return self.delete_shared_skill(&files, index);
+        }
         let mut skills = self.skills.clone();
         let removed = skills.remove(index);
         let document = SkillDocument {
@@ -1129,7 +1289,11 @@ impl Store {
                         );
                     }
                     let skill = matches[0];
-                    crate::skill_import::verify_workspace_document(&self.workspace(), skill)?;
+                    if self.shared_files_root.is_some() && shared_skills::is_common(skill) {
+                        self.verify_shared_skill(skill)?;
+                    } else {
+                        crate::skill_import::verify_workspace_document(&self.workspace(), skill)?;
+                    }
                     if offset > skill.content.len() || !skill.content.is_char_boundary(offset) {
                         return Err("技能分页位置无效，请从offset=0开始".into());
                     }
@@ -1332,6 +1496,9 @@ impl Store {
     }
 
     pub fn queued_turns(&self, id: &str) -> Result<Vec<QueuedTurn>, String> {
+        if self.shared_files_root.is_some() {
+            return Ok(self.read_chat(id)?.queued_turns);
+        }
         if self
             .chat_directory
             .join(format!("{id}.segments.json"))
@@ -1373,10 +1540,15 @@ impl Store {
             )?;
         }
         self.validate_child_usage(parent_chat, &record)?;
-        let directory = owned_directory(&self.child_directory, parent_chat)?;
-        let path = directory.join(format!("{}.json", record.id));
-        if let Some(previous) = optional_json::<ChildDocument>(&self.root, &path, MAX_CHILD_BYTES)?
-        {
+        let filename = format!("{}.json", record.id);
+        let previous = if let Some(files) = self.shared_files_root.as_deref() {
+            let path = shared_children::directory(files, parent_chat).join(&filename);
+            shared_children::read(files, &path)?.map(|(document, _)| document)
+        } else {
+            let path = self.child_directory.join(parent_chat).join(&filename);
+            optional_json::<ChildDocument>(&self.root, &path, MAX_CHILD_BYTES)?
+        };
+        if let Some(previous) = previous {
             version(previous.version)?;
             if previous.parent_chat != parent_chat
                 || previous.parent_run != parent_run
@@ -1391,6 +1563,7 @@ impl Store {
                 if old != next {
                     return Err("子任务终态已保存，不能重新写成运行中或替换结果".into());
                 }
+                return self.sync_child_usage(parent_chat, &record);
             } else {
                 validate_child_history_extension(&previous.record.messages, &record.messages)?;
             }
@@ -1404,10 +1577,31 @@ impl Store {
             parent_run: parent_run.into(),
             record,
         };
-        self.persist(&path, &document, MAX_CHILD_BYTES)?;
+        if self.shared_files_root.is_some() {
+            self.write_shared_child(&document)?;
+        } else {
+            let directory = owned_directory(&self.child_directory, parent_chat)?;
+            self.persist(&directory.join(filename), &document, MAX_CHILD_BYTES)?;
+        }
         // The child document is authoritative. A crash between documents is repaired
         // when it is reopened; a ledger failure stops further child tool dispatch.
         self.sync_child_usage(parent_chat, &document.record)
+    }
+
+    fn write_shared_child(&mut self, document: &ChildDocument) -> Result<(), String> {
+        self.writable()?;
+        let files = self.shared_files_root.as_deref().expect("shared child store");
+        shared_children::write(files, document).map_err(|failure| {
+            if failure.replaced {
+                self.write_blocked = Some(failure.message.clone());
+            }
+            failure.message
+        })?;
+        self.history_revisions.insert(
+            (document.parent_chat.clone(), Some(document.record.id.clone())),
+            crate::controller::next_display_revision(),
+        );
+        Ok(())
     }
 
     fn validate_child_usage(
@@ -1537,7 +1731,7 @@ impl Store {
         entry: &crate::plugins::PluginEntry,
     ) -> Result<BTreeMap<String, String>, String> {
         let stored = optional_json::<BTreeMap<String, String>>(
-            &self.root,
+            &self.plugin_directory,
             &entry.dir.join(crate::plugins::ENV_FILE),
             MAX_PLUGIN_ENV_BYTES,
         )?
@@ -1746,43 +1940,51 @@ impl Store {
     ) -> Result<Vec<crate::display::ChildSummary>, String> {
         self.conversation(parent_chat)?;
         validate_id(parent_chat)?;
-        let directory = self.child_directory.join(parent_chat);
-        match fs::symlink_metadata(&directory) {
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-            _ => {}
+        let mut sources = vec![(self.child_directory.join(parent_chat), false)];
+        if let Some(files) = self.shared_files_root.as_deref() {
+            sources.push((shared_children::directory(files, parent_chat), true));
         }
-        let directory = owned_directory(&self.child_directory, parent_chat)?;
-        let mut recent = std::collections::BTreeSet::new();
-        let entries = fs::read_dir(&directory)
-            .map_err(|error| fs_error("读取子任务目录", &directory, error))?;
-        for (index, entry) in entries.enumerate() {
-            if index >= MAX_DIRECTORY_ENTRIES {
-                return Err("子任务目录超过读取预算".into());
-            }
-            let entry = entry.map_err(|error| fs_error("读取子任务记录", &directory, error))?;
-            let name = entry.file_name();
-            let Some(id) = name.to_str().and_then(|name| name.strip_suffix(".json")) else {
-                continue;
+        let mut recent = BTreeMap::new();
+        for (directory, common) in sources {
+            let entries = match fs::read_dir(&directory) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(fs_error("读取子任务目录", &directory, error)),
             };
-            validate_id(id)?;
-            recent.insert(id.to_owned());
-            if recent.len() > VISIBLE_CHILDREN {
-                recent.pop_first();
+            for (index, entry) in entries.enumerate() {
+                if index >= MAX_DIRECTORY_ENTRIES {
+                    return Err("子任务目录超过读取预算".into());
+                }
+                let entry = entry.map_err(|error| fs_error("读取子任务记录", &directory, error))?;
+                let name = entry.file_name();
+                let Some(id) = name.to_str().and_then(|name| name.strip_suffix(".json")) else {
+                    continue;
+                };
+                validate_id(id)?;
+                recent.insert(id.to_owned(), (entry.path(), common));
+                if recent.len() > VISIBLE_CHILDREN {
+                    recent.pop_first();
+                }
             }
         }
         recent
             .into_iter()
             .rev()
-            .map(|id| {
-                let path = directory.join(format!("{id}.json"));
-                let mut document: ChildDocument =
-                    required_json(&self.root, &path, MAX_CHILD_BYTES)?;
+            .map(|(id, (path, common))| {
+                let (mut document, owned) = if common {
+                    let files = self.shared_files_root.as_deref().expect("shared child store");
+                    shared_children::read(files, &path)?.ok_or("共用子任务已移除")?
+                } else {
+                    (required_json(&self.root, &path, MAX_CHILD_BYTES)?, true)
+                };
                 version(document.version)?;
                 if document.parent_chat != parent_chat || document.record.id != id {
                     return Err("子任务记录归属不匹配".into());
                 }
                 validate_messages(&document.record.messages)?;
-                validate_saved_child_config(document.record.config.as_ref())?;
+                if owned {
+                    validate_saved_child_config(document.record.config.as_ref())?;
+                }
                 if !document.record.status.terminal()
                     && active_run != Some(document.parent_run.as_str())
                 {
@@ -1797,7 +1999,11 @@ impl Store {
                     crate::agent::reconcile_history(&mut document.record.messages);
                     validate_messages(&document.record.messages)?;
                     self.validate_child_usage(parent_chat, &document.record)?;
-                    self.persist(&path, &document, MAX_CHILD_BYTES)?;
+                    if common && owned {
+                        self.write_shared_child(&document)?;
+                    } else if !common {
+                        self.persist(&path, &document, MAX_CHILD_BYTES)?;
+                    }
                 }
                 self.validate_child_usage(parent_chat, &document.record)?;
                 if let Err(error) = self.sync_child_usage(parent_chat, &document.record) {
@@ -1949,6 +2155,12 @@ impl Store {
             edit_text(&env_edit),
             edit_text(&headers_edit),
         )?;
+        if matches!(env_edit, SecretEdit::Clear) {
+            config.env.clear();
+        }
+        if matches!(headers_edit, SecretEdit::Clear) {
+            config.headers.clear();
+        }
         let mut servers = self.mcp_servers.clone();
         if config.id.is_empty() {
             config.id = fresh_id("mcp")?;
@@ -1963,15 +2175,7 @@ impl Store {
         let mut servers = crate::mcp::normalize_configs(servers)?;
         let mut secrets = self.mcp_secrets.clone();
         secrets.insert(config.id.clone(), secret);
-        self.persist(
-            &self.root.join("mcp.json"),
-            &McpDocument {
-                version: VERSION,
-                servers: servers.clone(),
-                secrets: secrets.clone(),
-            },
-            1024 * 1024,
-        )?;
+        self.persist_mcp(&servers, &mut secrets)?;
         self.locked_mcp = hydrate_mcp_secrets(&mut servers, &secrets, &mut self.secret_warnings);
         self.mcp_secrets = secrets;
         self.mcp_servers = servers;
@@ -1999,19 +2203,37 @@ impl Store {
         servers.remove(index);
         let mut secrets = self.mcp_secrets.clone();
         secrets.remove(id);
+        self.persist_mcp(&servers, &mut secrets)?;
+        self.mcp_servers = servers;
+        self.mcp_secrets = secrets;
+        self.mcp_extra.remove(id);
+        self.locked_mcp.remove(id);
+        Ok(())
+    }
+
+    fn persist_mcp(
+        &mut self,
+        servers: &[crate::mcp::ServerConfig],
+        secrets: &mut BTreeMap<String, StoredMcpSecrets>,
+    ) -> Result<(), String> {
+        if let Some(files) = self.shared_files_root.as_deref() {
+            if let Err(failure) = shared_mcp::write(files, servers, secrets, &self.mcp_extra) {
+                if failure.replaced {
+                    self.write_blocked = Some(failure.message.clone());
+                }
+                return Err(failure.message);
+            }
+            return Ok(());
+        }
         self.persist(
             &self.root.join("mcp.json"),
             &McpDocument {
                 version: VERSION,
-                servers: servers.clone(),
+                servers: servers.to_vec(),
                 secrets: secrets.clone(),
             },
-            1024 * 1024,
-        )?;
-        self.mcp_servers = servers;
-        self.mcp_secrets = secrets;
-        self.locked_mcp.remove(id);
-        Ok(())
+            shared_mcp::MAX_BYTES,
+        )
     }
 
     pub fn messages_and_queue(&self, id: &str) -> Result<(Vec<Message>, Vec<QueuedTurn>), String> {
@@ -2022,6 +2244,11 @@ impl Store {
     fn read_chat(&self, id: &str) -> Result<ChatDocument, String> {
         let path = self.chat_path(id)?;
         self.conversation(id)?;
+        if let Some(files) = self.shared_files_root.as_deref() {
+            let document = shared_chat::read(files, id)?;
+            validate_chat(&document, id)?;
+            return Ok(document);
+        }
         let document: ChatDocument = if self
             .chat_directory
             .join(format!("{id}.segments.json"))
@@ -2389,6 +2616,60 @@ impl Store {
         Ok(())
     }
 
+    pub fn set_conversation_approval(
+        &mut self,
+        id: &str,
+        mode: crate::subagent_configuration::ApprovalMode,
+    ) -> Result<(), String> {
+        let index = self
+            .conversations
+            .iter()
+            .position(|conversation| conversation.id == id)
+            .ok_or("会话不存在")?;
+        if let Some(files) = self.shared_files_root.as_deref() {
+            use crate::subagent_configuration::ApprovalMode;
+
+            self.writable()?;
+            let path = shared_chat::meta(files, id);
+            let mut metadata: serde_json::Value = required_json(files, &path, MAX_SETTINGS_BYTES)?;
+            let mut conversation = shared_chat::conversation(metadata.clone())?;
+            if conversation.id != id {
+                return Err("会话文件名与记录 ID 不一致".into());
+            }
+            conversation.updated_at = now()?.max(conversation.updated_at);
+            conversation.metadata.approval_mode = Some(mode);
+            metadata["updatedAt"] = serde_json::json!(conversation.updated_at);
+            metadata["approvalMode"] = serde_json::json!(match mode {
+                ApprovalMode::Auto => "AUTO",
+                ApprovalMode::Ask => "ASK",
+                ApprovalMode::Deny => "DENY",
+            });
+            self.persist(&path, &metadata, MAX_SETTINGS_BYTES)?;
+            let preference_activity = conversation.updated_at > self.conversations[index].updated_at;
+            self.conversations[index] = conversation;
+            if preference_activity {
+                self.preferences_activity(id);
+            }
+            return Ok(());
+        }
+        let manifest = self.chat_directory.join(format!("{id}.segments.json"));
+        if let Some(mut archive) = optional_json::<crate::legacy_migration::ChatArchive>(
+            &self.root,
+            &manifest,
+            8 * 1024 * 1024,
+        )? {
+            archive.conversation.metadata.approval_mode = Some(mode);
+            self.persist(&manifest, &archive, 8 * 1024 * 1024)?;
+        } else {
+            let path = self.chat_path(id)?;
+            let mut document = self.read_chat(id)?;
+            document.conversation.metadata.approval_mode = Some(mode);
+            self.persist(&path, &document, MAX_CHAT_BYTES)?;
+        }
+        self.conversations[index].metadata.approval_mode = Some(mode);
+        Ok(())
+    }
+
     /// The conversation is authoritative for this selection. If updating the
     /// new-conversation default fails, retain and report the committed route.
     pub fn select_model(
@@ -2442,6 +2723,16 @@ impl Store {
         // Confirm the owned document before unlinking. Usage is deliberately independent.
         let document = self.read_chat(id)?;
         validate_chat(&document, id)?;
+        if let Some(files) = self.shared_files_root.clone() {
+            shared_chat::delete(&files, id)?;
+            self.conversations.remove(index);
+            self.preferences_forget(id);
+            self.reading_positions.retain(|position| position.source.conversation_id() != id);
+            self.commit_usage_deletion(deletion)?;
+            return shared_children::delete(&files, id).and_then(|()| {
+                shared_preferences::save(&files, shared_preferences::VIEWPORTS, &format!("position/{id}"), None)
+            }).map_err(|error| format!("会话已删除；清理共用附属记录失败：{error}"));
+        }
         if contained_path(&self.root, &self.chat_directory)? != self.chat_directory {
             return Err("删除前会话目录发生变化".into());
         }
@@ -2614,11 +2905,23 @@ impl Store {
             settings: settings.clone(),
             secrets: secrets.clone(),
         };
-        self.persist(
-            &self.root.join("settings.json"),
-            &document,
-            MAX_SETTINGS_BYTES,
-        )?;
+        self.publish_assistant_avatars(&settings)?;
+        if let Some(files) = self.shared_files_root.as_deref() {
+            if let Err(failure) =
+                shared_settings::save(files, document, (&self.settings, &self.settings_secrets))
+            {
+                if failure.replaced {
+                    self.write_blocked = Some(failure.message.clone());
+                }
+                return Err(failure.message);
+            }
+        } else {
+            self.persist(
+                &self.root.join("settings.json"),
+                &document,
+                MAX_SETTINGS_BYTES,
+            )?;
+        }
         self.settings_secrets = secrets;
         hydrate_settings_secrets(
             &mut settings,
@@ -2678,10 +2981,34 @@ impl Store {
     pub fn save_memory(&mut self, memory: Memory) -> Result<Memory, String> {
         self.save_memory_inner(memory, false)
     }
-    pub(crate) fn save_keyed_memory(&mut self, id: String, text: String) -> Result<Memory, String> {
+    pub(crate) fn memory_id_for_key(&self, key: &str) -> String {
+        if self.shared_files_root.is_some() {
+            key.to_owned()
+        } else {
+            crate::system_tools::memory_id(key)
+        }
+    }
+
+    pub(crate) fn memory_text_for_key(&self, key: &str, value: &str) -> String {
+        if self.shared_files_root.is_some() {
+            value.to_owned()
+        } else {
+            format!("{key}: {value}")
+        }
+    }
+
+    pub(crate) fn memory_value_for_key<'a>(&self, key: &str, text: &'a str) -> &'a str {
+        if self.shared_files_root.is_some() {
+            text
+        } else {
+            text.strip_prefix(&format!("{key}: ")).unwrap_or(text)
+        }
+    }
+
+    pub(crate) fn save_keyed_memory(&mut self, key: &str, text: String) -> Result<Memory, String> {
         self.save_memory_inner(
             Memory {
-                id,
+                id: self.memory_id_for_key(key),
                 text,
                 updated_at: 0,
             },
@@ -2694,7 +3021,11 @@ impl Store {
         allow_new_id: bool,
     ) -> Result<Memory, String> {
         self.writable()?;
-        if memory.text.trim().is_empty() {
+        let shared = self.shared_files_root.is_some();
+        if shared && memory.text.encode_utf16().count() > 4000 {
+            return Err("记忆内容不能超过 4000 个字符".into());
+        }
+        if !shared && memory.text.trim().is_empty() {
             return Err("记忆内容不能为空".into());
         }
         bounded_text(&memory.text, 256 * 1_024, "记忆内容")?;
@@ -2705,7 +3036,9 @@ impl Store {
             memory.id = self.fresh_memory_id()?;
             None
         } else {
-            validate_id(&memory.id)?;
+            if !shared {
+                validate_id(&memory.id)?;
+            }
             let position = self
                 .memories
                 .iter()
@@ -2728,23 +3061,12 @@ impl Store {
             Some(index) => memories[index] = memory.clone(),
             None => memories.push(memory.clone()),
         }
-        validate_memories(&memories)?;
-        let document = MemoryDocument {
-            version: VERSION,
-            memories,
-        };
-        self.persist(
-            &self.root.join("memories.json"),
-            &document,
-            MAX_MEMORY_BYTES,
-        )?;
-        self.memories = document.memories;
+        self.persist_memories(memories)?;
         Ok(memory)
     }
 
     pub fn delete_memory(&mut self, id: &str) -> Result<(), String> {
         self.writable()?;
-        validate_id(id)?;
         let index = self
             .memories
             .iter()
@@ -2752,16 +3074,32 @@ impl Store {
             .ok_or("记忆已不存在")?;
         let mut memories = self.memories.clone();
         memories.remove(index);
-        let document = MemoryDocument {
-            version: VERSION,
-            memories,
-        };
-        self.persist(
-            &self.root.join("memories.json"),
-            &document,
-            MAX_MEMORY_BYTES,
-        )?;
-        self.memories = document.memories;
+        self.persist_memories(memories)?;
+        Ok(())
+    }
+
+    fn persist_memories(&mut self, memories: Vec<Memory>) -> Result<(), String> {
+        if let Some(files) = self.shared_files_root.as_deref() {
+            if let Err(failure) = shared_memory::write(files, &memories) {
+                if failure.replaced {
+                    self.write_blocked = Some(failure.message.clone());
+                }
+                return Err(failure.message);
+            }
+            self.memories = memories;
+        } else {
+            validate_memories(&memories)?;
+            let document = MemoryDocument {
+                version: VERSION,
+                memories,
+            };
+            self.persist(
+                &self.root.join("memories.json"),
+                &document,
+                MAX_MEMORY_BYTES,
+            )?;
+            self.memories = document.memories;
+        }
         Ok(())
     }
 
@@ -2843,6 +3181,10 @@ impl Store {
         self.workspace.clone()
     }
 
+    pub(crate) fn private_workspace(&self) -> PathBuf {
+        self.namespace_root.join("workspace")
+    }
+
     pub fn list_files(&self, directory: PathBuf) -> Result<(PathBuf, Vec<FileEntry>), String> {
         let directory = self.workspace_path(&directory)?;
         if !directory.is_dir() {
@@ -2869,6 +3211,30 @@ impl Store {
                 size: metadata.len(),
             });
         }
+        let private = self.private_workspace();
+        if private != self.workspace {
+            if directory == self.workspace
+                && fs::read_dir(&private).is_ok_and(|mut entries| entries.next().is_some())
+            {
+                entries.push(FileEntry {
+                    path: private,
+                    name: "原 Rust 工作区".into(),
+                    is_dir: true,
+                    size: 0,
+                });
+            } else if directory.starts_with(&private) {
+                entries.push(FileEntry {
+                    path: if directory == private {
+                        self.workspace.clone()
+                    } else {
+                        directory.parent().unwrap().to_owned()
+                    },
+                    name: "上一级".into(),
+                    is_dir: true,
+                    size: 0,
+                });
+            }
+        }
         entries.sort_by(|a, b| {
             b.is_dir
                 .cmp(&a.is_dir)
@@ -2880,7 +3246,7 @@ impl Store {
 
     pub fn preview_file(&self, path: PathBuf) -> Result<(PathBuf, String, bool), String> {
         let path = self.workspace_path(&path)?;
-        let file = checked_file(&self.workspace, &path)?;
+        let file = checked_file(&self.workspace_root_for(&path), &path)?;
         let mut bytes = Vec::new();
         file.take((MAX_PREVIEW_BYTES + 1) as u64)
             .read_to_end(&mut bytes)
@@ -2909,7 +3275,16 @@ impl Store {
         } else {
             self.workspace.join(requested)
         };
-        contained_path(&self.workspace, &path)
+        contained_path(&self.workspace_root_for(&path), &path)
+    }
+
+    fn workspace_root_for(&self, path: &Path) -> PathBuf {
+        let private = self.private_workspace();
+        if path.starts_with(&private) {
+            private
+        } else {
+            self.workspace.clone()
+        }
     }
 
     fn chat_path(&self, id: &str) -> Result<PathBuf, String> {
@@ -2950,6 +3325,21 @@ impl Store {
     fn persist_chat(&mut self, document: &ChatDocument) -> Result<(), String> {
         self.writable()?;
         validate_chat(document, &document.conversation.id)?;
+        if let Some(files) = self.shared_files_root.as_deref() {
+            let path = files.join(format!("chats/store/{}.meta", document.conversation.id));
+            match shared_chat::write(files, document) {
+                Ok(()) => {
+                    self.advance_history_path(&path);
+                    return Ok(());
+                }
+                Err(failure) => {
+                    if failure.replaced {
+                        self.write_blocked = Some(failure.message.clone());
+                    }
+                    return Err(failure.message);
+                }
+            }
+        }
         let files = crate::legacy_migration::encode_chat_archive(
             &document.conversation,
             &document.messages,
@@ -3003,7 +3393,14 @@ impl Store {
 
     fn persist<T: Serialize>(&mut self, path: &Path, value: &T, limit: u64) -> Result<(), String> {
         self.writable()?;
-        match atomic_json(&self.root, path, value, limit) {
+        let root = if path.starts_with(&self.plugin_directory) {
+            &self.plugin_directory
+        } else if path.starts_with(&self.root) {
+            &self.root
+        } else {
+            self.shared_files_root.as_deref().unwrap_or(&self.root)
+        };
+        match atomic_json(root, path, value, limit) {
             Ok(()) => {
                 self.advance_history_path(path);
                 Ok(())
@@ -3747,8 +4144,8 @@ fn hydrate_mcp_secrets(
     let mut locked = HashSet::new();
     for server in servers {
         if let Some(secret) = secrets.get(&server.id) {
-            let env = SecretBox.decrypt(&secret.env);
-            let headers = SecretBox.decrypt(&secret.headers);
+            let env = if secret.env.is_empty() { Ok(std::mem::take(&mut server.env)) } else { SecretBox.decrypt(&secret.env) };
+            let headers = if secret.headers.is_empty() { Ok(std::mem::take(&mut server.headers)) } else { SecretBox.decrypt(&secret.headers) };
             if env.is_err() || headers.is_err() {
                 locked.insert(server.id.clone());
                 secret_warning(

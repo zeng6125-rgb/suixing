@@ -633,12 +633,31 @@ fn parse_blocks(text: &str, cancelled: &AtomicBool) -> Result<Vec<Block>, i32> {
     parse_blocks_progress(text, cancelled, &mut Progress::default())
 }
 #[derive(Default)]
-struct Progress { end: usize, count: usize, tail: Option<Continuation> }
-enum Continuation { Paragraph(usize, String), Code(usize, usize, bool), Table(usize, bool) }
-fn parse_blocks_progress(text: &str, cancelled: &AtomicBool, progress: &mut Progress) -> Result<Vec<Block>, i32> {
+struct Progress {
+    end: usize,
+    count: usize,
+    tail: Option<Continuation>,
+}
+enum Continuation {
+    Paragraph(usize, String),
+    Code(usize, usize, bool),
+    Table(usize, bool),
+}
+fn parse_blocks_progress(
+    text: &str,
+    cancelled: &AtomicBool,
+    progress: &mut Progress,
+) -> Result<Vec<Block>, i32> {
     let lines: Vec<_> = text.split('\n').collect();
     let mut at = 0;
-    let offsets: Vec<_> = lines.iter().map(|line| { let start = at; at += line.len() + 1; start }).collect();
+    let offsets: Vec<_> = lines
+        .iter()
+        .map(|line| {
+            let start = at;
+            at += line.len() + 1;
+            start
+        })
+        .collect();
     let mut result = Vec::new();
     let mut index = 0;
     while index < lines.len() {
@@ -649,7 +668,8 @@ fn parse_blocks_progress(text: &str, cancelled: &AtomicBool, progress: &mut Prog
         match line_kind(&lines, index) {
             LineKind::Empty => {
                 if lines[index].is_empty() && index > 0 && offsets[index] < text.len() {
-                    progress.end = offsets[index] + 1; progress.count = result.len();
+                    progress.end = offsets[index] + 1;
+                    progress.count = result.len();
                 }
                 index += 1;
             }
@@ -667,8 +687,12 @@ fn parse_blocks_progress(text: &str, cancelled: &AtomicBool, progress: &mut Prog
                 }
                 if !trim(&code).is_empty() {
                     result.push(Block::Code(language.to_owned(), code));
-                    if index == lines.len() && !fence_close(lines[lines.len()-1]) {
-                        progress.tail = Some(Continuation::Code(offsets[opening] + lines[opening].len() + 1, offsets[lines.len()-1], trim(lines[lines.len()-1]).bytes().any(|b| b != b'`')));
+                    if index == lines.len() && !fence_close(lines[lines.len() - 1]) {
+                        progress.tail = Some(Continuation::Code(
+                            offsets[opening] + lines[opening].len() + 1,
+                            offsets[lines.len() - 1],
+                            trim(lines[lines.len() - 1]).bytes().any(|b| b != b'`'),
+                        ));
                     }
                 }
             }
@@ -706,9 +730,11 @@ fn parse_blocks_progress(text: &str, cancelled: &AtomicBool, progress: &mut Prog
                     index += 1;
                 }
                 result.push(Block::Table(header, rows));
-                if index == lines.len() && matches!(result.last(), Some(Block::Table(_, rows)) if !rows.is_empty()) {
-                    progress.tail = Some(Continuation::Table(offsets[lines.len()-1], true));
-                } else if index == lines.len()-1 && trim(lines[index]).is_empty() {
+                if index == lines.len()
+                    && matches!(result.last(), Some(Block::Table(_, rows)) if !rows.is_empty())
+                {
+                    progress.tail = Some(Continuation::Table(offsets[lines.len() - 1], true));
+                } else if index == lines.len() - 1 && trim(lines[index]).is_empty() {
                     progress.tail = Some(Continuation::Table(offsets[index], false));
                 }
             }
@@ -728,9 +754,19 @@ fn parse_blocks_progress(text: &str, cancelled: &AtomicBool, progress: &mut Prog
                     index += 1;
                 }
                 result.push(Block::Paragraph(paragraph.join("\n")));
-                if index == lines.len() && trim(lines[lines.len()-1]).chars().next().is_some_and(|c| !"#`>-*+_|:".contains(c) && !c.is_ascii_digit()) {
-                    let completed = if paragraph.len() <= 1 { String::new() } else { format!("{}\n", paragraph[..paragraph.len()-1].join("\n")) };
-                    progress.tail = Some(Continuation::Paragraph(offsets[lines.len()-1], completed));
+                if index == lines.len()
+                    && trim(lines[lines.len() - 1])
+                        .chars()
+                        .next()
+                        .is_some_and(|c| !"#`>-*+_|:".contains(c) && !c.is_ascii_digit())
+                {
+                    let completed = if paragraph.len() <= 1 {
+                        String::new()
+                    } else {
+                        format!("{}\n", paragraph[..paragraph.len() - 1].join("\n"))
+                    };
+                    progress.tail =
+                        Some(Continuation::Paragraph(offsets[lines.len() - 1], completed));
                 }
             }
         }
@@ -890,39 +926,103 @@ pub struct InlineRun {
 }
 
 fn image_segments(units: &[u16], streaming: bool, writer: &mut Writer) -> Result<(), i32> {
-    let mut i = 0; let mut fence = 0; let mut matches = Vec::new();
+    let mut i = 0;
+    let mut fence = 0;
+    let mut matches = Vec::new();
     let lower = |c: u16| if (65..=90).contains(&c) { c + 32 } else { c };
     while i < units.len() {
         if i == 0 || units[i - 1] == 10 {
-            let marker = if units.get(i..i+3) == Some(&[96,96,96]) { 96 } else if units.get(i..i+3) == Some(&[126,126,126]) { 126 } else { 0 };
-            if marker != 0 { fence = if fence == marker { 0 } else if fence == 0 { marker } else { fence }; }
+            let marker = if units.get(i..i + 3) == Some(&[96, 96, 96]) {
+                96
+            } else if units.get(i..i + 3) == Some(&[126, 126, 126]) {
+                126
+            } else {
+                0
+            };
+            if marker != 0 {
+                fence = if fence == marker {
+                    0
+                } else if fence == 0 {
+                    marker
+                } else {
+                    fence
+                };
+            }
         }
-        if fence == 0 && units[i] == 92 && i + 1 < units.len() && matches!(units[i+1], 96 | 92 | 33) { i += 2; continue; }
+        if fence == 0
+            && units[i] == 92
+            && i + 1 < units.len()
+            && matches!(units[i + 1], 96 | 92 | 33)
+        {
+            i += 2;
+            continue;
+        }
         if fence == 0 && units[i] == 96 {
-            let mut opening = i + 1; while opening < units.len() && units[opening] == 96 { opening += 1; }
-            let line_end = units[opening..].iter().position(|&c| c == 10).map(|n| opening+n).unwrap_or(units.len());
-            let mut next = opening; let mut span_end = opening;
+            let mut opening = i + 1;
+            while opening < units.len() && units[opening] == 96 {
+                opening += 1;
+            }
+            let line_end = units[opening..]
+                .iter()
+                .position(|&c| c == 10)
+                .map(|n| opening + n)
+                .unwrap_or(units.len());
+            let mut next = opening;
+            let mut span_end = opening;
             while next < line_end {
-                if units[next] != 96 { next += 1; continue; }
-                let mut closing = next + 1; while closing < units.len() && units[closing] == 96 { closing += 1; }
-                if closing-next == opening-i { span_end = closing; break; }
+                if units[next] != 96 {
+                    next += 1;
+                    continue;
+                }
+                let mut closing = next + 1;
+                while closing < units.len() && units[closing] == 96 {
+                    closing += 1;
+                }
+                if closing - next == opening - i {
+                    span_end = closing;
+                    break;
+                }
                 next = closing;
             }
-            if span_end == opening && streaming && line_end == units.len() { span_end = line_end; }
-            i = span_end; continue;
+            if span_end == opening && streaming && line_end == units.len() {
+                span_end = line_end;
+            }
+            i = span_end;
+            continue;
         }
-        if fence == 0 && units.get(i..i+2) == Some(&[33,91]) {
-            if let Some(close) = units[i+2..].iter().position(|&c| c == 93).map(|n| i+2+n) {
-                if units.get(close+1) == Some(&40) {
-                    let start = close+2; let mut end = start;
-                    while end < units.len() && units[end] != 41 && !matches!(units[end], 9 | 10 | 11 | 12 | 13 | 32) { end += 1; }
+        if fence == 0 && units.get(i..i + 2) == Some(&[33, 91]) {
+            if let Some(close) = units[i + 2..]
+                .iter()
+                .position(|&c| c == 93)
+                .map(|n| i + 2 + n)
+            {
+                if units.get(close + 1) == Some(&40) {
+                    let start = close + 2;
+                    let mut end = start;
+                    while end < units.len()
+                        && units[end] != 41
+                        && !matches!(units[end], 9 | 10 | 11 | 12 | 13 | 32)
+                    {
+                        end += 1;
+                    }
                     if end > start && units.get(end) == Some(&41) {
                         let url = &units[start..end];
-                        let renderable = [b"http://".as_slice(), b"https://", b"data:image/"].iter().any(|prefix| url.len() >= prefix.len() && url.iter().zip(*prefix).all(|(&c, &b)| lower(c) == b as u16));
+                        let renderable = [b"http://".as_slice(), b"https://", b"data:image/"]
+                            .iter()
+                            .any(|prefix| {
+                                url.len() >= prefix.len()
+                                    && url.iter().zip(*prefix).all(|(&c, &b)| lower(c) == b as u16)
+                            });
                         if renderable {
-                            matches.push([i, end+1, i+2, close-i-2, start, end-start]); i = end+1; continue;
+                            matches.push([i, end + 1, i + 2, close - i - 2, start, end - start]);
+                            i = end + 1;
+                            continue;
                         }
-                        if matches!(lower(url[0]), 104 | 100) && url.iter().take(11).any(|&c| c >= 128) { return Err(COMPATIBILITY); }
+                        if matches!(lower(url[0]), 104 | 100)
+                            && url.iter().take(11).any(|&c| c >= 128)
+                        {
+                            return Err(COMPATIBILITY);
+                        }
                     }
                 }
             }
@@ -930,78 +1030,157 @@ fn image_segments(units: &[u16], streaming: bool, writer: &mut Writer) -> Result
         i += 1;
     }
     writer.u32(matches.len() as u32)?;
-    for row in matches { for value in row { writer.u32(value as u32)?; } }
+    for row in matches {
+        for value in row {
+            writer.u32(value as u32)?;
+        }
+    }
     Ok(())
 }
 
 fn runtime(op: u32, units: &[u16], parameter: usize, flag: bool) -> Result<Vec<u8>, i32> {
     if op == 4 {
-        if units.iter().any(|&c| c == 10 || c == 124) { return Err(COMPATIBILITY); }
+        if units.iter().any(|&c| c == 10 || c == 124) {
+            return Err(COMPATIBILITY);
+        }
         return Ok(Vec::new());
     }
     if op == 3 {
-        let mut writer = Writer::new(MAX_RESPONSE); image_segments(units, flag, &mut writer)?; return Ok(writer.bytes);
+        let mut writer = Writer::new(MAX_RESPONSE);
+        image_segments(units, flag, &mut writer)?;
+        return Ok(writer.bytes);
     }
-    let cancelled = AtomicBool::new(false); let mut writer = Writer::new(MAX_RESPONSE);
+    let cancelled = AtomicBool::new(false);
+    let mut writer = Writer::new(MAX_RESPONSE);
     match op {
         1 => {
             let text = String::from_utf16(units).map_err(|_| COMPATIBILITY)?;
             for ch in text.chars() {
-                if !ch.is_ascii() && (crate::java_whitespace(ch) || ch.is_numeric()) || matches!(ch, '\u{0085}' | '\u{2028}' | '\u{2029}') { return Err(COMPATIBILITY); }
+                if !ch.is_ascii() && (crate::java_whitespace(ch) || ch.is_numeric())
+                    || matches!(ch, '\u{0085}' | '\u{2028}' | '\u{2029}')
+                {
+                    return Err(COMPATIBILITY);
+                }
             }
-            let mut progress = Progress::default(); let blocks = parse_blocks_progress(&text, &cancelled, &mut progress)?;
-            writer.u32(text[..progress.end].encode_utf16().count() as u32)?; writer.u32(progress.count as u32)?;
+            let mut progress = Progress::default();
+            let blocks = parse_blocks_progress(&text, &cancelled, &mut progress)?;
+            writer.u32(text[..progress.end].encode_utf16().count() as u32)?;
+            writer.u32(progress.count as u32)?;
             write_blocks(&mut writer, &blocks, &mut Vec::new(), &cancelled)?;
-            let units_at = |offset: usize| text[..offset.min(text.len())].encode_utf16().count() as u32;
+            let units_at =
+                |offset: usize| text[..offset.min(text.len())].encode_utf16().count() as u32;
             match progress.tail {
-                Some(Continuation::Paragraph(start, completed)) => { writer.u32(1)?; writer.u32(units_at(start))?; writer.string(&completed)?; }
-                Some(Continuation::Code(body, start, body_line)) => { writer.u32(2)?; writer.u32(units_at(body))?; writer.u32(units_at(start))?; writer.u32(u32::from(body_line))?; }
-                Some(Continuation::Table(start, partial)) => { writer.u32(3)?; writer.u32(units_at(start))?; writer.u32(u32::from(partial))?; }
+                Some(Continuation::Paragraph(start, completed)) => {
+                    writer.u32(1)?;
+                    writer.u32(units_at(start))?;
+                    writer.string(&completed)?;
+                }
+                Some(Continuation::Code(body, start, body_line)) => {
+                    writer.u32(2)?;
+                    writer.u32(units_at(body))?;
+                    writer.u32(units_at(start))?;
+                    writer.u32(u32::from(body_line))?;
+                }
+                Some(Continuation::Table(start, partial)) => {
+                    writer.u32(3)?;
+                    writer.u32(units_at(start))?;
+                    writer.u32(u32::from(partial))?;
+                }
                 None => writer.u32(0)?,
             }
         }
         2 => {
-            let text = String::from_utf16(units).map_err(|_| COMPATIBILITY)?;
-            let runs = InlineParser::new(&text, &cancelled).parse()?;
+            if !valid_utf16(units) {
+                return Err(COMPATIBILITY);
+            }
+            let runs = InlineParser::from_units(units, &cancelled).parse()?;
             writer.u32(runs.len() as u32)?;
-            for run in runs { writer.string(&run.text)?; writer.u32(run.style)?; writer.string(run.link.as_deref().unwrap_or(""))?; }
+            for run in runs {
+                writer.string(&run.text)?;
+                writer.u32(run.style)?;
+                writer.string(run.link.as_deref().unwrap_or(""))?;
+            }
         }
         5 => {
             let mut start = 0;
             if flag {
-                let Some(newline) = units[parameter.min(units.len())..].iter().position(|&c| c == 10).map(|n| n + parameter) else {
-                    writer.u32(0)?; writer.u32(1)?; return Ok(writer.bytes);
+                let Some(newline) = units[parameter.min(units.len())..]
+                    .iter()
+                    .position(|&c| c == 10)
+                    .map(|n| n + parameter)
+                else {
+                    writer.u32(0)?;
+                    writer.u32(1)?;
+                    return Ok(writer.bytes);
                 };
                 start = newline + 1;
             }
             loop {
-                let end = units[start..].iter().position(|&c| c == 10).map(|n| start + n).unwrap_or(units.len());
+                let end = units[start..]
+                    .iter()
+                    .position(|&c| c == 10)
+                    .map(|n| start + n)
+                    .unwrap_or(units.len());
                 let mut line = &units[start..end];
-                while line.first().is_some_and(|&c| crate::java_whitespace(char::from_u32(c as u32).unwrap_or('\0'))) { line = &line[1..]; }
-                while line.last().is_some_and(|&c| crate::java_whitespace(char::from_u32(c as u32).unwrap_or('\0'))) { line = &line[..line.len()-1]; }
-                if line.len() >= 3 && line.iter().all(|&c| c == 96) { return Err(COMPATIBILITY); }
-                if end == units.len() { writer.u32(start as u32)?; writer.u32(u32::from(line.iter().any(|&c| c != 96)))?; break; }
+                while line.first().is_some_and(|&c| {
+                    crate::java_whitespace(char::from_u32(c as u32).unwrap_or('\0'))
+                }) {
+                    line = &line[1..];
+                }
+                while line.last().is_some_and(|&c| {
+                    crate::java_whitespace(char::from_u32(c as u32).unwrap_or('\0'))
+                }) {
+                    line = &line[..line.len() - 1];
+                }
+                if line.len() >= 3 && line.iter().all(|&c| c == 96) {
+                    return Err(COMPATIBILITY);
+                }
+                if end == units.len() {
+                    writer.u32(start as u32)?;
+                    writer.u32(u32::from(line.iter().any(|&c| c != 96)))?;
+                    break;
+                }
                 start = end + 1;
             }
         }
         6 => {
             let text = String::from_utf16(units).map_err(|_| COMPATIBILITY)?;
-            let mut lines = text.split('\n').peekable(); let mut rows = Vec::new(); let mut start_units = 0;
+            let mut lines = text.split('\n').peekable();
+            let mut rows = Vec::new();
+            let mut start_units = 0;
             let mut partial = None;
             while let Some(line) = lines.next() {
-                let last = lines.peek().is_none(); let row = trim(line);
+                let last = lines.peek().is_none();
+                let row = trim(line);
                 if row.is_empty() {
-                    if !last { return Err(COMPATIBILITY); }
+                    if !last {
+                        return Err(COMPATIBILITY);
+                    }
                 } else {
-                    if !row.contains('|') { return Err(COMPATIBILITY); }
-                    let mut cells = table_cells(row); cells.resize(parameter, String::new());
-                    if last { partial = Some(cells); } else { rows.push(cells); }
+                    if !row.contains('|') {
+                        return Err(COMPATIBILITY);
+                    }
+                    let mut cells = table_cells(row);
+                    cells.resize(parameter, String::new());
+                    if last {
+                        partial = Some(cells);
+                    } else {
+                        rows.push(cells);
+                    }
                 }
-                if !last { start_units += line.encode_utf16().count() + 1; }
+                if !last {
+                    start_units += line.encode_utf16().count() + 1;
+                }
             }
-            writer.u32(start_units as u32)?; writer.u32(rows.len() as u32)?;
-            for row in &rows { write_strings(&mut writer, row)?; }
-            writer.u32(u32::from(partial.is_some()))?; if let Some(cells) = partial { write_strings(&mut writer, &cells)?; }
+            writer.u32(start_units as u32)?;
+            writer.u32(rows.len() as u32)?;
+            for row in &rows {
+                write_strings(&mut writer, row)?;
+            }
+            writer.u32(u32::from(partial.is_some()))?;
+            if let Some(cells) = partial {
+                write_strings(&mut writer, &cells)?;
+            }
         }
         _ => return Err(STATUS_REQUEST_ERROR),
     }
@@ -1009,17 +1188,64 @@ fn runtime(op: u32, units: &[u16], parameter: usize, flag: bool) -> Result<Vec<u
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn sx_markdown_runtime(op: u32, source: *const u16, len: usize, parameter: usize, flag: bool, output: *mut SearchBuffer) -> i32 {
-    if output.is_null() || source.is_null() && len != 0 { return STATUS_REQUEST_ERROR; }
-    unsafe { output.write(SearchBuffer { data: ptr::null_mut(), len: 0 }); }
-    let units = if len == 0 { &[] } else { unsafe { slice::from_raw_parts(source, len) } };
+pub unsafe extern "C" fn sx_markdown_runtime(
+    op: u32,
+    source: *const u16,
+    len: usize,
+    parameter: usize,
+    flag: bool,
+    output: *mut SearchBuffer,
+) -> i32 {
+    if output.is_null() || source.is_null() && len != 0 {
+        return STATUS_REQUEST_ERROR;
+    }
+    unsafe {
+        output.write(SearchBuffer {
+            data: ptr::null_mut(),
+            len: 0,
+        });
+    }
+    let units = if len == 0 {
+        &[]
+    } else {
+        unsafe { slice::from_raw_parts(source, len) }
+    };
     match catch_unwind(AssertUnwindSafe(|| runtime(op, units, parameter, flag))) {
-        Ok(Ok(bytes)) => { let bytes = bytes.into_boxed_slice(); let len = bytes.len(); unsafe { output.write(SearchBuffer { data: Box::into_raw(bytes).cast(), len }); } STATUS_OK },
-        Ok(Err(status)) => status, Err(_) => STATUS_PANIC,
+        Ok(Ok(bytes)) => {
+            let bytes = bytes.into_boxed_slice();
+            let len = bytes.len();
+            unsafe {
+                output.write(SearchBuffer {
+                    data: Box::into_raw(bytes).cast(),
+                    len,
+                });
+            }
+            STATUS_OK
+        }
+        Ok(Err(status)) => status,
+        Err(_) => STATUS_PANIC,
     }
 }
+fn valid_utf16(units: &[u16]) -> bool {
+    let mut index = 0;
+    while index < units.len() {
+        let unit = units[index];
+        if (0xD800..=0xDBFF).contains(&unit) {
+            if index + 1 >= units.len() || !(0xDC00..=0xDFFF).contains(&units[index + 1]) {
+                return false;
+            }
+            index += 2;
+        } else if (0xDC00..=0xDFFF).contains(&unit) {
+            return false;
+        } else {
+            index += 1;
+        }
+    }
+    true
+}
+
 struct InlineParser<'a> {
-    text: Vec<u16>,
+    text: Cow<'a, [u16]>,
     runs: Vec<InlineRun>,
     failed: [Option<(usize, usize)>; 6],
     cancelled: &'a AtomicBool,
@@ -1042,7 +1268,15 @@ fn unit_ascii_word(unit: u16) -> bool {
 impl<'a> InlineParser<'a> {
     fn new(text: &str, cancelled: &'a AtomicBool) -> Self {
         Self {
-            text: text.encode_utf16().collect(),
+            text: Cow::Owned(text.encode_utf16().collect()),
+            runs: Vec::new(),
+            failed: [None; 6],
+            cancelled,
+        }
+    }
+    fn from_units(units: &'a [u16], cancelled: &'a AtomicBool) -> Self {
+        Self {
+            text: Cow::Borrowed(units),
             runs: Vec::new(),
             failed: [None; 6],
             cancelled,
@@ -1369,14 +1603,23 @@ mod tests {
     #[test]
     fn streaming_suffix_handles_code_fences_and_table_rows() {
         let code: Vec<u16> = "😀".encode_utf16().collect();
-        assert_eq!(runtime(5, &code, 0, true).unwrap(), [0, 0, 0, 0, 1, 0, 0, 0]);
+        assert_eq!(
+            runtime(5, &code, 0, true).unwrap(),
+            [0, 0, 0, 0, 1, 0, 0, 0]
+        );
         let close: Vec<u16> = "\n```".encode_utf16().collect();
         assert_eq!(runtime(5, &close, 0, true), Err(COMPATIBILITY));
 
         let table: Vec<u16> = "| 😀 | b |\n| c |".encode_utf16().collect();
         let bytes = runtime(6, &table, 2, false).unwrap();
-        let mut row = crate::Input { bytes: &bytes, at: 0 };
-        assert_eq!(row.u32().unwrap(), "| 😀 | b |\n".encode_utf16().count() as u32);
+        let mut row = crate::Input {
+            bytes: &bytes,
+            at: 0,
+        };
+        assert_eq!(
+            row.u32().unwrap(),
+            "| 😀 | b |\n".encode_utf16().count() as u32
+        );
         assert_eq!(row.u32().unwrap(), 1);
         assert_eq!(strings(&mut row), ["😀", "b"]);
         assert_eq!(row.u32().unwrap(), 1);
@@ -1458,5 +1701,38 @@ mod tests {
             }
         }
         assert_eq!(input.at, document.len());
+    }
+
+    #[test]
+    fn streaming_inline_uses_utf16_slice_and_rejects_lone_surrogates() {
+        let inline: Vec<u16> = "plain **bold** `code` [link](https://example.com) 😀"
+            .encode_utf16()
+            .collect();
+        let bytes = runtime(2, &inline, 0, false).unwrap();
+        let mut input = crate::Input {
+            bytes: &bytes,
+            at: 0,
+        };
+        assert_eq!(input.u32(), Some(7));
+        let expected = [
+            ("plain ", 0, ""),
+            ("bold", 1, ""),
+            (" ", 0, ""),
+            ("\u{2009}code\u{2009}", 8, ""),
+            (" ", 0, ""),
+            ("link", 48, "https://example.com"),
+            (" 😀", 0, ""),
+        ];
+        for (text, style, link) in expected {
+            assert_eq!(input.string(), Some(text));
+            assert_eq!(input.u32(), Some(style));
+            assert_eq!(input.string(), Some(link));
+        }
+        assert_eq!(input.at, bytes.len());
+
+        assert_eq!(runtime(2, &[0xD800], 0, false), Err(COMPATIBILITY));
+        assert_eq!(runtime(2, &[0xDC00], 0, false), Err(COMPATIBILITY));
+        assert_eq!(runtime(2, &[0xD83D, 0x0061], 0, false), Err(COMPATIBILITY));
+        assert!(runtime(2, &[0xD83D, 0xDE00], 0, false).is_ok());
     }
 }

@@ -57,6 +57,10 @@ val LocalHeldImePx = compositionLocalOf<androidx.compose.runtime.State<Int>> {
     androidx.compose.runtime.mutableStateOf(0)
 }
 
+internal val LocalComposerImeReservePx = compositionLocalOf<androidx.compose.runtime.State<Int>> {
+    androidx.compose.runtime.mutableStateOf(0)
+}
+
 /**
  * 按「夹过的键盘高度」加底部内边距，**读数在布局期完成**。
  *

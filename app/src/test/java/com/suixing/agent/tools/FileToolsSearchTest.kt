@@ -87,6 +87,17 @@ class FileToolsSearchTest {
     }
 
     @Test
+    fun `grep keeps logical line numbers across a split CRLF and a trailing newline`() = runBlocking {
+        val dir = workspace()
+        File(dir, "mixed.txt").writeText("x".repeat(8191) + "\r\nÄudit\rnext\n")
+        val tools = tools(dir)
+        val literal = tools.runForTest("grep_files", args("query" to "äUDIT", "context" to 1))
+        assertTrue(literal.output, literal.ok && ":2: Äudit" in literal.output && ":3- next" in literal.output)
+        val empty = tools.runForTest("grep_files", args("query" to "^$", "regex" to true))
+        assertTrue(empty.output, empty.ok && "命中 1 条" in empty.output && ":4:" in empty.output)
+    }
+
+    @Test
     fun `grep context is clamped and does not run off the file`() = runBlocking {
         val dir = workspace()
         File(dir, "a.txt").writeText("MATCH\nb\n")

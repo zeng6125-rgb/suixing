@@ -2,7 +2,6 @@ package com.suixing.agent.ui.components
 
 import android.os.SystemClock
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -14,12 +13,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.MotionDurationScale
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntSize
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
+import coil3.compose.AsyncImage
 import com.suixing.agent.R
 import com.suixing.agent.core.RoundIconFrames
 import com.suixing.agent.core.RoundIconMotion
@@ -39,11 +38,7 @@ internal fun RoundBrandIcon(
     animationEnabled: Boolean = true,
 ) {
     if (!running && !animateIdle) {
-        Image(
-            painter = painterResource(R.drawable.brand_mark_round),
-            contentDescription = null,
-            modifier = modifier.size(size),
-        )
+        StaticRoundBrandIcon(size, modifier)
         return
     }
 
@@ -76,11 +71,7 @@ internal fun RoundBrandIcon(
     }
     val loaded = clip.value
     if (loaded == null) {
-        Image(
-            painter = painterResource(R.drawable.brand_mark_round),
-            contentDescription = null,
-            modifier = modifier.size(size),
-        )
+        StaticRoundBrandIcon(size, modifier)
     } else {
         val images = remember(loaded) { loaded.frames.map { it.bitmap.asImageBitmap() } }
         Canvas(modifier.size(size)) {
@@ -90,4 +81,14 @@ internal fun RoundBrandIcon(
             )
         }
     }
+}
+
+@Composable
+private fun StaticRoundBrandIcon(size: Dp, modifier: Modifier) {
+    // Rows entering the viewport share Coil's sized decode instead of decoding in composition.
+    AsyncImage(
+        model = R.drawable.brand_mark_round,
+        contentDescription = null,
+        modifier = modifier.size(size),
+    )
 }

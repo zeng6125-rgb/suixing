@@ -325,11 +325,9 @@ fun FlatPainterButton(
             .minimumInteractiveComponentSize()
             .clickable(
                 interactionSource = interaction,
-                indication = ripple(
-                    color = tint,
-                    bounded = false,
-                    radius = size / 2,
-                ),
+                // The press lift gives immediate feedback. A platform ripple would
+                // keep redrawing the cached chat behind the opening drawer.
+                indication = null,
                 role = Role.Button,
                 onClick = onClick,
             ),

@@ -65,9 +65,10 @@ internal class NativeChatLogSink(
 ) {
     val entries = ArrayList<ChatStore.Entry>()
 
+    /** The native batch is borrowed until this method returns. Entries own their decoded data. */
     @Keep
-    fun accept(bytes: ByteArray) {
-        val input = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+    fun accept(input: ByteBuffer) {
+        input.order(ByteOrder.LITTLE_ENDIAN)
         repeat(input.int) {
             checkpoint?.check()
             val offset = input.long

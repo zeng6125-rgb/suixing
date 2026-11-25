@@ -11,7 +11,6 @@ import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
-import androidx.compose.foundation.background
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
@@ -20,14 +19,16 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.imeAnimationSource
 import androidx.compose.foundation.layout.imeAnimationTarget
 import com.suixing.agent.ui.components.ImeInsetFilter
-import androidx.compose.foundation.layout.padding
+import com.suixing.agent.ui.components.LocalComposerImeReservePx
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.MaterialTheme
 import com.suixing.agent.ui.drawer.SuixingDrawer
+import com.suixing.agent.ui.drawer.drawerHomeCornerFraction
 import com.suixing.agent.ui.drawer.rememberSuixingDrawerState
-import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.State
@@ -41,18 +42,19 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.structuralEqualityPolicy
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.layer.CompositingStrategy
 import androidx.compose.ui.graphics.layer.drawLayer
 import androidx.compose.ui.graphics.rememberGraphicsLayer
 import androidx.compose.ui.graphics.toArgb
@@ -207,11 +209,6 @@ fun SuixingApp() {
     val activeConversationId by remember(chat) {
         chat.state.map { it.conversationId }.distinctUntilChanged()
     }.collectAsStateWithLifecycle(initialValue = "")
-    // Which conversations have a run in flight, straight off the engine's own map: the
-    // drawer's dots follow it without the view model narrating anyone else's run.
-    val runningIds by remember {
-        Core.engine.runsFlow.map { it.keys }.distinctUntilChanged()
-    }.collectAsStateWithLifecycle(initialValue = emptySet<String>())
     // Same reason as the ids above: the picker needs one field, not the whole transcript.
     val assistantId by remember(chat) {
         chat.state.map { it.assistantId }.distinctUntilChanged()
@@ -281,7 +278,7 @@ fun SuixingApp() {
     val routeNow by androidx.compose.runtime.rememberUpdatedState(route)
     val open: (String) -> Unit = remember(navController) { { target ->
         // **不关抽屉**（用户：「不用关掉侧边栏」「新页不应该在页面都最上面移动的吗？」）：
-        // 覆盖层现在画在自建抽屉宿主之上（见下面 Scaffold/Box 那段），所以新页是
+        // 覆盖层画在自建抽屉宿主之上，所以新页是
         // 压着抽屉滑进来的，抽屉保持打开、原样留在下面 —— 返回时揭开的就是它，状态天然保留。
         if (target != routeNow) {
             switchIntents.invalidate()
@@ -438,6 +435,7 @@ fun SuixingApp() {
     // 在消费节点的布局/绘制阶段读取原始 inset 和系统目标，不订阅外壳组合。
     // 长按期间冻结，窗口外按像素单调跟随目标，不量化，也不等定时器解锁。
     val imeInsets = WindowInsets.ime
+    val imeSource = WindowInsets.imeAnimationSource
     val imeTarget = WindowInsets.imeAnimationTarget
     val imeFilter = remember { ImeInsetFilter() }
     val heldImeState = remember(rootDensity, imeInsets, imeTarget) {
@@ -449,6 +447,35 @@ fun SuixingApp() {
                 imeTarget.getBottom(rootDensity),
                 selectionActive,
             )
+        }
+    }
+    val composerImeReserve = remember(rootDensity, imeSource, imeTarget, heldImeState) {
+        derivedStateOf {
+            if (selectionActive) heldImeState.value
+            else maxOf(imeSource.getBottom(rootDensity), imeTarget.getBottom(rootDensity))
+        }
+    }
+    val chatFrozen = remember(drawerState, drawerBusyState, heldImeState) {
+        derivedStateOf(structuralEqualityPolicy()) {
+            drawerState.freezesChat(drawerBusyState.value) && heldImeState.value == 0
+        }
+    }
+    val freezeChatDrawing = remember(chatFrozen) {
+        Modifier.drawWithCache {
+            if (!chatFrozen.value) {
+                onDrawWithContent { drawContent() }
+            } else {
+                val layer = obtainGraphicsLayer()
+                layer.compositingStrategy = CompositingStrategy.Offscreen
+                var recorded = false
+                onDrawWithContent {
+                    if (!recorded) {
+                        layer.record { this@onDrawWithContent.drawContent() }
+                        recorded = true
+                    }
+                    drawLayer(layer)
+                }
+            }
         }
     }
     val focusManager = LocalFocusManager.current
@@ -478,6 +505,7 @@ fun SuixingApp() {
         // their own (the composer's navigation-bar padding: while the keyboard covers the
         // gesture bar that padding is dead space, which is the band the user photographed).
         LocalHeldImePx provides heldImeState,
+        LocalComposerImeReservePx provides composerImeReserve,
         LocalSetSelectionActive provides setSelectionActive,
     ) {
         // 用户明确要求保留这一段（2026-10-11：先被自审删掉，用户看到键盘后面那块颜色变了，要求回退）。
@@ -488,90 +516,47 @@ fun SuixingApp() {
         LaunchedEffect(activity, surfaceArgb) {
             activity?.window?.setBackgroundDrawable(ColorDrawable(surfaceArgb))
         }
-        // 底色只画到键盘上沿，键盘后面（含它的圆角）留白给壁纸 —— 这是其它 App 的做法；
-        // 铺满整窗会让渐变的结束色出现在圆角里，和画布顶边对不上。渐变终点钉在画布底边
-        // （窗高 − 键盘高），两段渐变才在交界处同色。
-        // 渐变终点（画布底边 = 窗高 − 键盘高）**在绘制期算**：键盘高度每帧都在变，
-        // 在组合期读它等于让外壳逐帧重组（见上面 `snapshotFlow` 的说明）。
-        // 绘制缓存仍在 draw 阶段读键盘高度；只有终点、尺寸或主题变化才重建渐变，
-        // 抽屉/页面的其它重绘复用 Brush，键盘动画不触发外壳重组或重布局。
-        val canvasTopColor = MaterialTheme.colorScheme.surface
+        val surfaceColor = MaterialTheme.colorScheme.surface
         val canvasTint = MaterialTheme.colorScheme.primary.copy(alpha = 0.06f)
         val screenHeightPx = with(rootDensity) {
             LocalConfiguration.current.screenHeightDp.dp.toPx()
         }
         val darkShell = LocalDarkTheme.current
-        Box(
-            Modifier
+        val drawerSurfaceColor = LocalDrawerSurfaceColor.current ?: MaterialTheme.colorScheme.surfaceContainerHigh
+        val drawerProgress = drawerState.visualProgress
+        Surface(
+            color = Color.Transparent,
+            modifier = Modifier
                 .fillMaxSize()
-                .then(
-                    if (darkShell) {
-                        Modifier.background(SolidColor(canvasTopColor))
-                    } else {
-                        Modifier.drawWithCache {
-                            val endY = (screenHeightPx - heldImeState.value).coerceAtLeast(1f)
-                            val gradient = Brush.verticalGradient(
-                                colors = listOf(canvasTopColor, canvasTint),
-                                startY = 0f,
-                                endY = endY,
-                            )
-                            onDrawBehind { drawRect(gradient) }
+                .drawWithCache {
+                    val keyboard = heldImeState.value
+                    val canvasHeight = (size.height - keyboard).coerceAtLeast(0f)
+                    val canvasSize = Size(size.width, canvasHeight)
+                    val keyboardTop = Offset(0f, canvasHeight)
+                    val keyboardSize = Size(size.width, size.height - canvasHeight)
+                    // Only the strip behind the IME can show the shell gradient.
+                    val keyboardGradient = if (canvasHeight < size.height && !darkShell) {
+                        Brush.verticalGradient(
+                            colors = listOf(surfaceColor, canvasTint),
+                            startY = 0f,
+                            endY = (screenHeightPx - keyboard).coerceAtLeast(1f),
+                        )
+                    } else null
+                    onDrawBehind {
+                        if (canvasHeight > 0f) {
+                            val backing = if (drawerState.isHomeExposed) drawerSurfaceColor else surfaceColor
+                            drawRect(color = backing, size = canvasSize)
                         }
-                    },
-                ),
+                        if (canvasHeight < size.height) {
+                            if (keyboardGradient == null) {
+                                drawRect(color = surfaceColor, topLeft = keyboardTop, size = keyboardSize)
+                            } else {
+                                drawRect(brush = keyboardGradient, topLeft = keyboardTop, size = keyboardSize)
+                            }
+                        }
+                    }
+                },
         ) {
-            // **抽屉在下、覆盖层在上**（用户：「新页不应该在页面都最上面移动的吗？」）：
-            // 覆盖层的 NavHost 必须画在自建抽屉宿主之上，否则从抽屉点进新页时，
-            // 页面只能在抽屉面板**下面**滑入 —— 用户看到的还是抽屉。现在抽屉不再关（见 open()），
-            // 新页从右侧滑进来时压着它，滑完就把抽屉盖住；返回时揭开的就是那份仍开着的抽屉。
-            Scaffold(
-                // **外壳不再按 IME 上缩**（用户：「侧边栏还是被顶起来」）：
-                // 这里原来是 `Modifier.padding(bottom = heldImePx)`，它把整个外壳 ——
-                // 包括抽屉面板 —— 一起顶上去，抽屉就被键盘挤短了。
-                // 现在键盘让位只作用在**聊天内容**上（见下面 ChatScreen 外层），
-                // 抽屉保持整屏高度。
-                // **底色不在这里铺**（见下面 Box 里那条背景）：0.8.229 把外壳改成整屏之后，
-                // 这里的 surface 会把键盘后面那条缝也涂上，键盘圆角里就露出一个比画布更白的色块。
-                containerColor = Color.Transparent,
-                // Screens own their top inset (their headers paint behind the status
-                // bar) and the composer owns the bottom one, so the scaffold reserves
-                // nothing for itself.
-                contentWindowInsets = WindowInsets(0, 0, 0, 0),
-            ) { padding ->
-            Box(Modifier.fillMaxSize().padding(padding)) {
-            // **底色只铺到键盘顶边为止**（0.8.229 的回归）：外壳改成整屏之后，Scaffold 的
-            // containerColor 会把键盘后面那条缝一起涂上，键盘圆角里于是露出一个比画布更白的
-            // 色块（用户：「输入法的圆角 色块怎么又回来了」）。这里把 surface 铺到画布底边
-            // （= 屏高 − IME）为止，下面那条缝留给根节点的渐变 —— 和 0.8.229 之前
-            // （外壳被 IME 顶起、那条缝根本不画）逐像素一致；键盘收起时 heldImePx=0，铺满全屏。
-            val surfaceColor = MaterialTheme.colorScheme.surface
-            // 抽屉打开时，主页缩放会在四周留出边距，露出的是**根底色**。
-            // 若根底色一直是 surface，那圈边距就是白的 —— 用户看到的「主页被套了个白框」。
-            // 所以让它随抽屉进度渐变到侧边栏底色（surfaceContainerHigh）：
-            // 主页四周露出的就变成"侧边栏"，与 DeepSeek 一致。
-            val drawerSurfaceColor = LocalDrawerSurfaceColor.current ?: MaterialTheme.colorScheme.surfaceContainerHigh
-            val closedBackgroundColor = remember(surfaceColor, drawerSurfaceColor) {
-                androidx.compose.ui.graphics.lerp(surfaceColor, drawerSurfaceColor, 0f)
-            }
-            val exposedBackgroundColor = remember(surfaceColor, drawerSurfaceColor) {
-                androidx.compose.ui.graphics.lerp(surfaceColor, drawerSurfaceColor, 1f)
-            }
-            val drawerProgress = drawerState.visualProgress
-            Box(
-                Modifier
-                    .matchParentSize()
-                    // **绘制期读**键盘高度与抽屉进度：只在 draw 阶段取值 ⇒ 动画期间既不重组也不重布局，
-                    // 但绘制范围仍按"画布底边 = 屏高 − IME"裁剪，键盘圆角里那圈色块不会回来。
-                    .drawBehind {
-                        val h = (size.height - heldImeState.value).coerceAtLeast(0f)
-                        // **一开始滑就切换**（用户：「滑动中还是没融合，刚滑的时候一点都不融合」）。
-                        // p*4 在起始阶段仍然很白（p=0.02 → 8%），所以看上去"刚滑时一点不融合"。
-                        // 改成阈值：只要抽屉动了一点，底色立刻就是侧边栏色。
-                        // 判 p=0 时页面完全盖住，切换看不出来；关闭动画回到 0 时同理。
-                        val bg = if (drawerState.isHomeExposed) exposedBackgroundColor else closedBackgroundColor
-                        drawRect(color = bg, size = androidx.compose.ui.geometry.Size(size.width, h))
-                    },
-            )
             // Match the route underneath a nested page: same depth, duration and easing. Layers
             // remain opaque so text from two different pages never crossfades together.
             Box(
@@ -595,15 +580,24 @@ fun SuixingApp() {
                 // 主页那层的变换（位移/缩放/圆角/阴影）在 content 的 graphicsLayer 里，见下。
                 drawerContent = {
                     // 侧边栏本体：宿主按 progress 平移这一层，才有跟手/回弹动画。
-                    val drawerVisible = drawerState.homeShieldActive && route == "empty"
-                    val drawerLifecycle = com.suixing.agent.ui.chat.rememberChatUiLifecycleOwner(drawerVisible)
-                    // Pause high-rate list updates, while retaining the header/avatar's normal preload.
+                    var drawerUpdatesAllowed by remember(drawerState) { mutableStateOf(!drawerState.isMoving) }
+                    LaunchedEffect(drawerState, route) {
+                        if (route == "empty") {
+                            drawerState.observeContentUpdates { drawerUpdatesAllowed = it }
+                        }
+                    }
+                    val drawerCanUpdate = route == "empty" && !drawerState.isMoving && drawerUpdatesAllowed
+                    val drawerLifecycle = com.suixing.agent.ui.chat.rememberChatUiLifecycleOwner(drawerCanUpdate)
                     val drawerConversations by chat.conversations.collectAsStateWithLifecycle(
                         lifecycleOwner = drawerLifecycle,
                     )
+                    val runningIds by remember {
+                        Core.engine.runsFlow.map { it.keys }.distinctUntilChanged()
+                    }.collectAsStateWithLifecycle(initialValue = emptySet<String>(), lifecycleOwner = drawerLifecycle)
                 Drawer(
                     open = remember(drawerState) { { drawerState.isOpen } },
                     route = route,
+                    dataLifecycle = drawerLifecycle,
                     conversations = drawerConversations,
                     activeId = activeConversationId,
                     runningId = runningIds,
@@ -668,7 +662,7 @@ fun SuixingApp() {
             ) {
                 // The panel, home transform, background and shield share one bounded progress.
                 // Read it only in the layer: chat keeps its layout and composition during motion.
-                // Home retains the accepted 300dp travel, 0.95 scale and constant screen corners.
+                // The outline eases back to a rectangle as the home layer reaches full screen.
                 val panelWidthPx = with(LocalDensity.current) { DRAWER_SHEET_WIDTH.dp.toPx() }
                 val homeShape = remember { RoundedCornerShape(SCREEN_CORNER_DP.dp) }
                 Box(
@@ -683,7 +677,12 @@ fun SuixingApp() {
                             shadowElevation = if (progress > 0f) 16.dp.toPx() else 0f
                             spotShadowColor = Color.Black.copy(alpha = 0.24f * progress)
                             ambientShadowColor = Color.Black.copy(alpha = 0.24f * progress)
-                            shape = homeShape
+                            val rounding = drawerHomeCornerFraction(progress)
+                            shape = when (rounding) {
+                                0f -> RectangleShape
+                                1f -> homeShape
+                                else -> RoundedCornerShape(SCREEN_CORNER_DP.dp * rounding)
+                            }
                             clip = progress > 0f
                         },
                 ) {
@@ -692,23 +691,13 @@ fun SuixingApp() {
                 // 三处 rememberSaveable 只救了状态、救不了重建。所以 chat 移出 NavHost、永远
                 // 留在组合里，其余页面改成**盖在它上面的覆盖层**：进设置是往覆盖层 push，
                 // 返回是把覆盖层 pop 掉 ⇒ 揭开的就是原来那份 chat，零重建、零重载。
-                // 键盘让位只作用在聊天内容上（抽屉不再被顶起，见上面 Scaffold 的说明）。
+                // 键盘让位只作用在聊天内容上，抽屉保持整屏高度。
                 // **不要在这里按 IME 缩高整棵聊天树**（IME 起落优化第 1 步）：
                 // `imePaddingBottom` 每帧改 Box 的高度约束 ⇒ Scaffold、Composer、整份列表
                 // 连同它们的布局修饰符链一起被重新测量（不重组 ≠ 不重测）。
                 // 现在整页保持满高，IME 只在聊天内部被消费一次：
                 // 输入框按 IME 做放置偏移，列表/空状态在**布局期**把键盘那一截让出来。
-                Box(
-                    Modifier.fillMaxSize().graphicsLayer {
-                        // Reuse the chat raster without caching the animated outer shadow.
-                        compositingStrategy = if (drawerState.isHomeExposed) {
-                            CompositingStrategy.Offscreen
-                        } else {
-                            CompositingStrategy.Auto
-                        }
-                    },
-                ) {
-                Box(Modifier.fillMaxSize().drawWithContent {
+                Box(Modifier.fillMaxSize().then(freezeChatDrawing).drawWithContent {
                     conversationHandoff.draw(
                         content = { this@drawWithContent.drawContent() },
                         record = {
@@ -728,9 +717,9 @@ fun SuixingApp() {
                     // 盖一层引导不能把常驻的 chat 拆了。
                     if (!(showOnboarding && onboardingIsFirstRun)) {
                         val chatVisible = route == "empty" && !showOnboarding && editorAssistantId == null
-                        val chatLifecycle = com.suixing.agent.ui.chat.rememberChatUiLifecycleOwner(chatVisible)
+                        val chatLifecycle = com.suixing.agent.ui.chat.rememberChatUiLifecycleOwner(chatVisible && !chatFrozen.value)
+                        ObserveConversationRead(chat, visible = chatVisible)
                         CompositionLocalProvider(androidx.lifecycle.compose.LocalLifecycleOwner provides chatLifecycle) {
-                            ObserveConversationRead(chat, visible = chatVisible)
                             ChatScreen(
                                 viewModel = chat,
                                 onOpenSettings = remember(open) { { open("settings") } },
@@ -742,7 +731,6 @@ fun SuixingApp() {
                     }
                 }
                 FrozenConversation(frozenConversation)
-                }
                 }
             }
             }
@@ -934,11 +922,9 @@ fun SuixingApp() {
                         // 聊天页整段重跑（分组、轮号、token 估算、行顶数组重建），主线程被占住，
                         // 这期间的点击只能排队。挪进 `DrawerBackHandler` 后，重组被限制在
                         // 那个只含 BackHandler 的小作用域里，外壳与聊天页不再跟着动。
-                        DrawerBackHandler(drawerState, route, closeDrawer)
-                    }
-                }
-            }
+            DrawerBackHandler(drawerState, route, closeDrawer)
         }
+    }
 
     // Rendered outside the navigation host so a prompt cannot be missed while the
     // user is on another screen — the agent is blocked until it is answered.

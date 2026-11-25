@@ -39,6 +39,7 @@ internal fun Modifier.chatTranscriptGesture(
                         // 横坐标也要记：只看 dy 会把侧滑时的纵向抖动当成阅读（§131）。
                         val downX = downPoint.x
                         val downAt = SystemClock.uptimeMillis()
+                        val followingAtBottom = scroll.stickToBottom && scroll.atBottom
                         pressed = true
                         // **不在这里 arm 守护**（跟手性）：原来每次按下都置 true，而
                         // 只有「没移动且短于长按阈值」才会立刻撤销 ⇒ **任何拖动手势之后
@@ -78,6 +79,15 @@ internal fun Modifier.chatTranscriptGesture(
                                 }
                             }
                             released = next.changes.none { it.pressed }
+                        }
+                        // Initial pass still sees the list's drag before its release handler.
+                        // A diagonal can move the LazyColumn before it qualifies as vertical.
+                        if (followingAtBottom && scroll.listState.isScrollInProgress &&
+                            gesture.markFollowCancelled(DragIntent.Idle, pressed = false,
+                                transcriptMoved = scroll.listState.canScrollForward)
+                        ) {
+                            scroll.allowBottomResume = true
+                            scroll.stickToBottom = false
                         }
                         pressed = false
                         pressUpAt = SystemClock.uptimeMillis()

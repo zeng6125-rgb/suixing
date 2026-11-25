@@ -1,6 +1,11 @@
 cmake_minimum_required(VERSION 3.18.1)
 project(suixing_terminal LANGUAGES CXX)
 
+set(SX_NATIVE_JOBS 1 CACHE STRING "Parallel jobs for the JNI build")
+set_property(GLOBAL APPEND PROPERTY JOB_POOLS sx_native=${SX_NATIVE_JOBS})
+set(CMAKE_JOB_POOL_COMPILE sx_native)
+set(CMAKE_JOB_POOL_LINK sx_native)
+
 add_library(suixing_terminal SHARED terminal_rust_jni.cpp terminal_core_jni.cpp)
 target_compile_features(suixing_terminal PRIVATE cxx_std_17)
 target_compile_options(suixing_terminal PRIVATE -Wall -Wextra -Werror -fwrapv)
@@ -66,8 +71,12 @@ if(NOT EXISTS "${SX_CLANG}")
 endif()
 string(TOUPPER "${SX_RUST_TARGET}" SX_TARGET_ENV)
 string(REPLACE "-" "_" SX_TARGET_ENV "${SX_TARGET_ENV}")
-set(SX_CARGO_TARGET_DIR "${CMAKE_CURRENT_BINARY_DIR}/cargo")
-set(SX_RUST_ARCHIVE "${SX_CARGO_TARGET_DIR}/${SX_RUST_TARGET}/release/libsuixing_search.a")
+# Cargo's cache is shared across equivalent CMake configurations. Ninja owns
+# its local copy so cleaning one variant cannot remove another variant's input.
+get_filename_component(SX_NDK_VERSION "${CMAKE_ANDROID_NDK}" NAME)
+set(SX_CARGO_TARGET_DIR "${SX_RUST_DIR}/target/android-ndk-${SX_NDK_VERSION}-api-${ANDROID_PLATFORM_LEVEL}")
+set(SX_CARGO_ARCHIVE "${SX_CARGO_TARGET_DIR}/${SX_RUST_TARGET}/release/libsuixing_search.a")
+set(SX_RUST_ARCHIVE "${CMAKE_CURRENT_BINARY_DIR}/libsuixing_search.a")
 file(GLOB_RECURSE SX_RUST_SOURCES CONFIGURE_DEPENDS "${SX_RUST_DIR}/src/*.rs")
 add_custom_command(
     OUTPUT "${SX_RUST_ARCHIVE}"
@@ -77,11 +86,13 @@ add_custom_command(
         "CARGO_TARGET_${SX_TARGET_ENV}_LINKER=${SX_CLANG}"
         "RUSTFLAGS=-C relocation-model=pic"
         "${SX_CARGO}" build --manifest-path "${SX_RUST_DIR}/Cargo.toml"
-        --release --locked --offline --target "${SX_RUST_TARGET}"
+        --release --locked --offline --jobs "${SX_NATIVE_JOBS}" --target "${SX_RUST_TARGET}"
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${SX_CARGO_ARCHIVE}" "${SX_RUST_ARCHIVE}"
     WORKING_DIRECTORY "${SX_RUST_DIR}"
     DEPENDS ${SX_RUST_SOURCES} "${SX_RUST_DIR}/Cargo.toml" "${SX_RUST_DIR}/Cargo.lock"
         "${SX_RUST_DIR}/rust-toolchain.toml"
     COMMENT "Building offline Rust file search for ${ANDROID_ABI}"
+    JOB_POOL sx_native
     VERBATIM)
 add_custom_target(suixing_search_rust_build DEPENDS "${SX_RUST_ARCHIVE}")
 add_library(suixing_search_rust STATIC IMPORTED)

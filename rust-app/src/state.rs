@@ -240,7 +240,7 @@ pub struct Conversation {
     pub metadata: crate::chat::ConversationMetadata,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToolCall {
     pub id: String,
     pub name: String,
@@ -252,7 +252,7 @@ fn default_tool_arguments() -> String {
     "{}".into()
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Message {
     pub id: String,
     pub role: String,
@@ -523,6 +523,10 @@ pub enum Action {
         conversation_id: String,
         assistant_id: Option<String>,
     },
+    SetConversationApproval {
+        conversation_id: String,
+        mode: crate::subagent_configuration::ApprovalMode,
+    },
     SetConversationModel {
         request_id: String,
         conversation_id: Option<String>,
@@ -587,6 +591,7 @@ pub enum Action {
     },
     ResumeGoal {
         goal_id: String,
+        conversation_id: Option<String>,
     },
     ClearGoal {
         goal_id: String,
@@ -1066,7 +1071,7 @@ impl Page {
             Self::Plugins => "插件",
             Self::Mcp => "MCP",
             Self::Assistants => "助手",
-            Self::Automations => "自动化",
+            Self::Automations => "UI自动化",
             Self::Schedules => "定时提醒",
             Self::Jobs => "后台作业",
         }

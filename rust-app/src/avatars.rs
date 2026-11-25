@@ -161,6 +161,7 @@ enum Work {
         request_id: String,
         path: String,
         namespace: PathBuf,
+        shared_files: Option<PathBuf>,
     },
     Decode {
         operation: OperationKey,
@@ -176,11 +177,13 @@ enum Work {
         namespace: PathBuf,
         root: PathBuf,
         active: std::collections::HashSet<String>,
+        shared_images: bool,
     },
     Save {
         operation: OperationKey,
         assistant_id: String,
         namespace: PathBuf,
+        shared_files: Option<PathBuf>,
         pixels: Arc<PixelFrame>,
         crop: Crop,
     },
@@ -242,8 +245,11 @@ impl Runtime {
                             request_id,
                             path,
                             namespace,
+                            shared_files,
                         } => {
-                            let result = load(&namespace, &path, &job.cancel).map(Arc::new);
+                            let result =
+                                load(&namespace, shared_files.as_deref(), &path, &job.cancel)
+                                    .map(Arc::new);
                             Done::Read {
                                 request_id,
                                 path,
@@ -293,18 +299,26 @@ impl Runtime {
                             namespace,
                             root,
                             active,
+                            shared_images,
                         } => Done::Maintain {
-                            result: gc::collect(&namespace, &root, &active),
+                            result: gc::collect(&namespace, &root, &active, shared_images),
                         },
                         Work::Save {
                             operation,
                             assistant_id,
                             namespace,
+                            shared_files,
                             pixels,
                             crop,
                         } => {
-                            let result =
-                                save(&namespace, &assistant_id, &pixels, crop, &job.cancel);
+                            let result = save(
+                                &namespace,
+                                shared_files.as_deref(),
+                                &assistant_id,
+                                &pixels,
+                                crop,
+                                &job.cancel,
+                            );
                             Done::Save {
                                 operation,
                                 assistant_id,
@@ -380,6 +394,7 @@ impl Runtime {
                             request_id: request_id.clone(),
                             path: path.clone(),
                             namespace: store.avatar_namespace(),
+                            shared_files: store.shared_avatar_root().map(Path::to_owned),
                         },
                         generation: generation.clone(),
                         cancel: cancel.clone(),
@@ -448,6 +463,7 @@ impl Runtime {
                     operation,
                     assistant_id: source.assistant_id.clone(),
                     namespace: source.namespace.clone(),
+                    shared_files: store.shared_avatar_root().map(Path::to_owned),
                     pixels: source.pixels.clone(),
                     crop,
                 };
@@ -750,9 +766,11 @@ impl Runtime {
                         .iter()
                         .map(|(operation, _)| operation.id.clone()),
                 );
+                let namespace = store.avatar_namespace();
                 let job = Job {
                     work: Work::Maintain {
-                        namespace: store.avatar_namespace(),
+                        shared_images: store.shared_avatar_root() == Some(namespace.as_path()),
+                        namespace,
                         root: store.avatar_document_root(),
                         active,
                     },
@@ -852,7 +870,7 @@ fn directory(root: &Path, name: &str) -> Result<PathBuf, String> {
     }
     Ok(target)
 }
-fn native_read(namespace: &Path, path: &str) -> Result<Vec<u8>, String> {
+pub(crate) fn native_read(namespace: &Path, path: &str) -> Result<Vec<u8>, String> {
     validate_path(path)?;
     let parent = namespace.join("assistants");
     let metadata = fs::symlink_metadata(&parent).map_err(|_| "助手图片目录不存在")?;
@@ -918,14 +936,22 @@ fn base64(bytes: &[u8]) -> String {
     }
     out
 }
-fn load(namespace: &Path, path: &str, cancel: &CancelToken) -> Result<PixelFrame, String> {
+fn load(
+    namespace: &Path,
+    shared_files: Option<&Path>,
+    path: &str,
+    cancel: &CancelToken,
+) -> Result<PixelFrame, String> {
     validate_path(path)?;
     if cancel.is_cancelled() {
         return Err("头像读取已取消".into());
     }
-    let native = namespace.join(path);
+    let files = shared_files
+        .filter(|root| root.join(path).exists())
+        .unwrap_or(namespace);
+    let native = files.join(path);
     let bytes = match fs::symlink_metadata(&native) {
-        Ok(_) => native_read(namespace, path)?,
+        Ok(_) => native_read(files, path)?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             let catalog = crate::legacy_migration::archive_catalog(namespace)?
                 .ok_or("没有可读取的旧头像归档")?;
@@ -965,6 +991,7 @@ fn load(namespace: &Path, path: &str, cancel: &CancelToken) -> Result<PixelFrame
 }
 fn save(
     namespace: &Path,
+    shared_files: Option<&Path>,
     assistant_id: &str,
     pixels: &PixelFrame,
     crop: Crop,
@@ -1037,13 +1064,18 @@ fn save(
     if cancel.is_cancelled() {
         return Err("头像保存已取消，原头像保留".into());
     }
-    let directory = directory(namespace, "assistants")?;
+    let files = shared_files.unwrap_or(namespace);
+    let directory = directory(files, "assistants")?;
     let relative = format!(
         "assistants/{assistant_id}-{}.png",
         crate::controller::unique_id()
     );
-    gc::admit_save(namespace, &relative, bytes.len())?;
-    let path = namespace.join(&relative);
+    // Shared paths may also be referenced by Compose. The Rust-only collector
+    // and its quota apply to the private store.
+    if shared_files.is_none() {
+        gc::admit_save(namespace, &relative, bytes.len())?;
+    }
+    let path = files.join(&relative);
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -1061,7 +1093,7 @@ fn save(
     file.sync_all()
         .map_err(|_| "头像文件同步失败，原头像保留")?;
     drop(file);
-    let verified = native_read(namespace, &relative)?;
+    let verified = native_read(files, &relative)?;
     if verified != bytes {
         return Err("头像新文件读回不一致，原头像保留".into());
     }

@@ -58,11 +58,23 @@ class ChatRepositoryColdReadTest {
         seed(store)
         val (repository, lock) = repositoryWithLockedWriter()
         try {
-            // 对照断言：readWire 要先拿锁固定日志快照 ⇒ 占锁期间必然拿不到结果。
-            // 这条若不成立，下面那句「通过」就说明不了任何事（锁其实没挡住任何路径）。
-            assertNull(withTimeoutOrNull(300) { repository.readWire("chat") })
+            // The full-history API still takes the writer lock.
+            assertNull(withTimeoutOrNull(300) { repository.readAll("chat") })
             val window = withTimeout(5_000) { repository.readTailWindow("chat", 1) }
             assertEquals(messages.takeLast(2), window!!.first.messages)
+        } finally {
+            lock.unlock()
+        }
+    }
+
+    @Test fun `wire history opens a committed generation while another chat is saving`() = runBlocking {
+        seed(ChatStore(File(folder.root, "chats")))
+        val (repository, lock) = repositoryWithLockedWriter()
+        try {
+            val cold = withTimeout(2_000) { repository.readWire("chat") }
+            assertEquals(messages, cold.messages)
+            val indexed = withTimeout(2_000) { repository.readWire("chat") }
+            assertEquals(cold, indexed)
         } finally {
             lock.unlock()
         }

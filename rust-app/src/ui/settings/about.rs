@@ -137,18 +137,21 @@ impl View {
             }
         }
     }
-    fn link(&mut self, ui: &mut egui::Ui, label: &str, url: String) {
-        if ui
-            .add_enabled(
-                self.pending.is_none() && self.requested.is_none(),
-                egui::Button::new(label),
-            )
-            .clicked()
-        {
+    fn link(&mut self, ui: &mut egui::Ui, label: &str, subtitle: &str, url: String) {
+        let ready = self.pending.is_none() && self.requested.is_none();
+        let clicked = ui
+            .add_enabled_ui(ready, |ui| super::controls::link(ui, label, subtitle))
+            .inner;
+        if clicked {
             self.requested = Some(Work::Open(url));
         }
     }
-    pub(super) fn show(&mut self, ui: &mut egui::Ui, backend: &str) {
+    pub(super) fn show(
+        &mut self,
+        ui: &mut egui::Ui,
+        brand: egui::TextureHandle,
+        assets: &mut crate::plugin_assets::bundled::View,
+    ) {
         if self.version.is_none()
             && self.pending.is_none()
             && self.requested.is_none()
@@ -156,30 +159,67 @@ impl View {
         {
             self.requested = Some(Work::Version);
         }
-        ui.heading("JAgent");
-        if let Some(version) = &self.version {
-            ui.label(format!(
-                "版本 {}{}",
-                version.name,
-                version
-                    .code
-                    .map(|code| format!("（{code}）"))
-                    .unwrap_or_default()
-            ));
-        } else {
-            ui.label("读取应用版本…");
-        }
-        ui.label(format!("图形后端：{backend}"));
-        if ui
-            .add_enabled(
-                self.version.is_some() && self.pending.is_none() && self.requested.is_none(),
-                egui::Button::new("检查更新"),
-            )
-            .clicked()
-        {
-            self.requested = Some(Work::Release);
-            self.notice = None;
-        }
+        super::controls::card(ui, 16).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.add(egui::Image::new((brand.id(), egui::vec2(44.0, 44.0))));
+                ui.add_space(4.0);
+                ui.vertical(|ui| {
+                    super::controls::text(ui, "JAgent", 18.0, 25.0, ui.visuals().text_color());
+                    let version = self
+                        .version
+                        .as_ref()
+                        .map(|version| format!("v{}", version.name))
+                        .unwrap_or_else(|| "读取应用版本…".into());
+                    super::controls::description(ui, &version);
+                });
+            });
+            ui.add_space(12.0);
+            super::controls::description(
+                ui,
+                "跟着你走的手机智能体：说一句话，它就能读屏、点按、跑命令、翻文件。",
+            );
+        });
+        ui.add_space(12.0);
+        super::controls::card(ui, 0).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.add_space(16.0);
+            let ready =
+                self.version.is_some() && self.pending.is_none() && self.requested.is_none();
+            if ui
+                .add_enabled_ui(ready, |ui| {
+                    super::controls::link(ui, "检查更新", "查看最新正式版本与更新说明")
+                })
+                .inner
+            {
+                self.requested = Some(Work::Release);
+                self.notice = None;
+            }
+            if let Some(version) = &self.version {
+                let mut url = reqwest::Url::parse(&format!("{REPOSITORY}/issues/new"))
+                    .expect("constant repository URL");
+                url.query_pairs_mut().append_pair(
+                    "body",
+                    &format!(
+                        "版本：{}\n\n问题描述：\n\n复现步骤：\n1. \n\n期望表现：\n\n实际表现：\n",
+                        version.name
+                    ),
+                );
+                self.link(
+                    ui,
+                    "问题反馈",
+                    "填写复现步骤，提交前可自行检查内容",
+                    url.to_string(),
+                );
+            }
+            self.link(
+                ui,
+                "源代码仓库",
+                "源码、构建说明与项目文档",
+                REPOSITORY.into(),
+            );
+            ui.add_space(16.0);
+        });
         if self.pending.is_some() {
             ui.spinner();
             ui.label("正在处理…");
@@ -204,48 +244,72 @@ impl View {
             ui.collapsing("更新说明", |ui| {
                 ui.add(egui::Label::new(&release.notes).wrap().selectable(true));
             });
-            self.link(ui, "打开官方发布页", url);
+            self.link(ui, "打开官方发布页", "更新说明与安装文件", url);
         } else if self.checked {
             ui.label("官方仓库暂无可用的正式版本");
         }
-        if let Some(version) = &self.version {
-            let mut url = reqwest::Url::parse(&format!("{REPOSITORY}/issues/new"))
-                .expect("constant repository URL");
-            url.query_pairs_mut().append_pair(
-                "body",
-                &format!(
-                    "版本：{}\n\n问题描述：\n\n复现步骤：\n1. \n\n期望表现：\n\n实际表现：\n",
-                    version.name
-                ),
+        ui.add_space(12.0);
+        super::controls::card(ui, 16).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            super::controls::text(ui, "隐私", 18.0, 25.0, ui.visuals().text_color());
+            ui.add_space(8.0);
+            super::controls::description(
+                ui,
+                "回答由你自己配置的模型服务提供；对话、记忆与密钥保存在这台手机上。",
             );
-            self.link(ui, "问题反馈", url.to_string());
-        }
-        self.link(ui, "源代码仓库", REPOSITORY.into());
-        self.link(ui, "所有版本", format!("{REPOSITORY}/releases"));
-        ui.separator();
-        ui.label("会话、记忆和工作区保存在应用目录；配置的模型、转写、搜索、MCP或插件服务按用户操作接收对应数据。Key由系统Keystore加密保存。");
-        ui.collapsing("开源许可", |ui| {
-            ui.add(
-                egui::Label::new(include_str!("../../../../THIRD_PARTY_NOTICES.md"))
-                    .wrap()
-                    .selectable(true),
+            ui.add_space(8.0);
+            super::controls::description(
+                ui,
+                "API Key 使用系统 Keystore 加密保存，只发送给你配置的对应服务。",
             );
         });
-        self.link(
-            ui,
-            "Aether 扶摇 · 配色与排版参考",
-            "https://github.com/Zhou-Shilin/Aether".into(),
-        );
-        self.link(
-            ui,
-            "Operit · 能力与交互参考",
-            "https://github.com/AAswordman/Operit".into(),
-        );
-        self.link(
-            ui,
-            "Model Context Protocol",
-            "https://modelcontextprotocol.io/".into(),
-        );
+        ui.add_space(12.0);
+        super::controls::card(ui, 0).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            egui::Frame::NONE.inner_margin(16).show(ui, |ui| {
+                super::controls::text(ui, "开源与致谢", 18.0, 25.0, ui.visuals().text_color());
+                ui.add_space(8.0);
+                super::controls::description(ui, "图标：Lucide（ISC License）");
+            });
+            self.link(
+                ui,
+                "Aether 扶摇",
+                "配色与排版的参考",
+                "https://github.com/Zhou-Shilin/Aether".into(),
+            );
+            self.link(
+                ui,
+                "Operit",
+                "能力清单与交互约定的参考",
+                "https://github.com/AAswordman/Operit".into(),
+            );
+            self.link(
+                ui,
+                "Model Context Protocol",
+                "MCP 协议规范",
+                "https://modelcontextprotocol.io/".into(),
+            );
+            ui.add_space(16.0);
+        });
+        ui.add_space(12.0);
+        super::controls::card(ui, 16).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.collapsing("开源许可", |ui| {
+                ui.add(
+                    egui::Label::new(include_str!("../../../../THIRD_PARTY_NOTICES.md"))
+                        .wrap()
+                        .selectable(true),
+                );
+                assets.show_licenses(ui);
+            });
+            self.link(
+                ui,
+                "所有版本",
+                "已发布版本与源码",
+                format!("{REPOSITORY}/releases"),
+            );
+        });
+        ui.add_space(24.0);
         if let Some(notice) = &self.notice {
             ui.colored_label(ui.visuals().error_fg_color, notice);
         }

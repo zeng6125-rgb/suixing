@@ -20,6 +20,15 @@ abstract class RustAndroidGlue : Exec() {
 }
 
 val rustProduction = path == ":app"
+val rustAbi = providers.gradleProperty("rustAbi").orNull
+val targets = linkedMapOf(
+    "arm64-v8a" to ("aarch64-linux-android" to "aarch64-linux-android"),
+    "armeabi-v7a" to ("armv7-linux-androideabi" to "armv7a-linux-androideabi"),
+    "x86" to ("i686-linux-android" to "i686-linux-android"),
+    "x86_64" to ("x86_64-linux-android" to "x86_64-linux-android"),
+)
+require(rustAbi == null || rustAbi in targets) { "Unsupported rustAbi: $rustAbi" }
+val selectedTargets = targets.filterKeys { rustAbi == null || it == rustAbi }
 
 val rustNdkVersion = "28.2.13676358"
 android {
@@ -30,6 +39,7 @@ android {
         applicationId = if (rustProduction) "com.suixing.agent" else "com.suixing.agent.rust"
         minSdk = 26
         targetSdk = 37
+        rustAbi?.let { ndk.abiFilters.add(it) }
         versionCode = if (rustProduction) providers.gradleProperty("jagent.versionCode").get().toInt() else 1
         versionName = if (rustProduction) providers.gradleProperty("jagent.versionName").get() else "0.1.0"
         manifestPlaceholders["jagentLabel"] = if (rustProduction) "JAgent" else "JAgent Rust"
@@ -72,14 +82,7 @@ val nativeHost = if (isWindows) "windows-x86_64" else if (OperatingSystem.curren
 val rustSource = layout.projectDirectory.file("Cargo.toml")
 val rustOutput = layout.buildDirectory.dir("cargo")
 val sdkRoot = androidComponents.sdkComponents.sdkDirectory
-// `-PrustAbi=x86_64` builds one ABI only; emulator iteration does not need the other three.
-val rustAbi = providers.gradleProperty("rustAbi").orNull
-val targets = linkedMapOf(
-    "arm64-v8a" to ("aarch64-linux-android" to "aarch64-linux-android"),
-    "armeabi-v7a" to ("armv7-linux-androideabi" to "armv7a-linux-androideabi"),
-    "x86" to ("i686-linux-android" to "i686-linux-android"),
-    "x86_64" to ("x86_64-linux-android" to "x86_64-linux-android"),
-).filterKeys { rustAbi == null || it == rustAbi }
+val rustBuildJobs = gradle.startParameter.maxWorkerCount.coerceIn(1, 4).toString()
 val compileRustLibraries = tasks.register<RustAndroidCompile>("compileRustLibrariesRelease") {
     group = "build"
     description = "Compile and link the Rust application for the four Android ABIs."
@@ -92,17 +95,17 @@ val compileRustLibraries = tasks.register<RustAndroidCompile>("compileRustLibrar
         rootProject.file("app/src/main/res/drawable-xxxhdpi/brand_mark_round.png"),
         file("src/ui/chat-icons.png"),
     )
-    val outputLibraries = targets.mapValues { (_, pair) ->
+    val outputLibraries = selectedTargets.mapValues { (_, pair) ->
         rustOutput.map { it.file("${pair.first}/release/libsuixing_rust_app.so") }
     }
     outputs.files(outputLibraries.values)
-    jniDirectory.set(layout.buildDirectory.dir("generated/rustJniRelease"))
+    jniDirectory.set(layout.buildDirectory.dir("generated/rustJniRelease/${rustAbi ?: "all"}"))
     workingDir(projectDir)
     doFirst {
         val ndk = sdkRoot.get().dir("ndk/$rustNdkVersion").asFile
         val tools = ndk.resolve("toolchains/llvm/prebuilt/$nativeHost/bin")
         val archiver = tools.resolve("llvm-ar${if (isWindows) ".exe" else ""}")
-        targets.values.forEach { (target, clangTarget) ->
+        selectedTargets.values.forEach { (target, clangTarget) ->
             val clang = tools.resolve("${clangTarget}26-clang${if (isWindows) ".cmd" else ""}")
             check(clang.isFile) { "The prepared NDK compiler is missing: $clang" }
             environment("CARGO_TARGET_${target.uppercase().replace('-', '_')}_LINKER", clang.absolutePath)
@@ -116,8 +119,8 @@ val compileRustLibraries = tasks.register<RustAndroidCompile>("compileRustLibrar
     commandLine(
         listOf("rustup", "run", "1.100.0", "cargo", "build", "--manifest-path", rustSource.asFile.absolutePath,
             "--release", "--locked", "--offline", "--target-dir", rustOutput.get().asFile.absolutePath,
-            "--jobs", gradle.startParameter.maxWorkerCount.coerceIn(1, 4).toString()) +
-            targets.values.flatMap { (target, _) -> listOf("--target", target) },
+            "--jobs", rustBuildJobs) +
+            selectedTargets.values.flatMap { (target, _) -> listOf("--target", target) },
     )
     doLast {
         outputLibraries.forEach { (abi, outputLibrary) ->
@@ -153,6 +156,7 @@ val generateRustAndroidGlue = tasks.register<RustAndroidGlue>("generateRustAndro
         commandLine("rustup", "run", "1.100.0", "cargo", "run", "--manifest-path",
             file("android-glue/Cargo.toml").absolutePath, "--release", "--locked", "--offline",
             "--target-dir", layout.buildDirectory.dir("androidGlueRunner").get().asFile.absolutePath,
+            "--jobs", rustBuildJobs,
             "--", "--output", classesDirectory.get().asFile.absolutePath,
             "--package", "com.suixing.agent.rust.platform", "--library", "suixing_rust_app")
     }

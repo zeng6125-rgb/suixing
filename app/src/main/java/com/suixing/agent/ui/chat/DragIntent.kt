@@ -62,9 +62,10 @@ internal class DragGestureState {
         return true
     }
 
-    /** 首次纵向判定返回 true（哪怕此前已 [markMoved]）；每次手势最多一次。 */
-    fun markFollowCancelled(intent: DragIntent, pressed: Boolean): Boolean {
-        if (followCancelled || !pressed || intent != DragIntent.VerticalScroll) return false
+    /** Stop following on vertical intent, or when a diagonal drag actually left the bottom. */
+    fun markFollowCancelled(intent: DragIntent, pressed: Boolean, transcriptMoved: Boolean = false): Boolean {
+        if (followCancelled) return false
+        if (!(pressed && intent == DragIntent.VerticalScroll) && !(moved && transcriptMoved)) return false
         followCancelled = true
         return true
     }

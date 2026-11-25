@@ -385,7 +385,7 @@ fn conversation(
 /// Candidate selections identify a question and a run. A repeated question ID
 /// is safe to move only when one physical turn owns that selection. Checkpoint
 /// endpoints carry no occurrence, so an ambiguous range cannot be replayed.
-fn remap_conversation_references(
+pub(crate) fn remap_conversation_references(
     metadata: &mut crate::chat::ConversationMetadata,
     messages: &[Message],
 ) -> Result<usize, String> {
@@ -545,7 +545,7 @@ fn decode_messages(values: &[Value]) -> Result<Vec<Message>, String> {
     }
     Ok(messages)
 }
-fn settings(
+pub(crate) fn settings(
     value: &Value,
     cipher: &dyn SecretCipher,
     warnings: &mut Vec<String>,

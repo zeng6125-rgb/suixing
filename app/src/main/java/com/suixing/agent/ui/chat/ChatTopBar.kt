@@ -38,6 +38,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.PlatformTextStyle
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.IntSize
@@ -50,6 +51,8 @@ import com.suixing.agent.ui.components.LocalOpenSidebar
 import com.suixing.agent.ui.components.MenuCard
 import com.suixing.agent.ui.components.MenuItemRow
 import com.suixing.agent.ui.components.PressPill
+
+private enum class ChatOverflow { Open, Dismissed, Navigating }
 
 /**
  * The chat header: drawer handle on the left, the conversation's name in the middle,
@@ -67,7 +70,7 @@ internal fun ChatTopBar(
     contextEntry: (@Composable RowScope.() -> Unit)? = null,
 ) {
     val openDrawer = LocalOpenSidebar.current
-    var menuOpen by remember { mutableStateOf(false) }
+    var overflow by remember { mutableStateOf(ChatOverflow.Dismissed) }
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -128,17 +131,20 @@ internal fun ChatTopBar(
                     // drawables carry a black android:tint, so pass the theme action ink
                     // explicitly, matching FlatPainterButton and page-header actions.
                     CapsuleAction(
-                        painter = painterResource(R.drawable.ic_compose),
+                        painter = painterResource(R.drawable.ic_square_pen),
                         description = "新对话",
                         onClick = onNew,
+                        glyphSize = 18.dp,
                     )
                     CapsuleAction(
                         painter = painterResource(R.drawable.ic_more_vertical),
                         description = "更多",
-                        onClick = { menuOpen = true },
+                        onClick = { overflow = ChatOverflow.Open },
                     )
                 }
             }
+            // Navigation covers a chat that stays composed. Remove its popup window on that frame.
+            if (overflow == ChatOverflow.Navigating) return@Box
             val density = LocalDensity.current
             // Remembered: a fresh provider on every recomposition would re-run the popup's
             // positioning while the card is open (see ChatContext.kt's ringProvider).
@@ -162,8 +168,8 @@ internal fun ChatTopBar(
                 }
             }
             MenuCard(
-                visible = menuOpen,
-                onDismiss = { menuOpen = false },
+                visible = overflow == ChatOverflow.Open,
+                onDismiss = { overflow = ChatOverflow.Dismissed },
                 alignment = Alignment.TopEnd,
                 offset = IntOffset.Zero,
                 popupPositionProvider = belowCapsule,
@@ -177,7 +183,7 @@ internal fun ChatTopBar(
                     icon = ImageVector.vectorResource(R.drawable.ic_globe),
                     label = "内置浏览器",
                     onClick = {
-                        menuOpen = false
+                        overflow = ChatOverflow.Navigating
                         onOpenBrowser()
                     },
                 )
@@ -185,14 +191,17 @@ internal fun ChatTopBar(
                     MenuItemRow(
                         icon = ImageVector.vectorResource(R.drawable.ic_bot),
                         label = "查看子智能体",
-                        onClick = { menuOpen = false; view() },
+                        onClick = {
+                            overflow = ChatOverflow.Navigating
+                            view()
+                        },
                     )
                 }
                 MenuItemRow(
                     icon = ImageVector.vectorResource(R.drawable.ic_terminal),
                     label = "打开终端",
                     onClick = {
-                        menuOpen = false
+                        overflow = ChatOverflow.Navigating
                         onOpenTerminal()
                     },
                 )
@@ -214,6 +223,7 @@ private fun CapsuleAction(
     painter: Painter,
     description: String,
     onClick: () -> Unit,
+    glyphSize: Dp = 22.dp,
 ) {
     Box(
         modifier = Modifier
@@ -230,7 +240,7 @@ private fun CapsuleAction(
             painter = painter,
             contentDescription = description,
             tint = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.size(20.dp),
+            modifier = Modifier.size(glyphSize),
         )
     }
 }

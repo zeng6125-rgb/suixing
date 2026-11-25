@@ -6,6 +6,30 @@ use crate::{
     schedules::{Plan, Schedule, SystemLocalClock},
 };
 
+const PRIVATE_LIMIT: u64 = 16 * 1024 * 1024;
+
+pub(super) fn load(
+    root: &Path,
+    shared_files: Option<&Path>,
+) -> Result<(Vec<Schedule>, ScheduleExecution), String> {
+    match shared_files {
+        Some(files) => shared_schedules::load(root, files),
+        None => load_private(root),
+    }
+}
+
+pub(super) fn load_private(root: &Path) -> Result<(Vec<Schedule>, ScheduleExecution), String> {
+    match optional_json::<ScheduleDocument>(root, &root.join("schedules.json"), PRIVATE_LIMIT)? {
+        Some(document) => {
+            version(document.version)?;
+            crate::schedules::validate_board(&document.schedules)?;
+            document.execution.validate()?;
+            Ok((document.schedules, document.execution))
+        }
+        None => Ok((Vec::new(), ScheduleExecution::default())),
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum FirePhase {
     Claimed,
@@ -112,7 +136,7 @@ impl Store {
                 .collect(),
         }
     }
-    fn save_schedule_state(
+    pub(super) fn save_schedule_state(
         &mut self,
         schedules: Vec<Schedule>,
         execution: ScheduleExecution,
@@ -120,16 +144,25 @@ impl Store {
         self.writable()?;
         crate::schedules::validate_board(&schedules)?;
         execution.validate()?;
+        if let Some(files) = self.shared_files_root.as_deref() {
+            if let Err(failure) =
+                shared_schedules::save(&self.root, files, &self.schedules, &schedules, &execution)
+            {
+                if failure.replaced {
+                    self.write_blocked = Some(failure.message.clone());
+                }
+                return Err(failure.message);
+            }
+            self.schedules = schedules;
+            self.schedule_execution = execution;
+            return Ok(());
+        }
         let document = ScheduleDocument {
             version: VERSION,
             schedules,
             execution,
         };
-        self.persist(
-            &self.root.join("schedules.json"),
-            &document,
-            16 * 1024 * 1024,
-        )?;
+        self.persist(&self.root.join("schedules.json"), &document, PRIVATE_LIMIT)?;
         self.schedules = document.schedules;
         self.schedule_execution = document.execution;
         Ok(())

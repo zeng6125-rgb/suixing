@@ -68,6 +68,7 @@ import com.suixing.agent.ui.drawer.drawerScrollPriority
 import com.suixing.agent.ui.components.bottomInsetPadding
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusRequester
@@ -81,6 +82,7 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.onVisibilityChanged
+import androidx.compose.ui.layout.Layout
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
@@ -370,6 +372,8 @@ internal fun TimeLabel(timestamp: Long) {
     )
 }
 
+private val ComposerPillShape = RoundedCornerShape(24.dp)
+
 @Composable
 internal fun Composer(
     input: String,
@@ -506,6 +510,7 @@ internal fun Composer(
     val keyboardController = LocalSoftwareKeyboardController.current
     val focusManager = LocalFocusManager.current
     val goalFocus = remember { FocusRequester() }
+    val latestInput = rememberUpdatedState(input)
     // The field keeps its own selection so an external write (the goal prefix, a restored
     // queued line) can land the caret at the end instead of leaving it before the text.
     var field by remember { mutableStateOf(TextFieldValue(input, TextRange(input.length))) }
@@ -515,6 +520,12 @@ internal fun Composer(
     val commandEnd = remember(field.text) { slashTokenEnd(field.text) }
     val commandTint = remember(commandEnd, scheme.primary) {
         FileReferenceTransformation(scheme.primary, commandEnd)
+    }
+    val fieldStyle = remember(fieldTextStyle, scheme.onSurface) {
+        fieldTextStyle.copy(color = scheme.onSurface)
+    }
+    val placeholderStyle = remember(fieldTextStyle, scheme.onSurfaceVariant) {
+        fieldTextStyle.copy(color = scheme.onSurfaceVariant)
     }
     val fieldLines = remember { androidx.compose.runtime.mutableIntStateOf(1) }
     val fieldLineHeightPx = with(LocalDensity.current) { fieldTextStyle.lineHeight.toPx() }
@@ -541,18 +552,28 @@ internal fun Composer(
     // The goal command lives in the add menu, not as a permanent icon: it is occasional
     // configuration and the row's space belongs to typing and sending. Existing text becomes
     // the goal verbatim; an empty field gets the prefix.
-    val startGoal: () -> Unit = {
-        val trimmed = input.trim()
-        if (trimmed.isEmpty()) {
-            onInput("/goal ")
-        } else if (!trimmed.startsWith("/goal")) {
-            onInput("/goal " + trimmed)
+    val startGoal: () -> Unit = remember(onInput, goalFocus, latestInput) {
+        {
+            val trimmed = latestInput.value.trim()
+            if (trimmed.isEmpty()) {
+                onInput("/goal ")
+            } else if (!trimmed.startsWith("/goal")) {
+                onInput("/goal " + trimmed)
+            }
+            goalFocus.requestFocus()
         }
-        goalFocus.requestFocus()
     }
-    val dismissKeyboard = {
-        keyboardController?.hide()
-        focusManager.clearFocus()
+    val dismissKeyboard: () -> Unit = remember(keyboardController, focusManager) {
+        {
+            keyboardController?.hide()
+            focusManager.clearFocus()
+        }
+    }
+    val editGoal: (String) -> Unit = remember(onInput, goalFocus) {
+        { text ->
+            onInput("/goal $text")
+            goalFocus.requestFocus()
+        }
     }
     val density = LocalDensity.current
     // The window's own width, which is what a popup has to fit inside. `screenWidthDp` is the
@@ -633,7 +654,7 @@ internal fun Composer(
             .padding(top = 6.dp, bottom = COMPOSER_BOTTOM_PAD)
             .onSizeChanged { size -> onHeightChanged(with(density) { size.height.toDp() }) },
     ) {
-        Column {
+        Layout(content = {
             // 「回到最新」按钮**不在这里**（用户报的「往上滑一点点就跳」）：它原来在本列里占
             // 48dp + 12dp，一出现就把 composer 撑高 60dp ⇒ 底部让位跟着变大 ⇒ 整条转录被顶上去
             // 60dp。现在画在 composer 之外的兄弟节点上（见 ChatScreen 里的 jumpToLatest 浮钮），
@@ -642,154 +663,25 @@ internal fun Composer(
             // where the answer is going to appear. Pinned above the pill it read as a
             // second, competing status area — and it carried no clock, so the wait looked
             // untimed while the user was staring at it.
-            if (goal != null) {
-                GoalChip(
-                    goal = goal,
-                    running = running,
-                    onEdit = {
-                        onInput("/goal ${goal.text}")
-                        goalFocus.requestFocus()
-                    },
-                    onResume = onResumeGoal.takeIf {
-                        !running && (goal.status == GoalStatus.PAUSED || goal.status == GoalStatus.BLOCKED)
-                    },
-                    onClear = onClearGoal,
-                    modifier = Modifier.padding(horizontal = STEER_QUEUE_INSET),
-                )
-                Spacer(Modifier.height(3.dp))
-            }
-            // 多附件一排：每张 chip 可单独删（onRemoveAttachment 报下标），横向可滚 —— 不限张数时
-            // 一排装不下也不能把 composer 撑高。
-            if (attachments.isNotEmpty()) {
-                val attachmentScroll = rememberScrollState()
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(start = STEER_QUEUE_INSET)
-                        .drawerScrollPriority { delta ->
-                            if (delta < 0f) attachmentScroll.canScrollForward else attachmentScroll.canScrollBackward
-                        }
-                        .horizontalScroll(attachmentScroll),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    attachments.forEachIndexed { index, item ->
-                        AttachmentChip(attachment = item, onRemove = { onRemoveAttachment(index) })
-                    }
-                }
-                Spacer(Modifier.height(8.dp))
-            }
-            // The agent's own board, above the queue: what it is doing right now, then what the
-            // user has queued for it. Same inset and spacing as the queue rows below, because
-            // they answer the same question — "what is going on" — and a board in different
-            // clothes would read as another app's card.
-            //
-            // Keep the last board available after the reply. Starting the next run clears it.
-            if (todos.isNotEmpty()) {
-                // **remember**：`todoBoard` 每按一次键都会被重建，所以只按看板本身重算。
-                // 它现在一次扫描同时给出三行和完成数（原来是 filterNot 一遍 + count 一遍）。
-                // `TodoItem` 字段全是 String/枚举 ⇒ stable，键比较很便宜。
-                val board = remember(todos) { todoBoard(todos) }
-                val rows = board.first
-                val done = board.second
-                // 一行，只一行：进行中的那条（没有就取第一条待办），右边是完成数/总数。用户的话：
-                // 「不要堆多行，就一行就行了」——整条清单改由点击这一行打开（见 TodoSheet）。
-                val current = rows.firstOrNull { it.status == TODO_IN_PROGRESS } ?: rows.firstOrNull()
-                if (current != null) {
-                    // 与排队行同一个内缩：它们同属「输入框上方那一列」，宽度必须一致。
-                    Box(Modifier.padding(horizontal = STEER_QUEUE_INSET)) {
-                        TodoQueueRow(
-                            item = current,
-                            tally = "$done/${todos.size}",
-                            onClick = onOpenTodos,
-                        )
-                    }
-                }
-                // Tight to what follows, exactly as the queue is: these rows belong to the field
-                // they sit above, not to the transcript behind them.
-                Spacer(Modifier.height(3.dp))
-            }
-            // Queued lines sit directly above the field they came from: the user's own words
-            // on their way to the model, not messages yet — so they are inset from the pill
-            // (visibly narrower than it, which is what stops them reading as part of it) and
-            // each one carries its own actions as icons.
-            // 排队 turns first: they are the ones that have not gone anywhere yet, so they sit
-            // closest to the field they will be sent from. Without this row the user pressed 插话
-            // again and again — the line left the field with nothing on screen to show for it.
-            subagentQueue()
-            if (pendingTurns.isNotEmpty()) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = STEER_QUEUE_INSET),
-                    verticalArrangement = Arrangement.spacedBy(4.dp),
-                ) {
-                    pendingTurns.take(STEER_ROWS_SHOWN).forEach { queued ->
-                        // The same row, the same three actions — what changes is what they mean and
-                        // what the row says, which `nextTurn` carries.
-                        SteerQueueRow(
-                            steer = PendingSteer(queued.id, queued.text, queued.imagesBase64),
-                            undelivered = false,
-                            nextTurn = true,
-                            onPromote = { onPromoteTurn(queued.id) },
-                            onEdit = {
-                                onRestoreSteer(
-                                    PendingSteer(queued.id, queued.text, queued.imagesBase64),
-                                    true,
-                                )
-                            },
-                            onDelete = { onRetractTurn(queued.id) },
-                        )
-                    }
-                    if (pendingTurns.size > STEER_ROWS_SHOWN) {
-                        Text(
-                            text = "还有 ${pendingTurns.size - STEER_ROWS_SHOWN} 条待发送",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = scheme.onSurfaceVariant,
-                            modifier = Modifier.padding(start = 4.dp),
-                        )
-                    }
-                }
-                // 与下面 pendingSteers 块同一个 3dp（用户：「插话进队列是紧贴的，点了立即插话
-                // 就有缝隙了」——两种状态的间距必须恒定）。队列行属于它将要发出的那个输入框，
-                // 但「紧贴」和「恒贴 3dp」之间选恒定：状态切换时布局不跳。
-                Spacer(Modifier.height(3.dp))
-            }
-            if (pendingSteers.isNotEmpty()) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = STEER_QUEUE_INSET),
-                    verticalArrangement = Arrangement.spacedBy(4.dp),
-                ) {
-                    pendingSteers.take(STEER_ROWS_SHOWN).forEach { queued ->
-                        SteerQueueRow(
-                            steer = queued,
-                            // The run is over, so nothing will ever read this line unless the
-                            // user sends it again — the row says so.
-                            undelivered = !running,
-                            onPromote = { onPromoteSteer(queued.id) },
-                            onEdit = {
-                                // Both halves go back, text and picture — see restoreQueuedSteer.
-                                // The caller retracts only after the restore lands, so a failed
-                                // decode leaves this row in place.
-                                onRestoreSteer(queued, false)
-                            },
-                            onDelete = { onRetractSteer(queued.id) },
-                        )
-                    }
-                    if (pendingSteers.size > STEER_ROWS_SHOWN) {
-                        Text(
-                            text = "还有 ${pendingSteers.size - STEER_ROWS_SHOWN} 条排队中",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = scheme.onSurfaceVariant,
-                            modifier = Modifier.padding(start = 4.dp),
-                        )
-                    }
-                }
-                // Tight to the pill: a queued line belongs to the field it will be sent from,
-                // and a gap here made it look like a floating card of its own.
-                Spacer(Modifier.height(3.dp))
-            }
+            ComposerPendingPanels(
+                goal = goal,
+                running = running,
+                onEditGoal = editGoal,
+                onResumeGoal = onResumeGoal,
+                onClearGoal = onClearGoal,
+                attachments = attachments,
+                onRemoveAttachment = onRemoveAttachment,
+                todos = todos,
+                onOpenTodos = onOpenTodos,
+                subagentQueue = subagentQueue,
+                pendingTurns = pendingTurns,
+                onPromoteTurn = onPromoteTurn,
+                onRetractTurn = onRetractTurn,
+                pendingSteers = pendingSteers,
+                onPromoteSteer = onPromoteSteer,
+                onRetractSteer = onRetractSteer,
+                onRestoreSteer = onRestoreSteer,
+            )
             // Typing `/` names a command: show what can be run instead of expecting the
             // user to remember tool names. Only while the name is still being typed.
             //
@@ -836,7 +728,7 @@ internal fun Composer(
                     .onSizeChanged { pillWidthPx = it.width }
                     .shadow(
                         elevation = 8.dp,
-                        shape = RoundedCornerShape(24.dp),
+                        shape = ComposerPillShape,
                         ambientColor = Color.Black.copy(alpha = 0.25f),
                         spotColor = Color.Black.copy(alpha = 0.25f),
                     ),
@@ -880,16 +772,34 @@ internal fun Composer(
             )
             Surface(
                 modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(24.dp),
+                shape = ComposerPillShape,
                 // Light uses the canvas colour; dark steps one surface up, because there
                 // `surface` IS the canvas and the pill would vanish into it.
                 color = if (LocalDarkTheme.current) scheme.surfaceContainer else scheme.surface,
                 shadowElevation = 0.dp,
             ) {
-                Column {
+                val openAddMenu: () -> Unit = remember {
+                    { sheetOpen = false; approvalOpen = false; menuOpen = true }
+                }
+                val closeAddMenu: () -> Unit = remember { { menuOpen = false } }
+                val openApprovalMenu: () -> Unit = remember {
+                    { menuOpen = false; sheetOpen = false; approvalOpen = true }
+                }
+                val closeApprovalMenu: () -> Unit = remember { { approvalOpen = false } }
+                val openSheetMenu: () -> Unit = remember(onPrefetchWindows) {
+                    {
+                        menuOpen = false
+                        approvalOpen = false
+                        sheetOpen = true
+                        onPrefetchWindows()
+                    }
+                }
+                val closeSheetMenu: () -> Unit = remember { { sheetOpen = false } }
+                val compactControls = windowWidth < 360.dp || density.fontScale >= 1.3f || settings.fontScale >= 3
+                val hasText = input.isNotBlank()
+                Layout(content = {
                     // Row 1: the field itself, transparent on the capsule — no border,
                     // no container, just text with room to breathe above the controls.
-                    val primaryAction = primaryChatAction(running, input.isNotBlank(), attachments.isNotEmpty())
                     BasicTextField(
                         value = field,
                         onValueChange = { next ->
@@ -900,6 +810,7 @@ internal fun Composer(
                         modifier = Modifier
                             .fillMaxWidth()
                             .heightIn(min = 48.dp)
+                            .clipToBounds()
                             .focusRequester(goalFocus)
                             .padding(start = 20.dp, top = 14.dp, end = 20.dp, bottom = 4.dp)
                             .composerFieldHeight(fieldLineHeightPx, fieldBaselinePx) { fieldLines.intValue }
@@ -908,7 +819,7 @@ internal fun Composer(
                             .onFocusChanged { focus ->
                                 if (focus.isFocused) onFocused()
                             },
-                        textStyle = fieldTextStyle.copy(color = scheme.onSurface),
+                        textStyle = fieldStyle,
                         onTextLayout = { fieldLines.intValue = it.lineCount.coerceIn(1, 5) },
                         cursorBrush = SolidColor(scheme.primary),
                         maxLines = 5,
@@ -925,7 +836,12 @@ internal fun Composer(
                         ),
                         keyboardActions = KeyboardActions(
                             onSend = {
-                                val text = input.trim()
+                                val text = latestInput.value.trim()
+                                val primaryAction = primaryChatAction(
+                                    running,
+                                    text.isNotEmpty(),
+                                    attachments.isNotEmpty(),
+                                )
                                 // A picture with no caption is still something to send: only an
                                 // entirely empty composer does nothing here.
                                 if (primaryAction == PrimaryChatAction.DISABLED || primaryAction == PrimaryChatAction.STOP) return@KeyboardActions
@@ -964,7 +880,9 @@ internal fun Composer(
                                             running -> "插一句话…"
                                             else -> "让${assistantName.ifBlank { "助手" }}做点什么…"
                                         },
-                                        style = fieldTextStyle.copy(color = scheme.onSurfaceVariant),
+                                        style = placeholderStyle,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
                                     )
                                 }
                                 inner()
@@ -975,349 +893,467 @@ internal fun Composer(
                     // live under the text now. 48dp of content, not 44: the buttons carry
                     // a 48dp minimum touch target, and a shorter row squeezed them into
                     // ellipses with the circle clipped to a 40x36 box.
-                    val leadingControls: @Composable () -> Unit = {
-                        Box {
-                            IconButton(
-                                onClick = { sheetOpen = false; approvalOpen = false; menuOpen = true },
-                                // 36dp around the glyph's original 22dp. What the eye measures is the
-                                // glyph's distance to the capsule's edge (the row's 10dp plus this box's
-                                // 7dp) and to the glyph beside it (7 + 0 + 8 = 15dp), and both are set by
-                                // this one number — so it is chosen once rather than tuned twice: at
-                                // 40dp the pair would sit 19dp apart, outside the 14–16dp asked for. The
-                                // 「不要浪费空间」 the user pointed at was the 11dp a side that the 44dp
-                                // box carried; this one carries 7dp.
-                                modifier = Modifier.size(36.dp),
-                            ) {
-                                Icon(
-                                    imageVector = ImageVector.vectorResource(R.drawable.ic_plus),
-                                    contentDescription = "添加图片或文件",
-                                    tint = scheme.onSurfaceVariant,
-                                    modifier = Modifier.size(22.dp),
-                                )
-                            }
-                            // The same card as the model sheet: one popup style for the whole
-                            // screen, instead of a Material dropdown here and a card there.
-                            MenuCard(
-                                visible = menuOpen,
-                                scrim = false,
-                                onDismiss = { menuOpen = false },
-                                // Opens upward from the button it belongs to. BottomStart puts the
-                                // popup's bottom edge on the anchor's bottom edge, and the anchor is the
-                                // button's own 36dp box — so the offset clears that box plus the 8dp of
-                                // air the card is meant to leave above it (-8dp alone left the card
-                                // sitting on the button).
-                                alignment = Alignment.BottomStart,
-                                offset = IntOffset.Zero,
-                                popupPositionProvider = menuPopup,
-                                // Same reason as the model sheet: this card hangs off a button of
-                                // the composer too, and a focusable popup here would move the
-                                // composer out from under it.
-                                focusable = false,
-                                modifier = Modifier.widthIn(max = popupCap(200.dp, windowWidth)),
-                                compactMotion = true,
-                            ) {
-                                MenuItemRow(
-                                    icon = ImageVector.vectorResource(R.drawable.ic_image),
-                                    label = "图片",
-                                    onClick = {
-                                        menuOpen = false
-                                        onPickImage()
-                                    },
-                                )
-                                MenuItemRow(
-                                    icon = ImageVector.vectorResource(R.drawable.ic_camera),
-                                    label = "拍照",
-                                    onClick = {
-                                        menuOpen = false
-                                        onTakePhoto()
-                                    },
-                                )
-                                MenuItemRow(
-                                    icon = ImageVector.vectorResource(R.drawable.ic_file),
-                                    label = "文件",
-                                    onClick = {
-                                        menuOpen = false
-                                        onPickFile()
-                                    },
-                                )
-                                MenuItemRow(
-                                    icon = ImageVector.vectorResource(R.drawable.ic_compass),
-                                    label = "目标指令",
-                                    onClick = {
-                                        menuOpen = false
-                                        startGoal()
-                                    },
-                                )
-                                // Always listed: the entry disappearing between runs made users
-                                // think the feature was gone. With no run in flight the engine
-                                // refuses and the toast says why — a visible refusal beats a
-                                // missing menu item.
-                                MenuItemRow(
-                                    icon = ImageVector.vectorResource(R.drawable.ic_minimize_2),
-                                    label = "压缩上下文",
-                                    onClick = {
-                                        menuOpen = false
-                                        val asked = onRequestCompress()
-                                        if (asked) {
-                                            Toast.makeText(ctx, "已请求压缩，本轮结束后生效", Toast.LENGTH_SHORT).show()
-                                        } else {
-                                            // 没有 run：**真的压一次**，并且状态行会显示「正在压缩上下文」。
-                                            // 以前这里只弹一句 toast，什么也没压（用户：「点了没反应」）。
-                                            onCompressNow()
-                                            Toast.makeText(ctx, "正在压缩上下文…", Toast.LENGTH_SHORT).show()
-                                        }
-                                    },
-                                )
-                            }
-                        }
-                        // 工具审批, right of the add button: the same choice the settings page
-                        // offers (自动运行 / 每次询问 / 禁止), one tap from the field it governs —
-                        // asking for approval is a decision about the question being typed, and
-                        // walking to 设置 mid-thought is how the setting stayed on whatever it was.
-                        // The icon is the mode itself, so the row says which one is in force without
-                        // being opened: a tick when it runs on its own, a shield while it asks, an
-                        // alert shield when it refuses.
-                        Box {
-                            IconButton(
-                                onClick = { menuOpen = false; sheetOpen = false; approvalOpen = true },
-                                // Same 36dp box and the same glyph size as the 「+」 beside it: the two are
-                                // one visual group on the row's left, so they are measured together.
-                                modifier = Modifier.size(36.dp),
-                            ) {
-                                Icon(
-                                    imageVector = ImageVector.vectorResource(approvalIcon(approvalMode)),
-                                    contentDescription = "当前会话工具审批：${approvalMode.label}",
-                                    tint = when (approvalMode) {
-                                        ApprovalMode.DENY -> scheme.error
-                                        ApprovalMode.AUTO -> scheme.primary
-                                        else -> scheme.onSurfaceVariant
-                                    },
-                                    modifier = Modifier.size(20.dp),
-                                )
-                            }
-                            MenuCard(
-                                visible = approvalOpen,
-                                scrim = false,
-                                onDismiss = { approvalOpen = false },
-                                alignment = Alignment.BottomStart,
-                                offset = IntOffset.Zero,
-                                popupPositionProvider = menuPopup,
-                                focusable = false,
-                                modifier = Modifier.widthIn(max = popupCap(220.dp, windowWidth)),
-                                compactMotion = true,
-                            ) {
-                                ApprovalMode.entries.forEach { mode ->
-                                    MenuItemRow(
-                                        icon = ImageVector.vectorResource(approvalIcon(mode)),
-                                        label = mode.label,
-                                        selected = mode == approvalMode,
-                                        onClick = {
-                                            approvalOpen = false
-                                            onPickApproval(mode)
-                                        },
-                                    )
-                                }
-                                // The mode is read when a run starts (see ApprovalGate), so saying
-                                // so here is the difference between a setting and a surprise.
-                                Text(
-                                    text = "仅当前会话 · 下一次任务生效",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = scheme.onSurfaceVariant,
-                                    modifier = Modifier.padding(start = 4.dp, top = 6.dp, bottom = 2.dp),
-                                )
-                            }
-                        }
-                    }
-                    val compactControls = windowWidth < 360.dp || density.fontScale >= 1.3f || settings.fontScale >= 3
-                    if (compactControls) {
-                        Row(
-                            Modifier.fillMaxWidth().padding(start = 10.dp, end = 12.dp).height(48.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) { leadingControls() }
-                    }
-                    Row(
-                        modifier = Modifier
-                            // 10dp, and the box beside it adds 7dp more (a 36dp box around a 22dp
-                            // glyph): the 「+」 sits 17dp from the capsule's edge, which is the
-                            // 16–18dp the user asked for. The row's own padding is the only lever
-                            // that moves that edge without moving the gap between the two buttons.
-                            .padding(start = 10.dp, end = 12.dp, bottom = 8.dp)
-                            .height(48.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        // Zero: the two buttons' own boxes supply the only gap between their glyphs,
-                        // and every dp spent here is a dp the user sees between the icons.
-                        horizontalArrangement = Arrangement.spacedBy(0.dp),
-                    ) {
-                    // The anchor's own left edge and the card's width, both measured: the card opens
-                    // to the right of this button, and on a window narrower than the button plus
-                    // the card it used to hang off the screen's right edge.
-                    if (!compactControls) leadingControls()
-                    // One selector for both decisions: the model and the reasoning
-                    // level live together in the 生成设置 sheet, so the row keeps a
-                    // single caption instead of two competing ones.
-                    //
-                    // The caption is the row's flexible child (weight, not a fixed cap):
-                    // capping it at 104dp was what squeezed a long model id down to a single
-                    // ellipsis while the rest of the row sat empty, and it could still
-                    // overflow a 360dp screen once the ring, the mic and the send button
-                    // were all present. Weighted, it takes exactly the space the controls
-                    // leave — never more — so the row can neither clip the send button nor
-                    // starve the name. The name itself caps at 160dp and ellipsizes after
-                    // that, which is the one truncation the user asked for.
-                    Box(Modifier.weight(1f)) {
-                        // The sheet hangs off the capsule itself, not off a probe at the top
-                        // of the stack: anchored there it opened above the whole composer, and
-                        // the user asked for it above the model button. Right-aligned inside
-                        // the free space so the capsule sits against the ring, as asked.
-                        Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) {
-                                // The probe and the capsule are siblings here, and that is the whole
-                                // of it: as a *wrapper* around them the probe stretched this box —
-                                // a Box is as wide as its widest child, and a full-width child makes
-                                // it the whole free space — and the capsule inside then sat at that
-                                // box's own start (TopStart, the default), i.e. the model selector
-                                // at the far left of an empty row with the ring way off to the
-                                // right. That is exactly the screenshot the user sent: the
-                                // right-alignment was written and had nothing to align.
-                                //
-                                // Zero-height probe at the capsule's TOP edge: the popup hangs
-                                // off it bottom-aligned, so its bottom edge lands 8dp above the
-                                // capsule. Hung on the capsule box itself, BottomStart put the
-                                // popup's bottom on the capsule's bottom — covering the button
-                                // that opened it, which is what the user photographed.
-                                Box {
-                                // **卡片挂在按钮自己的 Box 里**（与添加菜单、审批菜单同构）：Popup 的
-                                // 锚点就是这个 28dp 高的按钮框，于是卡片底边落在按钮上沿 −8dp、
-                                // 右缘对齐按钮右缘。原来它挂在一个整行宽的零高探针上，锚点是屏幕
-                                // 左边那条线，卡片因此跑到别的位置。
-                                GenerationSheet(
-                                    settings = settings,
-                                    assistantId = assistantId,
-                                    conversationProviderId = conversationProviderId,
-                                    conversationModel = conversationModel,
-                                    conversationReasoningEffort = conversationReasoningEffort,
-                                    onChooseReasoning = onChooseReasoning,
-                                    visible = sheetOpen,
-                                    scrim = false,
-                                    onPickModel = onPickModel,
-                                    onOpenSettings = onOpenSettings,
-                                    onDismiss = { sheetOpen = false },
-                                )
-                                UnifiedSelector(
-                                settings = settings,
-                                assistantId = assistantId,
-                                conversationProviderId = conversationProviderId,
-                                conversationModel = conversationModel,
-                                conversationReasoningEffort = conversationReasoningEffort,
-                                onClick = {
-                                    menuOpen = false
-                                    approvalOpen = false
-                                    sheetOpen = true
-                                    // The sheet is the one place models are looked at, so
-                                    // this is where the endpoint's own window numbers are
-                                    // worth asking for — once per endpoint per process.
-                                    onPrefetchWindows()
-                                },
-                                )
-                                }
-                        }
-                    }
-                    // Left of the mic, where the user asked for it: the mic is the control
-                    // reached for mid-thought, and this is the gauge that says whether the
-                    // next question still fits in the window.
-                    ContextRing(
-                        used = contextUsed,
-                        estimated = contextEstimated,
-                        window = contextWindow,
-                        breakSplit = contextBreak,
-                        onPanelOpen = onContextPanelOpen,
+                    ComposerControlsArea(
+                        ctx = ctx,
+                        running = running,
+                        hasText = hasText,
+                        latestInput = latestInput,
+                        settings = settings,
+                        assistantId = assistantId,
+                        contextWindow = contextWindow,
+                        contextUsed = contextUsed,
+                        contextEstimated = contextEstimated,
+                        contextBreak = contextBreak,
+                        onContextPanelOpen = onContextPanelOpen,
+                        conversationProviderId = conversationProviderId,
+                        conversationModel = conversationModel,
+                        conversationReasoningEffort = conversationReasoningEffort,
+                        onPickModel = onPickModel,
+                        onChooseReasoning = onChooseReasoning,
+                        attachments = attachments,
+                        onPickImage = onPickImage,
+                        onTakePhoto = onTakePhoto,
+                        onPickFile = onPickFile,
+                        onSend = onSend,
+                        onStop = onStop,
+                        onSteer = onSteer,
+                        onRequestCompress = onRequestCompress,
+                        onCompressNow = onCompressNow,
+                        onMic = onMic,
+                        voiceInput = voiceInput,
+                        approvalMode = approvalMode,
+                        onPickApproval = onPickApproval,
+                        onOpenSettings = onOpenSettings,
+                        menuPopup = menuPopup,
+                        windowWidth = windowWidth,
+                        compactControls = compactControls,
+                        menuOpen = menuOpen,
+                        onOpenMenu = openAddMenu,
+                        onDismissMenu = closeAddMenu,
+                        approvalOpen = approvalOpen,
+                        onOpenApproval = openApprovalMenu,
+                        onDismissApproval = closeApprovalMenu,
+                        sheetOpen = sheetOpen,
+                        onOpenSheet = openSheetMenu,
+                        onDismissSheet = closeSheetMenu,
+                        startGoal = startGoal,
+                        dismissKeyboard = dismissKeyboard,
                     )
-                    // The ring's own right margin: the row packs its children edge to edge, and the
-                    // gauge sat hard against whatever follows it — the mic when 语音输入 is on, the
-                    // send button when it is not. Four dp, and nothing else in the row moves: the
-                    // model capsule to its left takes the free space either way.
-                    Spacer(Modifier.width(4.dp))
-                    // 设置里的「语音输入」是唯一的开关，默认关：关着时这里什么都不画，连占位都不留。
-                    // 开着也不需要系统识别器了——我们自己的录音链路走 AudioRecord，不会再弹系统面板。
-                    if (voiceInput) {
-                        IconButton(
-                            onClick = onMic,
-                            enabled = !running,
-                            modifier = Modifier.size(30.dp),
-                        ) {
-                            Icon(
-                                ImageVector.vectorResource(R.drawable.ic_mic),
-                                contentDescription = if (running) "语音输入，正在生成时不可录音" else "语音输入",
-                                tint = scheme.onSurfaceVariant,
-                                modifier = Modifier.size(18.dp),
-                            )
-                        }
-                    }
-                    val hasSomething = input.isNotBlank() || attachments.isNotEmpty()
-                    // While a run is going, a field with something in it sends that line to the
-                    // run; an empty field stops it. One button, and what it does is what the
-                    // field in front of the user says — the separate 插话 button only ever made
-                    // the user wonder which of the two they wanted.
-                    //
-                    // "Something" is text **or** a picture: a screenshot with no caption is still a
-                    // turn the user wants to send, and judging by text alone left that case with no
-                    // way out at all — the button stayed on 停止 and the attachment could not go
-                    // anywhere until the run ended. 停止 is for an empty field, nothing else.
-                    val steers = primaryAction == PrimaryChatAction.STEER
-                    val sendable = primaryAction != PrimaryChatAction.DISABLED
-                    CircleActionButton(
-                        icon = if (running && !steers) {
-                            ImageVector.vectorResource(R.drawable.ic_stop_filled)
-                        } else {
-                            ImageVector.vectorResource(R.drawable.ic_arrow_up)
-                        },
-                        contentDescription = when {
-                            steers -> "插话发送"
-                            running -> "停止"
-                            else -> "发送"
-                        },
-                        onClick = {
-                            when (primaryAction) {
-                                // Cleared by the view model when it takes the line, not here — see the
-                                // note on the Enter path above. A refusal falls through to a normal
-                                // send, so the text cannot be stranded in the field.
-                                PrimaryChatAction.STEER -> {
-                                    withAttachment(attachments, input.trim())
-                                        .let { (body, images) -> if (!onSteer(body, images)) onSend() }
-                                    dismissKeyboard()
-                                }
-                                PrimaryChatAction.STOP -> onStop()
-                                PrimaryChatAction.DISABLED -> Unit
-                                PrimaryChatAction.SEND -> {
-                                    onSend()
-                                    dismissKeyboard()
-                                }
-                            }
-                        },
-                        enabled = sendable,
-                        size = 40.dp,
-                        // Three states, three colours: a live run offers stop, a field with
-                        // something in it turns brand-coloured so the button reads as ready,
-                        // and an empty field stays a quiet grey circle.
-                        containerColor = if (running || hasSomething) {
-                            scheme.primary
-                        } else {
-                            scheme.surfaceVariant
-                        },
-                        contentColor = if (running || hasSomething) {
-                            scheme.onPrimary
-                        } else {
-                            scheme.onSurfaceVariant
-                        },
-                        // Flat: the pill's own lift is the only depth in this corner.
-                        shadowElevation = 0.dp,
-                        iconSize = 22.dp,
-                    )
-                    }
+                }, measurePolicy = ComposerStackMeasurePolicy)
+            }
+            }
+        }, measurePolicy = ComposerStackMeasurePolicy)
+    }
+}
+
+@Composable
+private fun ComposerPendingPanels(
+    goal: Goal?,
+    running: Boolean,
+    onEditGoal: (String) -> Unit,
+    onResumeGoal: () -> Unit,
+    onClearGoal: () -> Unit,
+    attachments: List<Attachment>,
+    onRemoveAttachment: (Int) -> Unit,
+    todos: List<TodoItem>,
+    onOpenTodos: () -> Unit,
+    subagentQueue: @Composable () -> Unit,
+    pendingTurns: List<PendingTurn>,
+    onPromoteTurn: (String) -> Unit,
+    onRetractTurn: (String) -> Unit,
+    pendingSteers: List<PendingSteer>,
+    onPromoteSteer: (String) -> Unit,
+    onRetractSteer: (String) -> Unit,
+    onRestoreSteer: (PendingSteer, Boolean) -> Unit,
+) {
+    val scheme = MaterialTheme.colorScheme
+    if (goal != null) {
+        GoalChip(
+            goal = goal,
+            running = running,
+            onEdit = { onEditGoal(goal.text) },
+            onResume = onResumeGoal.takeIf {
+                !running && (goal.status == GoalStatus.PAUSED || goal.status == GoalStatus.BLOCKED)
+            },
+            onClear = onClearGoal,
+            modifier = Modifier.padding(horizontal = STEER_QUEUE_INSET),
+        )
+        Spacer(Modifier.height(3.dp))
+    }
+    if (attachments.isNotEmpty()) {
+        val attachmentScroll = rememberScrollState()
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(start = STEER_QUEUE_INSET)
+                .drawerScrollPriority { delta ->
+                    if (delta < 0f) attachmentScroll.canScrollForward else attachmentScroll.canScrollBackward
                 }
+                .horizontalScroll(attachmentScroll),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            attachments.forEachIndexed { index, item ->
+                AttachmentChip(attachment = item, onRemove = { onRemoveAttachment(index) })
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+    }
+    if (todos.isNotEmpty()) {
+        val board = remember(todos) { todoBoard(todos) }
+        val rows = board.first
+        val done = board.second
+        val current = rows.firstOrNull { it.status == TODO_IN_PROGRESS } ?: rows.firstOrNull()
+        if (current != null) {
+            Box(Modifier.padding(horizontal = STEER_QUEUE_INSET)) {
+                TodoQueueRow(
+                    item = current,
+                    tally = "$done/${todos.size}",
+                    onClick = onOpenTodos,
+                )
+            }
+        }
+        Spacer(Modifier.height(3.dp))
+    }
+    subagentQueue()
+    if (pendingTurns.isNotEmpty()) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = STEER_QUEUE_INSET),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            pendingTurns.take(STEER_ROWS_SHOWN).forEach { queued ->
+                SteerQueueRow(
+                    steer = PendingSteer(queued.id, queued.text, queued.imagesBase64),
+                    undelivered = false,
+                    nextTurn = true,
+                    onPromote = { onPromoteTurn(queued.id) },
+                    onEdit = {
+                        onRestoreSteer(
+                            PendingSteer(queued.id, queued.text, queued.imagesBase64),
+                            true,
+                        )
+                    },
+                    onDelete = { onRetractTurn(queued.id) },
+                )
+            }
+            if (pendingTurns.size > STEER_ROWS_SHOWN) {
+                Text(
+                    text = "还有 ${pendingTurns.size - STEER_ROWS_SHOWN} 条待发送",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = scheme.onSurfaceVariant,
+                    modifier = Modifier.padding(start = 4.dp),
+                )
+            }
+        }
+        Spacer(Modifier.height(3.dp))
+    }
+    if (pendingSteers.isNotEmpty()) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = STEER_QUEUE_INSET),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            pendingSteers.take(STEER_ROWS_SHOWN).forEach { queued ->
+                SteerQueueRow(
+                    steer = queued,
+                    undelivered = !running,
+                    onPromote = { onPromoteSteer(queued.id) },
+                    onEdit = { onRestoreSteer(queued, false) },
+                    onDelete = { onRetractSteer(queued.id) },
+                )
+            }
+            if (pendingSteers.size > STEER_ROWS_SHOWN) {
+                Text(
+                    text = "还有 ${pendingSteers.size - STEER_ROWS_SHOWN} 条排队中",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = scheme.onSurfaceVariant,
+                    modifier = Modifier.padding(start = 4.dp),
+                )
+            }
+        }
+        Spacer(Modifier.height(3.dp))
+    }
+}
+
+@Composable
+private fun ComposerControlsArea(
+    ctx: android.content.Context,
+    running: Boolean,
+    hasText: Boolean,
+    latestInput: androidx.compose.runtime.State<String>,
+    settings: AppSettings,
+    assistantId: String,
+    contextWindow: Int,
+    contextUsed: Int?,
+    contextEstimated: Boolean,
+    contextBreak: Triple<Int, Int, Int>?,
+    onContextPanelOpen: () -> Unit,
+    conversationProviderId: String?,
+    conversationModel: String?,
+    conversationReasoningEffort: String?,
+    onPickModel: (ProviderConfig, String) -> Unit,
+    onChooseReasoning: (String) -> Unit,
+    attachments: List<Attachment>,
+    onPickImage: () -> Unit,
+    onTakePhoto: () -> Unit,
+    onPickFile: () -> Unit,
+    onSend: () -> Unit,
+    onStop: () -> Unit,
+    onSteer: (String, List<String>) -> Boolean,
+    onRequestCompress: () -> Boolean,
+    onCompressNow: () -> Unit,
+    onMic: () -> Unit,
+    voiceInput: Boolean,
+    approvalMode: ApprovalMode,
+    onPickApproval: (ApprovalMode) -> Unit,
+    onOpenSettings: () -> Unit,
+    menuPopup: ComposerMenuPositionProvider,
+    windowWidth: Dp,
+    compactControls: Boolean,
+    menuOpen: Boolean,
+    onOpenMenu: () -> Unit,
+    onDismissMenu: () -> Unit,
+    approvalOpen: Boolean,
+    onOpenApproval: () -> Unit,
+    onDismissApproval: () -> Unit,
+    sheetOpen: Boolean,
+    onOpenSheet: () -> Unit,
+    onDismissSheet: () -> Unit,
+    startGoal: () -> Unit,
+    dismissKeyboard: () -> Unit,
+) {
+    val scheme = MaterialTheme.colorScheme
+    val leadingControls: @Composable () -> Unit = {
+        Box {
+            IconButton(
+                onClick = onOpenMenu,
+                modifier = Modifier.size(36.dp),
+            ) {
+                Icon(
+                    imageVector = ImageVector.vectorResource(R.drawable.ic_plus),
+                    contentDescription = "添加图片或文件",
+                    tint = scheme.onSurfaceVariant,
+                    modifier = Modifier.size(22.dp),
+                )
+            }
+            MenuCard(
+                visible = menuOpen,
+                scrim = false,
+                onDismiss = onDismissMenu,
+                alignment = Alignment.BottomStart,
+                offset = IntOffset.Zero,
+                popupPositionProvider = menuPopup,
+                focusable = false,
+                modifier = Modifier.widthIn(max = popupCap(200.dp, windowWidth)),
+                compactMotion = true,
+            ) {
+                MenuItemRow(
+                    icon = ImageVector.vectorResource(R.drawable.ic_image),
+                    label = "图片",
+                    onClick = {
+                        onDismissMenu()
+                        onPickImage()
+                    },
+                )
+                MenuItemRow(
+                    icon = ImageVector.vectorResource(R.drawable.ic_camera),
+                    label = "拍照",
+                    onClick = {
+                        onDismissMenu()
+                        onTakePhoto()
+                    },
+                )
+                MenuItemRow(
+                    icon = ImageVector.vectorResource(R.drawable.ic_file),
+                    label = "文件",
+                    onClick = {
+                        onDismissMenu()
+                        onPickFile()
+                    },
+                )
+                MenuItemRow(
+                    icon = ImageVector.vectorResource(R.drawable.ic_compass),
+                    label = "目标指令",
+                    onClick = {
+                        onDismissMenu()
+                        startGoal()
+                    },
+                )
+                MenuItemRow(
+                    icon = ImageVector.vectorResource(R.drawable.ic_minimize_2),
+                    label = "压缩上下文",
+                    onClick = {
+                        onDismissMenu()
+                        val asked = onRequestCompress()
+                        if (asked) {
+                            Toast.makeText(ctx, "已请求压缩，本轮结束后生效", Toast.LENGTH_SHORT).show()
+                        } else {
+                            onCompressNow()
+                            Toast.makeText(ctx, "正在压缩上下文…", Toast.LENGTH_SHORT).show()
+                        }
+                    },
+                )
+            }
+        }
+        Box {
+            IconButton(
+                onClick = onOpenApproval,
+                modifier = Modifier.size(36.dp),
+            ) {
+                Icon(
+                    imageVector = ImageVector.vectorResource(approvalIcon(approvalMode)),
+                    contentDescription = "当前会话工具审批：${approvalMode.label}",
+                    tint = when (approvalMode) {
+                        ApprovalMode.DENY -> scheme.error
+                        ApprovalMode.AUTO -> scheme.primary
+                        else -> scheme.onSurfaceVariant
+                    },
+                    modifier = Modifier.size(20.dp),
+                )
+            }
+            MenuCard(
+                visible = approvalOpen,
+                scrim = false,
+                onDismiss = onDismissApproval,
+                alignment = Alignment.BottomStart,
+                offset = IntOffset.Zero,
+                popupPositionProvider = menuPopup,
+                focusable = false,
+                modifier = Modifier.widthIn(max = popupCap(220.dp, windowWidth)),
+                compactMotion = true,
+            ) {
+                ApprovalMode.entries.forEach { mode ->
+                    MenuItemRow(
+                        icon = ImageVector.vectorResource(approvalIcon(mode)),
+                        label = mode.label,
+                        selected = mode == approvalMode,
+                        onClick = {
+                            onDismissApproval()
+                            onPickApproval(mode)
+                        },
+                    )
+                }
+                Text(
+                    text = "仅当前会话 · 下一次任务生效",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = scheme.onSurfaceVariant,
+                    modifier = Modifier.padding(start = 4.dp, top = 6.dp, bottom = 2.dp),
+                )
             }
         }
     }
+    if (compactControls) {
+        Row(
+            Modifier.fillMaxWidth().padding(start = 10.dp, end = 12.dp).height(48.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) { leadingControls() }
+    }
+    Row(
+        modifier = Modifier
+            .padding(start = 10.dp, end = 12.dp, bottom = 8.dp)
+            .height(48.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(0.dp),
+    ) {
+        if (!compactControls) leadingControls()
+        Box(Modifier.weight(1f)) {
+            Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) {
+                Box {
+                    GenerationSheet(
+                        settings = settings,
+                        assistantId = assistantId,
+                        conversationProviderId = conversationProviderId,
+                        conversationModel = conversationModel,
+                        conversationReasoningEffort = conversationReasoningEffort,
+                        onChooseReasoning = onChooseReasoning,
+                        visible = sheetOpen,
+                        scrim = false,
+                        onPickModel = onPickModel,
+                        onOpenSettings = onOpenSettings,
+                        onDismiss = onDismissSheet,
+                    )
+                    UnifiedSelector(
+                        settings = settings,
+                        assistantId = assistantId,
+                        conversationProviderId = conversationProviderId,
+                        conversationModel = conversationModel,
+                        conversationReasoningEffort = conversationReasoningEffort,
+                        onClick = onOpenSheet,
+                    )
+                }
             }
+        }
+        ContextRing(
+            used = contextUsed,
+            estimated = contextEstimated,
+            window = contextWindow,
+            breakSplit = contextBreak,
+            onPanelOpen = onContextPanelOpen,
+        )
+        Spacer(Modifier.width(4.dp))
+        if (voiceInput) {
+            IconButton(
+                onClick = onMic,
+                enabled = !running,
+                modifier = Modifier.size(30.dp),
+            ) {
+                Icon(
+                    ImageVector.vectorResource(R.drawable.ic_mic),
+                    contentDescription = if (running) "语音输入，正在生成时不可录音" else "语音输入",
+                    tint = scheme.onSurfaceVariant,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
+        }
+        val primaryAction = primaryChatAction(running, hasText, attachments.isNotEmpty())
+        val hasSomething = hasText || attachments.isNotEmpty()
+        val steers = primaryAction == PrimaryChatAction.STEER
+        val stopping = primaryAction == PrimaryChatAction.STOP
+        val sendable = primaryAction != PrimaryChatAction.DISABLED
+        CircleActionButton(
+            icon = if (stopping) {
+                ImageVector.vectorResource(R.drawable.ic_stop_filled)
+            } else {
+                ImageVector.vectorResource(R.drawable.ic_arrow_up)
+            },
+            contentDescription = when {
+                steers -> "插话发送"
+                running -> "停止"
+                else -> "发送"
+            },
+            onClick = {
+                when (primaryAction) {
+                    PrimaryChatAction.STEER -> {
+                        withAttachment(attachments, latestInput.value.trim())
+                            .let { (body, images) -> if (!onSteer(body, images)) onSend() }
+                        dismissKeyboard()
+                    }
+                    PrimaryChatAction.STOP -> onStop()
+                    PrimaryChatAction.DISABLED -> Unit
+                    PrimaryChatAction.SEND -> {
+                        onSend()
+                        dismissKeyboard()
+                    }
+                }
+            },
+            enabled = sendable,
+            size = 40.dp,
+            containerColor = if (running || hasSomething) {
+                scheme.primary
+            } else {
+                scheme.surfaceVariant
+            },
+            contentColor = if (running || hasSomething) {
+                scheme.onPrimary
+            } else {
+                scheme.onSurfaceVariant
+            },
+            shadowElevation = 0.dp,
+            iconSize = if (stopping) 18.dp else 22.dp,
+        )
+    }
 }
 
 /** A compact control strip; the assistant reply carries the goal's outcome. */

@@ -386,6 +386,8 @@ fun ProviderPage(
 
                         contentDescription = if (revealKey) "隐藏 Key" else "显示 Key",
 
+                        modifier = Modifier.size(18.dp),
+
                         tint = MaterialTheme.colorScheme.onSurfaceVariant,
 
                     )

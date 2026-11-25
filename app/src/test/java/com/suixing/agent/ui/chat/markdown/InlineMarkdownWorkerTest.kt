@@ -14,7 +14,9 @@ import androidx.compose.ui.text.font.FontWeight
 import com.suixing.agent.ui.chat.LocalReadingTextKey
 import io.mockk.every
 import io.mockk.mockkObject
+import io.mockk.mockkStatic
 import io.mockk.unmockkObject
+import io.mockk.unmockkStatic
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Semaphore
 import kotlinx.coroutines.CompletableDeferred
@@ -27,8 +29,10 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.yield
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -92,6 +96,36 @@ class InlineMarkdownWorkerTest {
                 assertEquals(5, bold.end)
             } finally {
                 harness.close()
+                unmockkObject(NativeMarkdown)
+            }
+        }
+    }
+
+    @Test fun preparedInlineDoesNotScanItsSourceUntilTextChanges() = runBlocking {
+        withTimeout(10_000) {
+            val initial = "**ready**"
+            val examined = CompletableDeferred<Unit>()
+            mockkObject(NativeMarkdown)
+            mockkStatic(::literalInlineSource)
+            every { NativeMarkdown.inlineRuns(any()) } answers {
+                if (firstArg<String>() == initial) listOf(NativeInlineRun("ready", 1, null)) else null
+            }
+            every { literalInlineSource(initial, 0) } answers {
+                examined.complete(Unit)
+                callOriginal()
+            }
+            val harness = Harness(this, InlineMarkdownSource(initial))
+            try {
+                harness.start()
+                assertEquals("ready", harness.output.text)
+                assertNull(withTimeoutOrNull(350) { examined.await() })
+
+                harness.source.value = InlineMarkdownSource("$initial tail")
+                harness.await { harness.output.text == "ready tail" }
+                assertTrue(examined.isCompleted)
+            } finally {
+                harness.close()
+                unmockkStatic(::literalInlineSource)
                 unmockkObject(NativeMarkdown)
             }
         }

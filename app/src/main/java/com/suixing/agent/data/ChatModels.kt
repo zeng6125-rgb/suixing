@@ -2,6 +2,7 @@ package com.suixing.agent.data
 
 import androidx.compose.runtime.Immutable
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.Transient
 
 /**
  * **`@Immutable` 是性能关键**：类里有 `List` 字段（`imagesBase64`/`toolCalls`），不标注时
@@ -226,6 +227,8 @@ data class Conversation(
      * which summary, so a later run can reuse a summary instead of paying to make it again.
      */
     val checkpoints: List<ContextCheckpoint> = emptyList(),
+    /** Committed JSONL size from the store metadata, for display in the conversation list. */
+    @Transient val committedLogBytes: Long? = null,
 )
 
 object Roles {

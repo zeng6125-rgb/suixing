@@ -1144,6 +1144,107 @@ pub fn decode_preferences(source: LegacyBlob) -> Result<LegacyPreferences, Strin
     })
 }
 
+pub(crate) fn settings_preferences(
+    bytes: &[u8],
+) -> Result<(Option<String>, Option<String>), String> {
+    let mut compose = None;
+    let mut rust = None;
+    let mut reader = ProtoReader::new(bytes);
+    while let Some(field) = reader.next()? {
+        if (field.number, field.wire) != (1, 2) {
+            continue;
+        }
+        let entry = decode_preference_entry(field.payload)?;
+        let target = match entry.key.as_str() {
+            "settings_json" => &mut compose,
+            "rust_settings_json" => &mut rust,
+            _ => continue,
+        };
+        let LegacyPreferenceValue::String(text) = entry.value else {
+            return Err("应用设置存储中的设置项不是文本".into());
+        };
+        *target = Some(text);
+    }
+    Ok((compose, rust))
+}
+
+pub(crate) fn set_settings_preferences(
+    bytes: &[u8],
+    compose: &str,
+    rust: &str,
+) -> Result<Vec<u8>, String> {
+    let mut output = Vec::new();
+    let mut reader = ProtoReader::new(bytes);
+    let mut start = 0;
+    while let Some(field) = reader.next()? {
+        let owned = (field.number, field.wire) == (1, 2)
+            && matches!(
+                decode_preference_entry(field.payload)?.key.as_str(),
+                "settings_json" | "rust_settings_json"
+            );
+        if !owned {
+            output.extend_from_slice(&bytes[start..reader.at]);
+        }
+        start = reader.at;
+    }
+    for (key, text) in [("settings_json", compose), ("rust_settings_json", rust)] {
+        let mut value = Vec::new();
+        push_proto_bytes(&mut value, 5, text.as_bytes());
+        let mut entry = Vec::new();
+        push_proto_bytes(&mut entry, 1, key.as_bytes());
+        push_proto_bytes(&mut entry, 2, &value);
+        push_proto_bytes(&mut output, 1, &entry);
+    }
+    Ok(output)
+}
+
+pub(crate) fn edit_preference(
+    bytes: &[u8],
+    key: &str,
+    value: Option<&LegacyPreferenceValue>,
+) -> Result<Vec<u8>, String> {
+    let mut output = Vec::new();
+    let mut reader = ProtoReader::new(bytes);
+    let mut start = 0;
+    while let Some(field) = reader.next()? {
+        let owned = (field.number, field.wire) == (1, 2)
+            && decode_preference_entry(field.payload)?.key == key;
+        if !owned {
+            output.extend_from_slice(&bytes[start..reader.at]);
+        }
+        start = reader.at;
+    }
+    let Some(value) = value else { return Ok(output); };
+    let mut payload = Vec::new();
+    match value {
+        LegacyPreferenceValue::String(value) => push_proto_bytes(&mut payload, 5, value.as_bytes()),
+        LegacyPreferenceValue::StringSet(values) => {
+            let mut set = Vec::new();
+            for value in values {
+                push_proto_bytes(&mut set, 1, value.as_bytes());
+            }
+            push_proto_bytes(&mut payload, 6, &set);
+        }
+        LegacyPreferenceValue::Other { .. } => return Err("不支持写入此偏好值".into()),
+    }
+    let mut entry = Vec::new();
+    push_proto_bytes(&mut entry, 1, key.as_bytes());
+    push_proto_bytes(&mut entry, 2, &payload);
+    push_proto_bytes(&mut output, 1, &entry);
+    Ok(output)
+}
+
+fn push_proto_bytes(output: &mut Vec<u8>, field: u8, bytes: &[u8]) {
+    output.push(field * 8 + 2);
+    let mut len = bytes.len();
+    while len >= 128 {
+        output.push((len & 0x7f) as u8 | 0x80);
+        len >>= 7;
+    }
+    output.push(len as u8);
+    output.extend_from_slice(bytes);
+}
+
 fn decode_preference_entry(bytes: &[u8]) -> Result<LegacyPreferenceEntry, String> {
     let mut reader = ProtoReader::new(bytes);
     let mut key = String::new();
@@ -1265,6 +1366,7 @@ impl<'a> ProtoReader<'a> {
                 &self.bytes[start..self.at]
             }
             1 => self.advance(8)?,
+            5 => self.advance(4)?,
             2 => {
                 let length = usize::try_from(self.varint()?).map_err(|_| "旧 protobuf 长度溢出")?;
                 self.advance(length)?

@@ -56,6 +56,7 @@ pub struct RustApplication {
     settings_view: settings::SettingsView,
     settings_leave: settings_leave::LeaveState,
     composer_platform: composer_platform::ComposerPlatform,
+    composer_placeholder: Option<(String, String)>,
     mobile_icons: mobile_chat::Icons,
     drawer_sorting: bool,
     composer_run_pending: Option<crate::platform::permissions::OperationKey>,
@@ -88,8 +89,10 @@ pub struct RustApplication {
     legacy_pending: bool,
     legacy_confirm: Option<String>,
     legacy_import_report: Option<Result<crate::state::LegacyImportReport, String>>,
+    page_history: Vec<Page>,
     drawer_open: bool,
     drawer_motion: drawer::DrawerMotion,
+    drawer_transcript: Option<drawer::FrozenTranscript>,
     rendered_dark_mode: Option<(bool, i32, i32, i32, Option<[Color32; 12]>, f32)>,
     memory_editor: Option<Memory>,
     memory_delete: Option<String>,
@@ -152,6 +155,7 @@ impl QueueWrite {
 
 enum Navigation {
     Page(Page),
+    Back(Page),
     NewConversation,
     Conversation(String),
     DeleteConversation(String),
@@ -293,6 +297,7 @@ impl RustApplication {
         configured: bool,
         can_start_goal: bool,
         skin: Option<mobile_chat::Skin>,
+        model: Option<&str>,
     ) {
         let flags = ComposerUi {
             loaded: self.state.loaded && self.state.capabilities.chat,
@@ -313,14 +318,14 @@ impl RustApplication {
                     .as_ref()
                     .is_some_and(|id| self.state.selected_conversation.as_ref() == Some(id)),
             can_start_goal,
+            can_compact: self.can_compact_context(),
             image_input: self.state.settings.behavior.image_input,
             voice_input: self.state.settings.behavior.voice_input,
             enter_key_sends: self.state.settings.behavior.enter_key_sends,
             expected_run: self.state.current_run_key(),
         };
-        let icons = self.mobile_icons.clone();
         let placeholder = if self.state.running {
-            "插一句话…".to_owned()
+            "插一句话…"
         } else {
             let id = self.current_assistant_id();
             let name = self
@@ -332,36 +337,88 @@ impl RustApplication {
                 .map(|item| item.name.as_str())
                 .filter(|name| !name.is_empty())
                 .unwrap_or("JAgent");
-            format!("让{name}做点什么…")
+            if self
+                .composer_placeholder
+                .as_ref()
+                .is_none_or(|(cached, _)| cached != name)
+            {
+                self.composer_placeholder = Some((name.to_owned(), format!("让{name}做点什么…")));
+            }
+            self.composer_placeholder
+                .as_ref()
+                .map_or("", |(_, text)| text.as_str())
         };
         let chrome = skin.map(|skin| mobile_chat::InputChrome {
-            icons: &icons,
+            icons: &self.mobile_icons,
             skin,
-            placeholder: &placeholder,
+            placeholder,
             model: None,
             context: None,
-            permissions: false,
+            approval_mode: self
+                .state
+                .selected_conversation
+                .as_ref()
+                .and_then(|id| self.state.conversations.iter().find(|chat| &chat.id == id))
+                .and_then(|chat| chat.approval_mode)
+                .unwrap_or(self.state.settings.approval_mode),
+            approval_choice: None,
+            compact: false,
             stop: false,
         });
         let (intents, chrome) = self.composer_platform.show(ui, &flags, chrome);
+        let outcome = chrome.map(|chrome| {
+            (
+                chrome.skin,
+                chrome.approval_choice,
+                chrome.model,
+                chrome.context,
+                chrome.compact,
+                chrome.stop,
+            )
+        });
+        if let Some((_, Some(mode), ..)) = outcome
+            && let Some(conversation_id) = self.state.selected_conversation.clone()
+        {
+            self.dispatch(Action::SetConversationApproval {
+                conversation_id,
+                mode,
+            });
+        }
         self.composer_intents(intents);
-        if let Some(chrome) = chrome {
-            if let Some(bounds) = chrome.model {
-                self.composer_model_selector(ui, &chrome, bounds);
+        if let Some((skin, _, model_bounds, context_bounds, compact, stop)) = outcome {
+            if let Some(bounds) = model_bounds {
+                self.composer_model_selector(ui, skin, bounds);
             }
-            if let Some(bounds) = chrome.context {
-                self.composer_context_ring(ui, &chrome, bounds);
+            if let Some(bounds) = context_bounds {
+                self.composer_context_ring(ui, skin, bounds, model.unwrap_or_default());
             }
-            if chrome.permissions {
-                self.navigate(Navigation::Page(Page::Settings), true);
-                self.open_chat_permissions();
+            if compact {
+                self.compact_context();
             }
-            if chrome.stop && self.stop_current_run() {
+            if stop && self.stop_current_run() {
                 self.state.cancelling = true;
             }
         }
         // Keep the existing CancelRun button and assistant/model, goals, todos,
         // queue and child controls around this input.
+    }
+
+    fn can_compact_context(&self) -> bool {
+        self.state.loaded
+            && self.state.selected_conversation.is_some()
+            && !self.state.conversation_pending
+            && !self.state.cancelling
+            && !self.state.run_pending
+    }
+
+    fn compact_context(&mut self) {
+        if self.can_compact_context()
+            && let Some(conversation_id) = self.state.selected_conversation.clone()
+            && self.dispatch(Action::CompactConversation { conversation_id })
+            && !self.state.running
+        {
+            self.mark_run_pending();
+        }
     }
     pub fn new(cc: &eframe::CreationContext<'_>, data_dir: PathBuf) -> Self {
         crate::platform::install_system_fonts(&cc.egui_ctx);
@@ -381,6 +438,7 @@ impl RustApplication {
             settings_view: Default::default(),
             settings_leave: Default::default(),
             composer_platform: Default::default(),
+            composer_placeholder: None,
             mobile_icons: mobile_chat::Icons::load(&cc.egui_ctx),
             drawer_sorting: false,
             composer_run_pending: None,
@@ -403,8 +461,10 @@ impl RustApplication {
             legacy_pending: false,
             legacy_confirm: None,
             legacy_import_report: None,
+            page_history: Vec::new(),
             drawer_open: false,
             drawer_motion: drawer::DrawerMotion::default(),
+            drawer_transcript: None,
             rendered_dark_mode: None,
             memory_editor: None,
             memory_delete: None,
@@ -448,9 +508,14 @@ impl RustApplication {
         }
     }
 
-    pub fn with_runtime(mut self, runtime: RuntimeBridge) -> Self {
-        self.runtime = Some(runtime);
-        self.dispatch(Action::Load);
+    pub fn with_runtime(mut self, runtime: Result<RuntimeBridge, String>) -> Self {
+        match runtime {
+            Ok(runtime) => {
+                self.runtime = Some(runtime);
+                self.dispatch(Action::Load);
+            }
+            Err(error) => self.state.error(error),
+        }
         self
     }
 
@@ -461,6 +526,7 @@ impl RustApplication {
         context: egui::Context,
     ) -> Self {
         self.window_insets = crate::platform::window_insets::View::new(app, context.clone());
+        self.rendered_dark_mode = None;
         crate::platform::navigation::install(context);
         self
     }
@@ -1006,7 +1072,11 @@ impl RustApplication {
                         }
                         Event::ConversationInfo(update) => self.conversation_manager.apply(update),
                         Event::Avatar(update) => self.avatar_event(&context, update),
-                        Event::ConversationPreferences(_) => self.conversation_manager.invalidate(),
+                        Event::ConversationPreferences(snapshot)
+                            if snapshot.order != self.state.conversation_preferences.order =>
+                        {
+                            self.conversation_manager.invalidate_order();
+                        }
                         Event::ConversationOrderFinished { request_id, result } => {
                             if self.conversation_order_pending.as_ref() == Some(request_id) {
                                 self.conversation_order_pending = None;
@@ -1206,6 +1276,7 @@ impl RustApplication {
                             }
                         }
                         Event::ConversationDeleted(id) => {
+                            self.conversation_manager.invalidate();
                             self.context_readings.remove(id);
                             self.authorized_queue.retain(|(owner, _)| owner != id);
                             if self.state.selected_conversation.as_ref() == Some(id) {
@@ -1269,7 +1340,16 @@ impl RustApplication {
                         }
                     }
                     let previous_page = self.state.page;
+                    let quiet_settings_save = previous_page == Page::Settings
+                        && self.settings_autosaves()
+                        && matches!(
+                            &event,
+                            Event::SettingsMutationFinished { result: Ok(_), .. }
+                        );
                     self.state.apply(event);
+                    if quiet_settings_save {
+                        self.state.notice = None;
+                    }
                     if previous_page == Page::Conversations
                         && self.state.page != Page::Conversations
                     {
@@ -1365,8 +1445,7 @@ impl RustApplication {
         context.request_repaint();
     }
 
-    fn apply_theme(&mut self, context: &egui::Context) {
-        let motion_scale = self.motion_scale();
+    fn apply_theme(&mut self, context: &egui::Context, motion_scale: f32) {
         let behavior = &self.state.settings.behavior;
         let system_dark = context
             .system_theme()
@@ -1385,10 +1464,6 @@ impl RustApplication {
             2 => true,
             _ => system_dark,
         };
-        #[cfg(target_os = "android")]
-        if let Some(view) = &self.window_insets {
-            view.set_system_bars(dark);
-        }
         let palette = match behavior.palette_mode {
             1..=3 => behavior.palette_mode,
             _ => 2,
@@ -1413,6 +1488,10 @@ impl RustApplication {
         if self.rendered_dark_mode == Some(appearance) {
             return;
         }
+        #[cfg(target_os = "android")]
+        if let Some(view) = &self.window_insets {
+            view.set_system_bars(dark);
+        }
         let theme = if dark {
             egui::Theme::Dark
         } else {
@@ -1426,9 +1505,9 @@ impl RustApplication {
             _ => 1.0,
         };
         let corner = match behavior.corner_scale {
-            0 => 5,
-            2 => 12,
-            _ => 8,
+            0 => 7,
+            2 => 18,
+            _ => 12,
         };
         context.style_mut_of(theme, |style| {
             let foreground = gray(if dark { 232 } else { 32 });
@@ -1531,28 +1610,80 @@ impl RustApplication {
                 style.visuals.widgets.open.bg_fill = hovered;
                 style.visuals.widgets.open.weak_bg_fill = hovered;
             }
+            if palette != 1 {
+                let rgb =
+                    |hex: u32| Color32::from_rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8);
+                let (background, text, weak, container, high, outline, primary) =
+                    match (palette, dark) {
+                        (3, false) => (
+                            0xffffff, 0x1a1c1f, 0x606163, 0xf6f6f6, 0xffffff, 0xededee, 0x000000,
+                        ),
+                        (3, true) => (
+                            0x181818, 0xffffff, 0xbcbcbc, 0x242424, 0x2d2d2d, 0x2b2b2b, 0xffffff,
+                        ),
+                        (_, false) => (
+                            0xfaf9f5, 0x22211e, 0x635f55, 0xf2f0e9, 0xedebe3, 0xdedcd2, 0xa94728,
+                        ),
+                        (_, true) => (
+                            0x262624, 0xf0eee7, 0xc3bfb3, 0x2d2d2a, 0x32312e, 0x42413b, 0xe78d70,
+                        ),
+                    };
+                style.visuals.panel_fill = rgb(background);
+                style.visuals.window_fill = rgb(container);
+                style.visuals.faint_bg_color = rgb(high);
+                style.visuals.override_text_color = Some(rgb(text));
+                style.visuals.weak_text_color = Some(rgb(weak));
+                style.visuals.hyperlink_color = rgb(primary);
+                style.visuals.window_stroke = Stroke::new(1.0, rgb(outline));
+                for widget in [
+                    &mut style.visuals.widgets.noninteractive,
+                    &mut style.visuals.widgets.inactive,
+                    &mut style.visuals.widgets.hovered,
+                    &mut style.visuals.widgets.active,
+                    &mut style.visuals.widgets.open,
+                ] {
+                    widget.fg_stroke.color = rgb(text);
+                    widget.bg_stroke.color = rgb(outline);
+                }
+                style.visuals.widgets.noninteractive.bg_fill = rgb(container);
+                style.visuals.widgets.inactive.bg_fill = rgb(background);
+                style.visuals.widgets.inactive.weak_bg_fill = rgb(container);
+                style.visuals.widgets.hovered.bg_fill = rgb(high);
+                style.visuals.widgets.hovered.weak_bg_fill = rgb(high);
+                style.visuals.widgets.open.bg_fill = rgb(high);
+                style.visuals.extreme_bg_color = rgb(background);
+            }
+            style.visuals.window_corner_radius =
+                egui::CornerRadius::same((f32::from(corner) / 12.0 * 20.0).round() as u8);
+            style.visuals.menu_corner_radius = style.visuals.window_corner_radius;
             style.spacing.item_spacing = egui::vec2(8.0, 8.0);
             style.spacing.button_padding = egui::vec2(12.0, 10.0);
-            style.spacing.interact_size = egui::vec2(44.0, ROW_HEIGHT);
+            style.spacing.interact_size = egui::vec2(48.0, 48.0);
             style.animation_time = 0.16 * motion_scale;
+            let family = if palette == 2 {
+                egui::FontFamily::Name("chat-serif".into())
+            } else {
+                egui::FontFamily::Proportional
+            };
             style.text_styles.insert(
                 egui::TextStyle::Body,
-                egui::FontId::proportional(16.0 * font_scale),
+                egui::FontId::new(15.0 * font_scale, family.clone()),
             );
             style.text_styles.insert(
                 egui::TextStyle::Button,
-                egui::FontId::proportional(15.0 * font_scale),
+                egui::FontId::new(14.0 * font_scale, family.clone()),
             );
             style.text_styles.insert(
                 egui::TextStyle::Heading,
-                egui::FontId::proportional(22.0 * font_scale),
+                egui::FontId::new(18.0 * font_scale, family.clone()),
             );
             style.text_styles.insert(
                 egui::TextStyle::Small,
-                egui::FontId::proportional(12.0 * font_scale),
+                egui::FontId::new(13.0 * font_scale, family.clone()),
             );
         });
         self.rendered_dark_mode = Some(appearance);
+        self.drawer_transcript = None;
         context.request_repaint();
     }
 
@@ -1614,23 +1745,17 @@ impl RustApplication {
         ui.separator();
         ui.label(RichText::new("会话").small().weak());
         self.drawer_delete_confirmation(ui, &mut navigation);
-        let drawer_conversations = self
-            .state
-            .conversation_preferences
-            .order
-            .indices(&self.state.conversations)
-            .into_iter()
-            .filter_map(|index| self.state.conversations.get(index).cloned())
-            .collect::<Vec<_>>();
-        if drawer_conversations.is_empty() {
+        let count = self.conversation_manager.active_order(&self.state).len();
+        if count == 0 {
             ui.label(RichText::new("暂无活动会话").weak());
         } else {
             egui::ScrollArea::vertical()
                 .id_salt("conversations")
                 .auto_shrink([false, false])
-                .show_rows(ui, ROW_HEIGHT, drawer_conversations.len(), |ui, rows| {
+                .show_rows(ui, ROW_HEIGHT, count, |ui, rows| {
                     for index in rows {
-                        let conversation = drawer_conversations[index].clone();
+                        let index = self.conversation_manager.active_order(&self.state)[index];
+                        let conversation = self.state.conversations[index].clone();
                         let selected =
                             self.state.selected_conversation.as_ref() == Some(&conversation.id);
                         let title = if conversation.title.is_empty() {
@@ -1768,6 +1893,7 @@ impl RustApplication {
             return;
         };
         let previous_page = self.state.page;
+        let going_back = matches!(&navigation, Navigation::Back(_));
         let close_drawer = !matches!(&navigation, Navigation::DeleteConversation(_));
         if close_drawer {
             self.queue_editor = None;
@@ -1776,7 +1902,25 @@ impl RustApplication {
             self.last_opened_child = None;
         }
         match navigation {
-            Navigation::Page(page) => {
+            Navigation::Page(page) | Navigation::Back(page) => {
+                if page != previous_page {
+                    if going_back {
+                        self.page_history.pop();
+                    } else if page == Page::Chat {
+                        self.page_history.clear();
+                    } else if let Some(index) = self
+                        .page_history
+                        .iter()
+                        .position(|&previous| previous == page)
+                    {
+                        self.page_history.truncate(index);
+                    } else {
+                        if previous_page == Page::Chat {
+                            self.page_history.clear();
+                        }
+                        self.page_history.push(previous_page);
+                    }
+                }
                 self.state.page = page;
                 if page == Page::Usage && previous_page != Page::Usage {
                     self.usage_view.attach();
@@ -1814,6 +1958,7 @@ impl RustApplication {
             }
             Navigation::NewConversation => match self.composer_platform.begin_new() {
                 Ok(()) => {
+                    self.page_history.clear();
                     self.state.selected_conversation = None;
                     self.state.page = Page::Chat;
                     self.state.conversation_pending = false;
@@ -1823,6 +1968,7 @@ impl RustApplication {
             },
             Navigation::Conversation(id) => {
                 if self.dispatch(Action::SelectConversation(id.clone())) {
+                    self.page_history.clear();
                     if let Err(error) = self.composer_platform.activate(Some(id)) {
                         self.state.error(error);
                     }
@@ -1863,7 +2009,7 @@ impl RustApplication {
         if goal.text.is_empty() {
             return;
         }
-        let owns_goal = self.state.selected_conversation.as_deref() == Some(&goal.chat_id);
+        let owns_goal = goal.visible_in(self.state.selected_conversation.as_deref());
         ui.collapsing(format!("持续目标 · {}", goal.status.label()), |ui| {
             ui.label(text_preview(&goal.text, 500));
             if !goal.progress.is_empty() {
@@ -1892,6 +2038,7 @@ impl RustApplication {
                         .clicked()
                     && self.dispatch(Action::ResumeGoal {
                         goal_id: goal.id.clone(),
+                        conversation_id: self.state.selected_conversation.clone(),
                     })
                 {
                     self.mark_run_pending();
@@ -2174,27 +2321,22 @@ impl RustApplication {
     fn composer_model_selector(
         &mut self,
         ui: &mut egui::Ui,
-        chrome: &mobile_chat::InputChrome,
+        skin: mobile_chat::Skin,
         bounds: egui::Rect,
     ) {
-        let skin = chrome.skin;
         let caption = self.conversation_model_caption();
         let model_font = skin.font(13.0);
         let badge_font = skin.font(11.0);
         let mode = self.state.settings.reasoning_effort.trim();
         let mode = if mode.is_empty() { "Default" } else { mode };
-        let badge_text = ui
-            .painter()
-            .layout_no_wrap(mode.to_owned(), badge_font.clone(), skin.ink)
-            .size()
-            .x;
-        let badge_width = badge_text + 12.0;
-        let model_width = ui
-            .painter()
-            .layout_no_wrap(caption.clone(), model_font.clone(), skin.ink)
-            .size()
-            .x
-            .min(160.0);
+        let badge_galley =
+            ui.painter()
+                .layout_no_wrap(mode.to_owned(), badge_font, skin.on_primary_container);
+        let badge_width = badge_galley.size().x + 12.0;
+        let model_galley =
+            ui.painter()
+                .layout_no_wrap(caption.clone(), model_font.clone(), skin.ink);
+        let model_width = model_galley.size().x.min(160.0);
         let right = bounds.right();
         let caret = egui::Rect::from_min_max(
             egui::pos2(right - 16.0, bounds.center().y - 8.0),
@@ -2210,15 +2352,20 @@ impl RustApplication {
             egui::pos2((model_right - model_width).max(bounds.left()), bounds.top()),
             egui::pos2(model_right, bounds.bottom()),
         );
-        mobile_chat::single_line(ui, &caption, model, model_font, skin.ink);
+        if model_galley.size().x <= model.width() + 0.5 {
+            let pos = egui::pos2(model.left(), model.center().y - model_galley.size().y * 0.5);
+            ui.painter().galley(pos, model_galley, skin.ink);
+        } else {
+            mobile_chat::single_line(ui, &caption, model, model_font, skin.ink);
+        }
         ui.painter().rect_filled(badge, 4.0, skin.primary_container);
-        mobile_chat::single_line(
-            ui,
-            mode,
-            badge.shrink2(egui::vec2(6.0, 2.0)),
-            badge_font,
-            skin.on_primary_container,
+        let badge_bounds = badge.shrink2(egui::vec2(6.0, 2.0));
+        let badge_pos = egui::pos2(
+            badge_bounds.left(),
+            badge_bounds.center().y - badge_galley.size().y * 0.5,
         );
+        ui.painter()
+            .galley(badge_pos, badge_galley, skin.on_primary_container);
         let painter = ui.painter();
         let tip = egui::pos2(caret.center().x, caret.center().y + 2.5);
         painter.line_segment(
@@ -2249,19 +2396,32 @@ impl RustApplication {
     fn composer_context_ring(
         &mut self,
         ui: &mut egui::Ui,
-        chrome: &mobile_chat::InputChrome,
+        skin: mobile_chat::Skin,
         bounds: egui::Rect,
+        model: &str,
     ) {
-        let skin = chrome.skin;
-        let used = self
+        let reading = self
             .state
             .selected_conversation
             .as_ref()
             .and_then(|id| self.context_readings.get(id))
-            .map_or(0, |(_, reading)| reading.used);
+            .map(|(_, reading)| reading)
+            .filter(|reading| reading.model == model);
+        let window = self
+            .state
+            .settings
+            .model_contexts
+            .get(model)
+            .copied()
+            .filter(|value| *value > 0)
+            .map_or(crate::context::DEFAULT_CONTEXT_WINDOW, |value| value as u64);
+        let used = reading.map_or(0, |reading| reading.used);
         let center = bounds.center();
         let painter = ui.painter();
         painter.circle_stroke(center, 11.0, Stroke::new(2.0, skin.divider));
+        if let Some(reading) = reading {
+            context_readout::draw_usage_arc(ui, center, 11.0, reading, skin.accent);
+        }
         let label = if used >= 1000 {
             format!("{}k", used / 1000)
         } else {
@@ -2274,6 +2434,17 @@ impl RustApplication {
             skin.font(9.0),
             skin.accent,
         );
+        let button = ui.interact(
+            bounds,
+            ui.make_persistent_id("composer context"),
+            egui::Sense::click(),
+        );
+        button.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "上下文用量"));
+        egui::Popup::menu(&button)
+            .align(egui::emath::RectAlign::TOP_END)
+            .gap(8.0)
+            .frame(egui::Frame::popup(ui.style()).inner_margin(12))
+            .show(|ui| context_readout::details(ui, reading, model, window));
     }
 
     fn chat(&mut self, ui: &mut egui::Ui, skin: Option<mobile_chat::Skin>) {
@@ -2282,22 +2453,10 @@ impl RustApplication {
             return;
         }
         if skin.is_none()
-            && let Some(conversation_id) = self.state.selected_conversation.clone()
+            && self.state.selected_conversation.is_some()
+            && full_button(ui, "压缩上下文", self.can_compact_context()).clicked()
         {
-            if full_button(
-                ui,
-                "压缩上下文",
-                self.state.loaded && !self.state.cancelling && !self.state.run_pending,
-            )
-            .clicked()
-            {
-                let already_running = self.state.running;
-                if self.dispatch(Action::CompactConversation { conversation_id })
-                    && !already_running
-                {
-                    self.mark_run_pending();
-                }
-            }
+            self.compact_context();
         }
         let composer_margin = if skin.is_some() {
             egui::Margin {
@@ -2339,6 +2498,12 @@ impl RustApplication {
                 let configured = resolved.as_ref().is_ok_and(|settings| {
                     !settings.endpoint.trim().is_empty() && !settings.model.trim().is_empty()
                 });
+                let model = skin.and_then(|_| {
+                    resolved
+                        .as_ref()
+                        .ok()
+                        .map(|settings| settings.model.to_owned())
+                });
                 chat_configured = configured;
                 if !self.state.capabilities.chat {
                     unavailable(ui, "聊天运行时尚未接入");
@@ -2374,15 +2539,23 @@ impl RustApplication {
                     .is_none()
                     && (self.state.goal.text.is_empty()
                         || self.state.goal.status == crate::goal::Status::Completed
-                        || self.state.selected_conversation.as_deref()
-                            == Some(self.state.goal.chat_id.as_str()));
+                        || self
+                            .state
+                            .goal
+                            .visible_in(self.state.selected_conversation.as_deref()));
                 if let Some(skin) = skin {
                     mobile_chat::composer_frame(skin).show(ui, |ui| {
                         ui.spacing_mut().item_spacing.y = 0.0;
-                        self.composer_input(ui, configured, can_start_goal, Some(skin));
+                        self.composer_input(
+                            ui,
+                            configured,
+                            can_start_goal,
+                            Some(skin),
+                            model.as_deref(),
+                        );
                     });
                 } else {
-                    self.composer_input(ui, configured, can_start_goal, None);
+                    self.composer_input(ui, configured, can_start_goal, None, None);
                 }
                 if self.state.running && skin.is_none() {
                     ui.horizontal(|ui| {
@@ -2415,7 +2588,11 @@ impl RustApplication {
         if skin.is_some() {
             main = main.frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(16, 0)));
         }
-        main.show(ui, |ui| {
+        let freeze = skin.is_some()
+            && self.drawer_motion.progress() > 0.0
+            && !self.history_renderer.covering_dialog();
+        let mut snapshot = self.drawer_transcript.take();
+        let transcript = |ui: &mut egui::Ui| {
             if self.state.conversation_pending {
                 ui.spinner();
                 ui.label("正在读取会话…");
@@ -2423,6 +2600,9 @@ impl RustApplication {
             }
             let Some(conversation_id) = self.state.selected_conversation.clone() else {
                 if let Some(skin) = skin {
+                    if !self.drawer_motion.active() {
+                        self.drawer_motion.set_empty_chat_area(ui.max_rect());
+                    }
                     self.mobile_empty_chat(ui, skin, chat_configured);
                     return;
                 }
@@ -2485,7 +2665,11 @@ impl RustApplication {
                 reading,
             );
             self.turn_navigation_intents(intents);
+        };
+        main.show(ui, |ui| {
+            drawer::FrozenTranscript::show(ui, &mut snapshot, freeze, transcript);
         });
+        self.drawer_transcript = snapshot;
     }
 
     fn child_tasks(&mut self, ui: &mut egui::Ui) {
@@ -2985,7 +3169,10 @@ impl RustApplication {
             unavailable(ui, "自动化运行时正在连接");
             return;
         }
-        let requests = self.automation_view.show(ui, ready);
+        let requests = egui::ScrollArea::vertical()
+            .id_salt("automation_settings")
+            .show(ui, |ui| self.automation_view.show(ui, ready))
+            .inner;
         self.automation_requests(requests);
     }
     fn linux_requests(&mut self, requests: Vec<crate::controller::linux_runtime::Request>) {
@@ -3028,7 +3215,11 @@ impl RustApplication {
             unavailable(ui, "用量账本尚未接入");
             return;
         }
-        let requests = self.usage_view.show(ui);
+        let requests = egui::ScrollArea::vertical()
+            .id_salt("usage_statistics")
+            .max_height((ui.available_height() - 144.0).max(96.0))
+            .show(ui, |ui| self.usage_view.show(ui))
+            .inner;
         for request in requests {
             let (id, token) = request.identity();
             let identity = (id.to_owned(), token.to_owned());
@@ -3295,7 +3486,7 @@ impl eframe::App for RustApplication {
         self.settings_performance_visibility();
         self.history_renderer
             .set_behavior(&self.state.settings.behavior);
-        self.apply_theme(&context);
+        self.apply_theme(&context, motion_scale);
         let frame_bounds = ui.available_rect_before_wrap();
         let mobile = frame_bounds.width() < 720.0
             && self.state.page == Page::Chat
@@ -3313,7 +3504,7 @@ impl eframe::App for RustApplication {
                     panel
                         .exact_size(size)
                         .resizable(false)
-                        .show_separator_line(!mobile)
+                        .show_separator_line(false)
                         .frame(egui::Frame::NONE.fill(ui.visuals().panel_fill))
                         .show(ui, |_| {});
                 }
@@ -3408,6 +3599,7 @@ impl eframe::App for RustApplication {
         if self.state.approval.is_none() {
             shell.max.y = frame_bounds.max.y;
         }
+        let root_layer = ui.layer_id();
         let mut home = narrow.then(|| {
             self.drawer_motion.update(
                 &context,
@@ -3428,6 +3620,7 @@ impl eframe::App for RustApplication {
             self.drawer_motion = drawer::DrawerMotion::default();
         }
         let ui = home.as_mut().unwrap_or(ui);
+        let mut header_back = false;
         if mobile {
             skin.background(ui, shell);
             egui::Panel::top("mobile_chat_header")
@@ -3436,6 +3629,14 @@ impl eframe::App for RustApplication {
                 .show_separator_line(false)
                 .frame(egui::Frame::NONE)
                 .show(ui, |ui| self.mobile_header(ui, skin));
+        } else if narrow && self.state.page != Page::Chat {
+            ui.painter().rect_filled(shell, 0, skin.surface);
+            let title = if self.state.page == Page::Settings {
+                self.settings_title()
+            } else {
+                self.state.page.label()
+            };
+            header_back = mobile_chat::page_header(ui, skin, title);
         } else {
             egui::Panel::top("app_header")
                 .frame(
@@ -3445,10 +3646,6 @@ impl eframe::App for RustApplication {
                 )
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        if narrow && ui.button("菜单").clicked() {
-                            self.drawer_open = !self.drawer_open;
-                            context.request_repaint();
-                        }
                         #[cfg(target_os = "android")]
                         let foreground = crate::platform::android::activity_visible();
                         #[cfg(not(target_os = "android"))]
@@ -3459,8 +3656,15 @@ impl eframe::App for RustApplication {
                         }
                         self.avatar_view
                             .set_brand(self.bundled_assets.cached_icon());
-                        ui.label(RichText::new(self.state.page.label()).size(20.0).strong());
-                        ui.menu_button("开源许可", |ui| self.bundled_assets.show_licenses(ui));
+                        let title = if self.state.page == Page::Settings {
+                            self.settings_title()
+                        } else {
+                            self.state.page.label()
+                        };
+                        ui.label(RichText::new(title).size(20.0).strong());
+                        if self.state.page != Page::Chat {
+                            header_back = ui.button("返回").clicked();
+                        }
                         if !self.state.loaded {
                             if self.runtime.is_some() {
                                 if self
@@ -3562,6 +3766,8 @@ impl eframe::App for RustApplication {
         let mut content = egui::CentralPanel::default();
         if mobile {
             content = content.frame(egui::Frame::NONE);
+        } else if narrow {
+            content = content.frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(16, 0)));
         }
         content.show(ui, |ui| match self.state.page {
             Page::Chat => self.chat(ui, mobile.then_some(skin)),
@@ -3584,11 +3790,19 @@ impl eframe::App for RustApplication {
         });
         if narrow {
             drawer::paint_home_corners(ui, shell, self.drawer_motion.progress(), skin.drawer);
+            drawer::finish_home_paint(root_layer, ui);
+        }
+        if !mobile || self.state.page != Page::Chat || self.child_viewer.is_some() {
+            self.drawer_transcript = None;
         }
         self.avatar_dialog(&context);
         self.subagent_dialogs(&context);
         self.schedule_dialog(&context);
         self.sync_conversation_viewing(&context);
+        if header_back {
+            self.go_back(&context, None, false);
+            context.request_repaint();
+        }
         if !self.state.runs.is_empty()
             || self.history_views.has_pending()
             || self.job_view.pending.is_some()
@@ -3643,16 +3857,9 @@ fn full_selectable(ui: &mut egui::Ui, text: impl Into<String>, selected: bool) -
 }
 
 fn text_field(ui: &mut egui::Ui, label: &str, text: &mut String, hint: &str, password: bool) {
-    ui.label(label);
-    ui.push_id(label, |ui| {
-        ui.add_sized(
-            [ui.available_width(), ROW_HEIGHT],
-            TextEdit::singleline(text)
-                .hint_text(hint)
-                .password(password)
-                .char_limit(8192),
-        );
-    });
+    ui.add_space(8.0);
+    settings::controls::field(ui, label, text, hint, password);
+    ui.add_space(8.0);
 }
 
 fn unavailable(ui: &mut egui::Ui, text: &str) {
@@ -3704,4 +3911,113 @@ fn usage_total(label: &str, summary: &TokenUsage) -> String {
         text.push_str(&format!(" · {} 笔无效上报", summary.invalid));
     }
     text
+}
+
+#[cfg(test)]
+mod startup_tests {
+    use super::*;
+
+    #[test]
+    fn first_frame_uses_existing_conversations_without_opening_one() {
+        let files = std::env::temp_dir().join(crate::controller::unique_id());
+        std::fs::create_dir(&files).unwrap();
+        let root = files.join("rust-state");
+        let mut store =
+            crate::store::Store::open_with_shared_files(root.clone(), Some(files.clone())).unwrap();
+        let chat = store.new_conversation("原有会话").unwrap();
+        std::fs::write(files.join("chats/store/unreadable.meta"), "{").unwrap();
+        std::fs::write(files.join("chats/last-opened"), &chat.id).unwrap();
+        let store =
+            crate::store::Store::open_with_shared_files(root.clone(), Some(files.clone())).unwrap();
+        assert!(!store.first_run_legacy_data().unwrap());
+
+        let context = egui::Context::default();
+        let creation = eframe::CreationContext::_new_kittest(context.clone());
+        let mut app =
+            RustApplication::new(&creation, root).with_runtime(Err("后台启动失败".into()));
+        let mut frame = eframe::Frame::_new_kittest();
+        let render = |app: &mut RustApplication, frame: &mut eframe::Frame| {
+            context.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(384.0, 840.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| eframe::App::ui(app, ui, frame),
+            )
+        };
+        assert!(!render(&mut app, &mut frame).shapes.is_empty());
+        assert_eq!(app.state.notice.as_ref().unwrap().text, "后台启动失败");
+        app.state.apply(Event::Loaded {
+            settings: store.settings.clone(),
+            conversations: store.conversation_summaries(),
+            memories: store.memories(),
+            workspace: store.workspace(),
+            capabilities: crate::state::Capabilities {
+                chat: true,
+                ..Default::default()
+            },
+            first_run_legacy_data: store.first_run_legacy_data(),
+        });
+        assert!(!render(&mut app, &mut frame).shapes.is_empty());
+        assert_eq!(app.state.conversations.len(), 1);
+        assert_eq!(app.state.conversations[0].id, chat.id);
+        assert!(app.state.selected_conversation.is_none());
+        assert_eq!(
+            std::fs::read_to_string(files.join("chats/store/unreadable.meta")).unwrap(),
+            "{"
+        );
+    }
+
+    #[test]
+    fn mobile_composer_renders_model_selector_and_updates_cached_placeholder() {
+        let files = std::env::temp_dir().join(crate::controller::unique_id());
+        std::fs::create_dir(&files).unwrap();
+        let context = egui::Context::default();
+        let creation = eframe::CreationContext::_new_kittest(context.clone());
+        let mut app = RustApplication::new(&creation, files.join("rust-state"))
+            .with_runtime(Err("offline".into()));
+        let mut settings = Settings::default();
+        settings.providers = vec![crate::configuration::Provider {
+            id: "p1".into(),
+            name: "Provider".into(),
+            endpoint: "https://example.invalid/v1".into(),
+            api_key: "key".into(),
+            selected_model:
+                "very-long-provider-prefix/ultra-long-model-identifier-for-truncation-check".into(),
+            ..Default::default()
+        }];
+        settings.reasoning_effort = "high".into();
+        app.state.apply(Event::Loaded {
+            settings,
+            conversations: Vec::new(),
+            memories: Vec::new(),
+            workspace: Default::default(),
+            capabilities: crate::state::Capabilities {
+                chat: true,
+                ..Default::default()
+            },
+            first_run_legacy_data: Ok(false),
+        });
+        let mut frame = eframe::Frame::_new_kittest();
+        let output = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(384.0, 840.0),
+                )),
+                ..Default::default()
+            },
+            |ui| eframe::App::ui(&mut app, ui, &mut frame),
+        );
+        assert!(!output.shapes.is_empty());
+        assert_eq!(
+            app.composer_placeholder
+                .as_ref()
+                .map(|(_, text)| text.as_str()),
+            Some("让JAgent做点什么…")
+        );
+    }
 }

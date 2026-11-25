@@ -1,4 +1,5 @@
 use super::{Navigation, Page, RichText, RustApplication};
+use crate::subagent_configuration::ApprovalMode;
 use eframe::egui::{self, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2, pos2, vec2};
 
 /// Compose's conversation rows advance 53.8dp and draw the highlight 45.5dp tall.
@@ -13,6 +14,42 @@ pub(super) struct Icons {
     brand: egui::TextureHandle,
 }
 
+pub(super) fn page_header(ui: &mut egui::Ui, skin: Skin, title: &str) -> bool {
+    egui::Panel::top("mobile_page_header")
+        .exact_size(76.0)
+        .resizable(false)
+        .show_separator_line(false)
+        .frame(egui::Frame::NONE)
+        .show(ui, |ui| {
+            let rect = ui.max_rect();
+            let back = Rect::from_center_size(
+                pos2(rect.left() + 36.0, rect.top() + 48.0),
+                Vec2::splat(48.0),
+            );
+            let response = ui.interact(back, ui.make_persistent_id("page back"), Sense::click());
+            response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "返回"));
+            let painter = ui.painter();
+            let center = back.center();
+            let start = center - vec2(8.0, 0.0);
+            let stroke = Stroke::new(1.8, skin.ink);
+            painter.line_segment([start, center + vec2(8.0, 0.0)], stroke);
+            painter.line_segment([start, center + vec2(-2.0, -6.0)], stroke);
+            painter.line_segment([start, center + vec2(-2.0, 6.0)], stroke);
+            single_line(
+                ui,
+                title,
+                Rect::from_min_max(
+                    pos2(back.right() + 12.0, back.top()),
+                    pos2(rect.right() - 12.0, back.bottom()),
+                ),
+                skin.font(18.0),
+                skin.text,
+            );
+            response.clicked()
+        })
+        .inner
+}
+
 #[derive(Clone, Copy)]
 pub(super) enum Icon {
     Menu,
@@ -20,7 +57,7 @@ pub(super) enum Icon {
     More,
     Context,
     Plus,
-    Permissions,
+    ApprovalAsk,
     Send,
     Stop,
     Mic,
@@ -32,9 +69,96 @@ pub(super) enum Icon {
     Copy,
     Edit,
     Regenerate,
+    ApprovalAuto,
+    ApprovalDeny,
+    Image,
+    Camera,
+    Document,
+    Goal,
+    Compact,
+}
+
+impl Icon {
+    pub(super) fn approval(mode: ApprovalMode) -> Self {
+        match mode {
+            ApprovalMode::Auto => Self::ApprovalAuto,
+            ApprovalMode::Ask => Self::ApprovalAsk,
+            ApprovalMode::Deny => Self::ApprovalDeny,
+        }
+    }
+}
+
+pub(super) fn composer_popup<'a>(
+    ui: &egui::Ui,
+    response: &egui::Response,
+    skin: Skin,
+    width: f32,
+) -> egui::Popup<'a> {
+    egui::Popup::menu(response)
+        .align(egui::emath::RectAlign::TOP_START)
+        .gap(8.0)
+        .width(width.min(ui.ctx().content_rect().width() - 24.0))
+        .frame(
+            egui::Frame::popup(ui.style())
+                .inner_margin(egui::Margin::symmetric(18, 14))
+                .corner_radius(20)
+                .fill(skin.surface),
+        )
 }
 
 impl Icons {
+    pub(super) fn popup_row(
+        &self,
+        ui: &mut egui::Ui,
+        skin: Skin,
+        icon: Icon,
+        label: &str,
+        enabled: bool,
+        selected: bool,
+    ) -> bool {
+        let (row, response) = ui.allocate_exact_size(
+            vec2(ui.available_width(), 48.0),
+            if enabled {
+                Sense::click()
+            } else {
+                Sense::hover()
+            },
+        );
+        response.widget_info(|| {
+            egui::WidgetInfo::selected(egui::Role::Button, enabled, selected, label)
+        });
+        if response.hovered() && enabled {
+            ui.painter()
+                .rect_filled(row, 8, mix(skin.surface, skin.ink, 0.08));
+        }
+        let ink = if enabled {
+            skin.ink
+        } else {
+            skin.ink.gamma_multiply(0.38)
+        };
+        self.draw(ui, pos2(row.left() + 13.0, row.center().y), 18.0, icon, ink);
+        let mut text = row;
+        text.min.x += 32.0;
+        text.max.x -= if selected { 26.0 } else { 4.0 };
+        single_line(
+            ui,
+            label,
+            text,
+            skin.font(14.0),
+            if enabled { skin.text } else { ink },
+        );
+        if selected {
+            let center = pos2(row.right() - 12.0, row.center().y);
+            let stroke = Stroke::new(1.7, skin.accent);
+            let joint = center + vec2(-1.5, 3.5);
+            ui.painter()
+                .line_segment([center + vec2(-5.0, 0.0), joint], stroke);
+            ui.painter()
+                .line_segment([joint, center + vec2(5.0, -4.0)], stroke);
+        }
+        response.clicked()
+    }
+
     pub(super) fn load(ctx: &egui::Context) -> Self {
         // The atlas uses the existing Android ic_* drawables, in Icon order.
         let atlas = Self::texture(ctx, "chat icons", include_bytes!("chat-icons.png"));
@@ -203,8 +327,11 @@ impl Skin {
     }
 
     pub(super) fn font(self, size: f32) -> FontId {
+        static CHAT_SERIF: std::sync::OnceLock<egui::FontFamily> = std::sync::OnceLock::new();
         let family = if self.serif {
-            egui::FontFamily::Name("chat-serif".into())
+            CHAT_SERIF
+                .get_or_init(|| egui::FontFamily::Name("chat-serif".into()))
+                .clone()
         } else {
             egui::FontFamily::Proportional
         };
@@ -219,14 +346,23 @@ impl Skin {
             .unwrap_or_default()
             .inverse()
             * ctx.viewport_rect();
-        let mut mesh = egui::Mesh::default();
+        let painter = egui::Painter::new(ctx.clone(), layer, clip.intersect(rect));
+        if self.surface == self.bottom {
+            painter.rect_filled(rect, 0, self.surface);
+            return;
+        }
+        let mut mesh = egui::Mesh {
+            vertices: Vec::with_capacity(4),
+            indices: Vec::with_capacity(6),
+            ..Default::default()
+        };
         mesh.colored_vertex(rect.left_top(), self.surface);
         mesh.colored_vertex(rect.right_top(), self.surface);
         mesh.colored_vertex(rect.right_bottom(), self.bottom);
         mesh.colored_vertex(rect.left_bottom(), self.bottom);
         mesh.add_triangle(0, 1, 2);
         mesh.add_triangle(0, 2, 3);
-        egui::Painter::new(ctx.clone(), layer, clip.intersect(rect)).add(egui::Shape::mesh(mesh));
+        painter.add(egui::Shape::mesh(mesh));
     }
 }
 
@@ -295,7 +431,7 @@ impl RustApplication {
         capsule(ui, right, skin.high);
         if self
             .mobile_icons
-            .button(ui, left, Icon::Menu, "打开侧边栏", 22.0, skin.ink, true)
+            .button(ui, left, Icon::Menu, "打开侧边栏", 20.0, skin.ink, true)
             .clicked()
         {
             self.drawer_open = true;
@@ -324,27 +460,18 @@ impl RustApplication {
         );
         let response =
             self.mobile_icons
-                .button(ui, context, Icon::Context, "上下文", 17.0, skin.ink, true);
+                .button(ui, context, Icon::Context, "上下文", 16.0, skin.ink, true);
         egui::Popup::menu(&response).show(|ui| {
-            if let Some(id) = self.state.selected_conversation.clone() {
-                let reading = self.context_readings.get(&id).map(|(_, reading)| reading);
+            if let Some(id) = self.state.selected_conversation.as_ref() {
+                let reading = self.context_readings.get(id).map(|(_, reading)| reading);
                 if let Some(reading) = reading {
                     ui.label(format!("上下文 · {} tokens", reading.used));
                 }
                 if ui
-                    .add_enabled(
-                        !self.state.cancelling && !self.state.run_pending,
-                        egui::Button::new("压缩上下文"),
-                    )
+                    .add_enabled(self.can_compact_context(), egui::Button::new("压缩上下文"))
                     .clicked()
                 {
-                    let running = self.state.running;
-                    if self.dispatch(crate::state::Action::CompactConversation {
-                        conversation_id: id,
-                    }) && !running
-                    {
-                        self.mark_run_pending();
-                    }
+                    self.compact_context();
                     ui.close();
                 }
             } else {
@@ -384,7 +511,6 @@ impl RustApplication {
                     }
                 }
             });
-            ui.menu_button("开源许可", |ui| self.bundled_assets.show_licenses(ui));
         });
     }
 
@@ -484,11 +610,7 @@ impl RustApplication {
         self.drawer_delete_confirmation(ui, &mut navigation);
         let footer_height = 13.0 + 5.0 * DRAWER_ENTRY_PITCH + 18.0;
         let list_height = (ui.available_height() - footer_height).max(24.0);
-        let order = self
-            .state
-            .conversation_preferences
-            .order
-            .indices(&self.state.conversations);
+        let count = self.conversation_manager.active_order(&self.state).len();
         let (list_rect, _) =
             ui.allocate_exact_size(vec2(ui.available_width(), list_height), Sense::hover());
         let mut list = ui.new_child(
@@ -500,12 +622,10 @@ impl RustApplication {
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .max_height(list_height)
-            .show_rows(&mut list, DRAWER_ROW_PITCH, order.len(), |ui, rows| {
+            .show_rows(&mut list, DRAWER_ROW_PITCH, count, |ui, rows| {
                 for index in rows {
-                    let Some(conversation) = self.state.conversations.get(order[index]).cloned()
-                    else {
-                        continue;
-                    };
+                    let index = self.conversation_manager.active_order(&self.state)[index];
+                    let conversation = self.state.conversations[index].clone();
                     ui.push_id(&conversation.id, |ui| {
                         let (rect, _) = ui.allocate_exact_size(
                             vec2(ui.available_width(), DRAWER_ROW_PITCH),
@@ -719,14 +839,12 @@ impl RustApplication {
                 }
                 let enabled = !self.state.run_pending && !self.state.conversation_pending;
                 let font = skin.font(14.0);
-                let text_width = ui
+                let galley = ui
                     .painter()
-                    .layout_no_wrap(suggestion.to_owned(), font.clone(), skin.ink)
-                    .size()
-                    .x;
+                    .layout_no_wrap(suggestion.to_owned(), font, skin.ink);
                 // The Material surface keeps a 48dp touch box around the 38dp pill.
                 let (row, response) = ui.allocate_exact_size(
-                    vec2(text_width + 28.0, 48.0),
+                    vec2(galley.size().x + 28.0, 48.0),
                     if enabled {
                         Sense::click()
                     } else {
@@ -741,7 +859,15 @@ impl RustApplication {
                     Stroke::new(1.0, skin.divider),
                     egui::StrokeKind::Middle,
                 );
-                single_line(ui, suggestion, pill.shrink2(vec2(14.0, 0.0)), font, skin.ink);
+                let text_bounds = pill.shrink2(vec2(14.0, 0.0));
+                ui.painter().galley(
+                    pos2(
+                        text_bounds.left(),
+                        text_bounds.center().y - galley.size().y * 0.5,
+                    ),
+                    galley,
+                    skin.ink,
+                );
                 if response.clicked() {
                     self.composer_platform.fill_suggestion(suggestion);
                 }
@@ -824,6 +950,8 @@ pub(super) struct InputChrome<'a> {
     pub placeholder: &'a str,
     pub model: Option<Rect>,
     pub context: Option<Rect>,
-    pub permissions: bool,
+    pub approval_mode: ApprovalMode,
+    pub approval_choice: Option<ApprovalMode>,
+    pub compact: bool,
     pub stop: bool,
 }

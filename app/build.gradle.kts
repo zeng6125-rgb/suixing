@@ -4,6 +4,8 @@ plugins {
     id("org.jetbrains.kotlin.plugin.serialization")
 }
 
+val rustAbi = providers.gradleProperty("rustAbi").orNull
+
 android {
     namespace = "com.suixing.agent"
     compileSdk = 37
@@ -13,10 +15,16 @@ android {
         applicationId = "com.suixing.agent"
         minSdk = 26
         targetSdk = 37
+        rustAbi?.let { ndk.abiFilters.add(it) }
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         versionCode = 739
         versionName = "0.9.11"
         resourceConfigurations += listOf("zh", "en")
+        externalNativeBuild {
+            cmake {
+                arguments += "-DSX_NATIVE_JOBS=${gradle.startParameter.maxWorkerCount.coerceIn(1, 4)}"
+            }
+        }
     }
 
     signingConfigs {
@@ -126,6 +134,7 @@ dependencies {
     implementation("androidx.navigation:navigation-compose:2.10.2")
     implementation("androidx.datastore:datastore-preferences:1.3.0")
     implementation("androidx.documentfile:documentfile:1.1.0")
+    implementation("androidx.webkit:webkit:1.16.0")
 
     implementation(platform("androidx.compose:compose-bom:2026.09.00"))
     implementation("androidx.compose.ui:ui")

@@ -51,18 +51,40 @@ int checkLog(void* context) noexcept {
 }
 int acceptLog(void* context, const std::uint8_t* data, std::size_t length) noexcept {
     auto& sink = *static_cast<LogSink*>(context);
-    auto bytes = sink.env->NewByteArray(static_cast<jsize>(length));
-    if (!bytes) return -1;
-    sink.env->SetByteArrayRegion(bytes, 0, static_cast<jsize>(length), reinterpret_cast<const jbyte*>(data));
-    if (!sink.env->ExceptionCheck()) sink.env->CallVoidMethod(sink.sink, sink.accept, bytes);
-    sink.env->DeleteLocalRef(bytes); return sink.env->ExceptionCheck() ? -1 : 0;
+    // Rust owns these bytes until the synchronous sink returns.
+    auto buffer = sink.env->NewDirectByteBuffer(const_cast<std::uint8_t*>(data), static_cast<jlong>(length));
+    if (!buffer) return -1;
+    sink.env->CallVoidMethod(sink.sink, sink.accept, buffer);
+    sink.env->DeleteLocalRef(buffer);
+    return sink.env->ExceptionCheck() ? -1 : 0;
 }
+template <typename T, std::size_t StackCapacity>
+struct SmallBuffer {
+    T stack[StackCapacity];
+    std::vector<T> heap;
+    T* dataPtr = stack;
+    std::size_t count = 0;
+
+    T* prepare(std::size_t size) {
+        count = size;
+        if (size <= StackCapacity) {
+            dataPtr = stack;
+        } else {
+            heap.resize(size);
+            dataPtr = heap.data();
+        }
+        return dataPtr;
+    }
+    const T* data() const noexcept { return dataPtr; }
+    std::size_t size() const noexcept { return count; }
+};
 }
 extern "C" JNIEXPORT jbyteArray JNICALL
 Java_com_suixing_agent_ui_chat_NativeTranscriptJni_nativePlan(JNIEnv* env, jobject, jintArray request) {
     const auto length = env->GetArrayLength(request);
-    std::vector<jint> values(static_cast<std::size_t>(length));
-    env->GetIntArrayRegion(request, 0, length, values.data());
+    SmallBuffer<jint, 256> values;
+    auto* ptr = values.prepare(static_cast<std::size_t>(length));
+    if (length > 0) env->GetIntArrayRegion(request, 0, length, ptr);
     if (env->ExceptionCheck()) return nullptr;
     SearchBuffer output{};
     if (sx_transcript_plan(reinterpret_cast<const std::uint8_t*>(values.data()), values.size() * sizeof(jint), &output) != 0) { failure(env, "Native transcript grouping failed."); return nullptr; }
@@ -71,8 +93,9 @@ Java_com_suixing_agent_ui_chat_NativeTranscriptJni_nativePlan(JNIEnv* env, jobje
 extern "C" JNIEXPORT jintArray JNICALL
 Java_com_suixing_agent_ui_chat_NativeTranscriptJni_nativePage(JNIEnv* env, jobject, jbyteArray request, jint want) {
     const auto length = env->GetArrayLength(request);
-    std::vector<std::uint8_t> flags(static_cast<std::size_t>(length));
-    env->GetByteArrayRegion(request, 0, length, reinterpret_cast<jbyte*>(flags.data()));
+    SmallBuffer<std::uint8_t, 1024> flags;
+    auto* ptr = flags.prepare(static_cast<std::size_t>(length));
+    if (length > 0) env->GetByteArrayRegion(request, 0, length, reinterpret_cast<jbyte*>(ptr));
     if (env->ExceptionCheck()) return nullptr;
     int output[3]; sx_transcript_page(flags.data(), flags.size(), want, output);
     jintArray result = env->NewIntArray(3);
@@ -83,7 +106,7 @@ Java_com_suixing_agent_ui_chat_NativeTranscriptJni_nativePage(JNIEnv* env, jobje
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_suixing_agent_data_NativeChatLogJni_nativeRead(JNIEnv* env, jobject, jobject file, jlong start, jlong end, jobject target, jobject check) {
     const auto fd = descriptor(env, file); if (env->ExceptionCheck()) return false;
-    auto type = env->GetObjectClass(target); const auto accept = env->GetMethodID(type, "accept", "([B)V"); env->DeleteLocalRef(type);
+    auto type = env->GetObjectClass(target); const auto accept = env->GetMethodID(type, "accept", "(Ljava/nio/ByteBuffer;)V"); env->DeleteLocalRef(type);
     if (env->ExceptionCheck()) return false;
     auto checkpoint = readCheckpoint(env, check);
     if (env->ExceptionCheck()) return false;
@@ -97,8 +120,9 @@ Java_com_suixing_agent_data_NativeChatLogJni_nativeRead(JNIEnv* env, jobject, jo
 extern "C" JNIEXPORT jint JNICALL
 Java_com_suixing_agent_data_NativeChatLogJni_nativeCut(JNIEnv* env, jobject, jbyteArray request, jint want, jboolean atStart) {
     const auto length = env->GetArrayLength(request);
-    std::vector<std::uint8_t> bytes(static_cast<std::size_t>(length));
-    env->GetByteArrayRegion(request, 0, length, reinterpret_cast<jbyte*>(bytes.data()));
+    SmallBuffer<std::uint8_t, 1024> bytes;
+    auto* ptr = bytes.prepare(static_cast<std::size_t>(length));
+    if (length > 0) env->GetByteArrayRegion(request, 0, length, reinterpret_cast<jbyte*>(ptr));
     if (env->ExceptionCheck()) return -1;
     return sx_chat_log_cut(bytes.data(), bytes.size(), want, atStart);
 }
@@ -114,8 +138,9 @@ extern "C" JNIEXPORT jlong JNICALL
 Java_com_suixing_agent_data_NativeChatLogJni_nativeLocate(JNIEnv* env, jobject, jobject file, jlong start, jlong end, jbyteArray request) {
     const auto fd = descriptor(env, file); if (env->ExceptionCheck()) return -1;
     const auto length = env->GetArrayLength(request);
-    std::vector<std::uint8_t> bytes(static_cast<std::size_t>(length));
-    env->GetByteArrayRegion(request, 0, length, reinterpret_cast<jbyte*>(bytes.data()));
+    SmallBuffer<std::uint8_t, 1024> bytes;
+    auto* ptr = bytes.prepare(static_cast<std::size_t>(length));
+    if (length > 0) env->GetByteArrayRegion(request, 0, length, reinterpret_cast<jbyte*>(ptr));
     if (env->ExceptionCheck()) return -1;
     std::int64_t output = -1;
     if (sx_chat_log_locate(fd, start, end, bytes.data(), bytes.size(), &output) != 0) failure(env, "Native transcript offset scan failed.");
@@ -127,11 +152,13 @@ Java_com_suixing_agent_data_NativeChatLogJni_nativeLocatePair(JNIEnv* env, jobje
     if (env->ExceptionCheck()) return nullptr;
     const auto firstLength = env->GetArrayLength(first);
     const auto lastLength = env->GetArrayLength(last);
-    std::vector<std::uint8_t> firstBytes(static_cast<std::size_t>(firstLength));
-    std::vector<std::uint8_t> lastBytes(static_cast<std::size_t>(lastLength));
-    env->GetByteArrayRegion(first, 0, firstLength, reinterpret_cast<jbyte*>(firstBytes.data()));
+    SmallBuffer<std::uint8_t, 256> firstBytes;
+    SmallBuffer<std::uint8_t, 256> lastBytes;
+    auto* firstPtr = firstBytes.prepare(static_cast<std::size_t>(firstLength));
+    auto* lastPtr = lastBytes.prepare(static_cast<std::size_t>(lastLength));
+    if (firstLength > 0) env->GetByteArrayRegion(first, 0, firstLength, reinterpret_cast<jbyte*>(firstPtr));
     if (env->ExceptionCheck()) return nullptr;
-    env->GetByteArrayRegion(last, 0, lastLength, reinterpret_cast<jbyte*>(lastBytes.data()));
+    if (lastLength > 0) env->GetByteArrayRegion(last, 0, lastLength, reinterpret_cast<jbyte*>(lastPtr));
     if (env->ExceptionCheck()) return nullptr;
     std::int64_t offsets[2];
     if (sx_chat_log_locate_pair(fd, end, firstBytes.data(), firstBytes.size(), lastBytes.data(), lastBytes.size(), offsets) != 0) {
@@ -147,8 +174,9 @@ extern "C" JNIEXPORT jbyteArray JNICALL
 Java_com_suixing_agent_ui_chat_markdown_NativeMarkdownJni_nativeRuntime(JNIEnv* env, jobject, jint op, jstring source, jint from, jint parameter, jboolean flag) {
     const auto length = env->GetStringLength(source);
     if (from < 0 || from > length) { failure(env, "Invalid native Markdown source range."); return nullptr; }
-    std::vector<jchar> units(static_cast<std::size_t>(length - from));
-    if (length > from) env->GetStringRegion(source, from, length - from, units.data());
+    SmallBuffer<jchar, 1024> units;
+    auto* ptr = units.prepare(static_cast<std::size_t>(length - from));
+    if (length > from) env->GetStringRegion(source, from, length - from, ptr);
     if (env->ExceptionCheck()) return nullptr;
     SearchBuffer output{};
     const auto status = sx_markdown_runtime(op, units.data(), units.size(), parameter, flag, &output);

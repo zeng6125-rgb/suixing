@@ -3,7 +3,13 @@ package com.suixing.agent.data
 import android.content.Context
 import io.mockk.every
 import io.mockk.mockk
+import io.mockk.mockkObject
+import io.mockk.unmockkObject
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
@@ -11,6 +17,8 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import java.io.File
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 /**
  * 「加载更早」的两条路径必须给出**同一批内容**：
@@ -101,7 +109,7 @@ class PagedReadTest {
         val repository = repository()
         val chat = twelveTurns("p2")
         seed(chat)
-        val (_, startOffset, gen) = repository.readTailWindow(chat.id, turns = 3)!!
+        val (opened, startOffset, gen) = repository.readTailWindow(chat.id, turns = 3)!!
 
         // 换代重写：编辑后重答会走这条路（gen 递增、日志重建），旧的字节偏移随之失效。
         val rewritten = chat.copy(messages = chat.messages.drop(2), updatedAt = 2L)
@@ -113,5 +121,37 @@ class PagedReadTest {
 
         val stale = repository.readEarlier(chat.id, startOffset, turns = 3, expectGen = gen)
         assertEquals("代次不匹配时必须返回 null（让调用方回退到按 id 查）", null, stale)
+
+        val page = repository.readEarlierBefore(chat.id, opened.messages.first().id, turns = 3)!!
+        assertEquals(nextGen, page.gen)
+        assertEquals(chat.messages.subList(12, 18).map { it.id }, page.messages.map { it.id })
+        assertEquals(null, repository.readEarlierBefore(chat.id, chat.messages.first().id))
+    }
+
+    @Test
+    fun `an id scan leaves the repository free to write another chat`() = runBlocking {
+        val repository = repository()
+        val chat = twelveTurns("p3")
+        seed(chat)
+        val scanning = CountDownLatch(1)
+        val resumeScan = CountDownLatch(1)
+        mockkObject(NativeChatLog)
+        try {
+            every { NativeChatLog.locate(any(), any(), any(), any()) } answers {
+                scanning.countDown()
+                check(resumeScan.await(15, TimeUnit.SECONDS))
+                callOriginal()
+            }
+            val page = async { repository.readEarlierBefore(chat.id, chat.messages[12].id, turns = 3) }
+            try {
+                withContext(Dispatchers.IO) { check(scanning.await(5, TimeUnit.SECONDS)) }
+                assertEquals("another chat", withTimeout(2_000) { repository.create("another chat") }.title)
+            } finally {
+                resumeScan.countDown()
+            }
+            assertEquals(chat.messages.subList(6, 12), page.await()!!.messages)
+        } finally {
+            unmockkObject(NativeChatLog)
+        }
     }
 }

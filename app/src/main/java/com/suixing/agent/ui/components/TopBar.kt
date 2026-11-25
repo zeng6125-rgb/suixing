@@ -37,13 +37,14 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.suixing.agent.R
 
-/** Page actions share the back arrow's 20dp glyph and theme ink, with the normal touch target. */
+/** Page actions share the same theme ink and touch target. */
 @Composable
 internal fun PageTopBarAction(
     icon: ImageVector,
     contentDescription: String,
     onClick: () -> Unit,
     enabled: Boolean = true,
+    glyphSize: Dp = 20.dp,
 ) {
     IconButton(
         onClick = onClick,
@@ -53,7 +54,7 @@ internal fun PageTopBarAction(
         Icon(
             imageVector = icon,
             contentDescription = contentDescription,
-            modifier = Modifier.size(20.dp),
+            modifier = Modifier.size(glyphSize),
             tint = LocalContentColor.current,
         )
     }
@@ -246,6 +247,7 @@ fun PageTopBar(
                     contentDescription = "返回",
                     onClick = onBack,
                     containerColor = Color.Transparent,
+                    iconSize = 22.dp,
                     shadowElevation = 0.dp,
                 )
                 Spacer(Modifier.width(12.dp))

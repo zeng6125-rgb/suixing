@@ -10,6 +10,7 @@ import androidx.compose.foundation.systemGestureExclusion
 import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerId
+import androidx.compose.ui.input.pointer.PointerInputChange
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -30,7 +31,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.staticCompositionLocalOf
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.FrameRateCategory
 import androidx.compose.ui.geometry.Rect
@@ -47,15 +50,20 @@ import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import kotlin.math.abs
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 
 /** One pointer gesture's ownership token. A newer token permanently invalidates this one. */
 internal class DrawerGestureSession internal constructor(internal val generation: Long)
 
 internal class DrawerMotion(val target: DrawerValue, val spec: AnimationSpec<Float>)
+
+private const val DRAG_INTERPOLATION_NANOS = 8_333_333L
+private data class DrawerDragSample(val timeNanos: Long, val progress: Float)
 
 /**
  * Discrete input-shield lifecycle for the home page. Only [Closed] may drop the shield; every
@@ -96,6 +104,12 @@ internal fun drawerHomeShieldContains(xPx: Float, shieldStartPx: Float): Boolean
 internal fun drawerHomeShieldStartPx(panelWidthPx: Float, progress: Float): Float =
     panelWidthPx * progress.coerceIn(0f, 1f)
 
+/** Ease the rounded outline into the full-screen rectangle over the final 30 dp of travel. */
+internal fun drawerHomeCornerFraction(progress: Float): Float {
+    val fraction = (progress / 0.10f).coerceIn(0f, 1f)
+    return fraction * fraction * (3f - 2f * fraction)
+}
+
 /**
  * 自建抽屉状态。
  *
@@ -123,13 +137,16 @@ internal class SuixingDrawerState(initialValue: DrawerValue) {
     }
     private var dragProgress by mutableFloatStateOf(progress.value)
     private var directManipulation by mutableStateOf(false)
+    private val dragSamples = ArrayDeque<DrawerDragSample>()
+    private var dragFrameJob: Job? = null
+    private var hasDragFrame = false
 
     /** One bounded progress for the panel, home transform, background and input shield. */
     val visualProgress: State<Float> = object : State<Float> {
         override val value: Float
             get() = (if (directManipulation) dragProgress else progress.value).coerceIn(0f, 1f)
     }
-    // The backing and inner chat layer only change at the closed boundary.
+    // The backing color only changes at the closed boundary.
     val isHomeExposed: Boolean by derivedStateOf(structuralEqualityPolicy()) {
         visualProgress.value > 0f
     }
@@ -152,6 +169,36 @@ internal class SuixingDrawerState(initialValue: DrawerValue) {
     private val homeShield = derivedStateOf(structuralEqualityPolicy()) { homeLifecycle.shieldsHome }
     // Opening, dragging, exposed and closing all keep the same shield and drawer visibility.
     val homeShieldActive: Boolean get() = homeShield.value
+    private var retainClosingFrame by mutableStateOf(false)
+
+    /** A conversation switch must draw its target once before the close can freeze that page. */
+    fun freezesChat(switchingConversation: Boolean): Boolean =
+        if (homeShieldActive) {
+            !switchingConversation || homeLifecycle == DrawerHomeLifecycle.Closing
+        } else {
+            retainClosingFrame
+        }
+
+    internal suspend fun observeContentUpdates(onAllowed: (Boolean) -> Unit) {
+        try {
+            snapshotFlow { isMoving to homeShieldActive }.collectLatest { (moving, exposed) ->
+                if (exposed) {
+                    retainClosingFrame = true
+                } else {
+                    // Present the closed geometry with the cached chat before recording live text.
+                    withFrameNanos { }
+                    if (retainClosingFrame) {
+                        retainClosingFrame = false
+                        // Give the live chat its own frame before refreshing hidden drawer rows.
+                        withFrameNanos { }
+                    }
+                }
+                onAllowed(!moving)
+            }
+        } finally {
+            retainClosingFrame = false
+        }
+    }
 
     // Gesture ownership. All mutations below happen on the UI thread (pointer callbacks,
     // rememberCoroutineScope launches, and Compose effects). Do not call these from a background
@@ -174,6 +221,7 @@ internal class SuixingDrawerState(initialValue: DrawerValue) {
     fun beginGesture(): DrawerGestureSession {
         val currentProgress = visualProgress.value
         cancelMotion()
+        resetDragFrames()
         dragProgress = currentProgress
         directManipulation = true
         homeLifecycle = DrawerHomeLifecycle.Dragging
@@ -195,6 +243,7 @@ internal class SuixingDrawerState(initialValue: DrawerValue) {
         if (!isGestureActive(session)) return false
         activeGesture = null
         gestureSession = null
+        resetDragFrames()
         cancelMotion()
         homeLifecycle = drawerIdleLifecycle(visualProgress.value)
         return true
@@ -211,6 +260,7 @@ internal class SuixingDrawerState(initialValue: DrawerValue) {
         activeGesture = null
         gestureSession = null
         gestureGeneration++
+        resetDragFrames()
         cancelMotion()
         homeLifecycle = drawerIdleLifecycle(visualProgress.value)
         return true
@@ -272,7 +322,73 @@ internal class SuixingDrawerState(initialValue: DrawerValue) {
         dragProgress = progressValue.coerceIn(0f, 1f)
     }
 
-    /** Applies the final pointer position and then the velocity-carrying spring. */
+    fun presentDragChange(
+        session: DrawerGestureSession,
+        accumulator: DrawerDragAccumulator,
+        generation: Long,
+        change: PointerInputChange,
+        deltaPx: Float,
+        scope: CoroutineScope,
+    ) {
+        val history = if (hasDragFrame) change.historical else emptyList()
+        var previousX = change.previousPosition.x
+        if (deltaPx == 0f && history.none { it.position.x != previousX }) return
+
+        fun present(delta: Float, time: Long) {
+            val next = accumulator.dragBy(generation, delta)
+            if (!next.isNaN()) presentDragSample(session, next, time, scope)
+        }
+
+        // Once the first frame is visible, keep turns and pauses inside a delivered batch.
+        var remaining = deltaPx
+        for (sample in history) {
+            val delta = sample.position.x - previousX
+            present(delta, sample.uptimeMillis)
+            previousX = sample.position.x
+            remaining -= delta
+        }
+        present(remaining, change.uptimeMillis)
+    }
+
+    /** Keep the first response immediate. Once drawing, sample between real pointer positions. */
+    fun presentDragSample(session: DrawerGestureSession, progress: Float, uptimeMillis: Long, scope: CoroutineScope) {
+        if (!isGestureActive(session)) return
+        val previous = dragSamples.lastOrNull()
+        val time = maxOf(uptimeMillis * 1_000_000L, previous?.timeNanos ?: 0L)
+        val position = progress.coerceIn(0f, 1f)
+        if (!hasDragFrame) {
+            dragSamples.clear()
+            dragProgress = position
+        } else if (previous?.timeNanos == time) {
+            dragSamples.removeLast()
+        }
+        dragSamples.addLast(DrawerDragSample(time, position))
+        if (dragFrameJob?.isActive == true) return
+        dragFrameJob = scope.launch(start = CoroutineStart.UNDISPATCHED) {
+            do {
+                withFrameNanos { frameTime ->
+                    hasDragFrame = true
+                    val drawTime = frameTime - DRAG_INTERPOLATION_NANOS
+                    while (dragSamples.size > 1 && dragSamples[1].timeNanos <= drawTime) dragSamples.removeFirst()
+                    val first = dragSamples.first()
+                    val next = dragSamples.getOrNull(1)
+                    dragProgress = if (next == null || drawTime <= first.timeNanos) first.progress else {
+                        val fraction = (drawTime - first.timeNanos).toFloat() / (next.timeNanos - first.timeNanos)
+                        first.progress + (next.progress - first.progress) * fraction
+                    }
+                }
+            } while (dragSamples.size > 1)
+        }
+    }
+
+    private fun resetDragFrames() {
+        dragFrameJob?.cancel()
+        dragFrameJob = null
+        dragSamples.clear()
+        hasDragFrame = false
+    }
+
+    /** Continue from the presented position with the finger's release velocity. */
     suspend fun settleGesture(
         session: DrawerGestureSession,
         target: DrawerValue,
@@ -323,6 +439,7 @@ internal class SuixingDrawerState(initialValue: DrawerValue) {
         activeGesture = null
         gestureSession = null
         gestureGeneration++
+        resetDragFrames()
         cancelMotion()
     }
 
@@ -336,9 +453,19 @@ internal class SuixingDrawerState(initialValue: DrawerValue) {
 internal val LocalDrawerGestureState = staticCompositionLocalOf<SuixingDrawerState?> { null }
 
 private const val DRAWER_EDGE_EXCLUSION_DP = 32f
+private const val MAX_DRAWER_RELEASE_SPEED = 7f // panel widths per second
+private const val EARLY_DRAWER_DRAG_MS = 24L
 
 /** Wait for a clear lead when the first movements are nearly diagonal. */
-private fun drawerDragAxis(horizontal: Float, vertical: Float, slop: Float): Orientation? {
+private fun drawerDragAxis(
+    horizontal: Float,
+    vertical: Float,
+    slop: Float,
+    allowEarlyHorizontal: Boolean,
+): Orientation? {
+    if (allowEarlyHorizontal && abs(horizontal) > maxOf(slop * (2f / 3f), abs(vertical) * 3f)) {
+        return Orientation.Horizontal
+    }
     if (NativeCore.available) {
         return when (NativeCoreJni.nativeDrawerAxis(horizontal, vertical, slop)) {
             1 -> Orientation.Horizontal
@@ -451,7 +578,7 @@ internal fun SuixingDrawer(
     val conversationSwitch = LocalDrawerBusy.current
     val parentDecorationMotion = LocalDecorationMotion.current
     val homeDecorationMotion = remember(state, parentDecorationMotion) {
-        { parentDecorationMotion() && !state.isMoving }
+        { parentDecorationMotion() && !state.homeShieldActive }
     }
 
     // Accumulate physical deltas independently of the release animation.
@@ -461,8 +588,8 @@ internal fun SuixingDrawer(
     // tween 不认初速度 ⇒ 快划松手时动画会从 0 速度重新起步，看着像"顿一下再走"。
     // spring 带 initialVelocity 才能与手指的甩动连续。
     val settle: (DrawerGestureSession, DrawerValue, Float, DrawerDragRelease, AnimationSpec<Float>) -> Unit =
-        remember(scope, state, panelPx) {
-            { session, target, velocityPx, releaseProgress, spec ->
+        remember(scope, state, dragAccumulator) {
+            { session, target, progressVelocity, releaseProgress, spec ->
                 scope.launch(start = CoroutineStart.UNDISPATCHED) {
                     // A newer drag or external close invalidates this release.
                     if (!dragAccumulator.canSettle(releaseProgress) ||
@@ -474,21 +601,22 @@ internal fun SuixingDrawer(
                         session,
                         target,
                         spec,
-                        initialVelocity = velocityPx / panelPx,
-                        releaseProgress = releaseProgress.progress,
+                        initialVelocity = progressVelocity,
                     )
                 }
             }
         }
-    val settleDrag: (DrawerGestureSession, DrawerDragRelease, Float) -> Unit = remember(density, settle) {
+    val settleDrag: (DrawerGestureSession, DrawerDragRelease, Float) -> Unit = remember(density, panelPx, settle) {
         { session, release, velocity ->
             val target = drawerDragTarget(release.openByDistance, velocity / density.density)
-            // Carry momentum only toward the selected anchor.
+            // Use the raw speed for the anchor. Bound the spring's speed after the finger lifts.
+            val progressVelocity = velocity / panelPx
             val springVelocity = when (target) {
-                DrawerValue.Open -> velocity.coerceAtLeast(0f)
-                DrawerValue.Closed -> velocity.coerceAtMost(0f)
+                DrawerValue.Open -> progressVelocity.coerceIn(0f, MAX_DRAWER_RELEASE_SPEED)
+                DrawerValue.Closed -> progressVelocity.coerceIn(-MAX_DRAWER_RELEASE_SPEED, 0f)
             }
-            settle(session, target, springVelocity, release, DRAWER_SPEC)
+            val spec = if (target == DrawerValue.Closed) DRAWER_CLOSE_SPEC else DRAWER_OPEN_SPEC
+            settle(session, target, springVelocity, release, spec)
         }
     }
     Box(
@@ -538,7 +666,14 @@ internal fun SuixingDrawer(
                             horizontal += dx
                             vertical += change.position.y - change.previousPosition.y
                             if (!isDrag) {
-                                val axis = drawerDragAxis(horizontal, vertical, viewConfiguration.touchSlop)
+                                val axis = drawerDragAxis(
+                                    horizontal, vertical, viewConfiguration.touchSlop,
+                                    allowEarlyHorizontal = ownedSession == null && !childOwnsGesture &&
+                                        state.priorityPointerId != down.id &&
+                                        change.pressed && horizontal > 0f &&
+                                        change.uptimeMillis - down.uptimeMillis in 1L..EARLY_DRAWER_DRAG_MS &&
+                                        canStartDrawerDrag(state.visualProgress.value, horizontal),
+                                )
                                 if (axis == Orientation.Vertical) {
                                     childOwnsGesture = true
                                     break
@@ -578,7 +713,7 @@ internal fun SuixingDrawer(
                                     val release = dragAccumulator.finish(generation)
                                     val stillOwned = state.finishGesture(session)
                                     if (release != null && stillOwned && interruptedMotion != null) {
-                                        settle(session, interruptedMotion.target, interruptedVelocity * panelPx,
+                                        settle(session, interruptedMotion.target, interruptedVelocity,
                                             release, interruptedMotion.spec)
                                     }
                                 }
@@ -586,11 +721,9 @@ internal fun SuixingDrawer(
                             val session = ownedSession
                             val generation = ownedGeneration
                             if (session != null && generation != null) {
-                                val delta = horizontal - appliedHorizontal
-                                if (delta != 0f) {
-                                    val progress = dragAccumulator.dragBy(generation, delta)
-                                    if (!progress.isNaN()) state.applyGestureFrame(session, progress)
-                                }
+                                state.presentDragChange(
+                                    session, dragAccumulator, generation, change, horizontal - appliedHorizontal, scope,
+                                )
                                 appliedHorizontal = horizontal
                             }
                             if (isDrag) {
@@ -636,7 +769,7 @@ internal fun SuixingDrawer(
                                     val v = tracker.calculateVelocity(viewConfiguration.maximumFlingVelocity).x
                                     settleDrag(session, release, v)
                                 } else if (interruptedMotion != null) {
-                                    settle(session, interruptedMotion.target, interruptedVelocity * panelPx,
+                                    settle(session, interruptedMotion.target, interruptedVelocity,
                                         release, interruptedMotion.spec)
                                 }
                             }
@@ -719,7 +852,12 @@ internal fun SuixingDrawer(
                                 if (!isDrag && !ignoreSwipe) {
                                     val slop = viewConfiguration.touchSlop
                                     movedPastSlop = movedPastSlop || maxOf(abs(horizontal), abs(vertical)) > slop
-                                    val axis = drawerDragAxis(horizontal, vertical, slop)
+                                    val axis = drawerDragAxis(
+                                        horizontal, vertical, slop,
+                                        allowEarlyHorizontal = ownedSession == null && change.pressed && horizontal < 0f &&
+                                            change.uptimeMillis - down.uptimeMillis in 1L..EARLY_DRAWER_DRAG_MS &&
+                                            canStartDrawerDrag(state.visualProgress.value, horizontal),
+                                    )
                                     isDrag = axis == Orientation.Horizontal &&
                                         (ownedSession != null ||
                                             canStartDrawerDrag(state.visualProgress.value, horizontal))
@@ -739,7 +877,7 @@ internal fun SuixingDrawer(
                                             val stillOwned = state.finishGesture(session)
                                             if (release != null && stillOwned && interruptedMotion != null) {
                                                 settle(session, interruptedMotion.target,
-                                                    interruptedVelocity * panelPx, release, interruptedMotion.spec)
+                                                    interruptedVelocity, release, interruptedMotion.spec)
                                             }
                                         }
                                     }
@@ -747,11 +885,9 @@ internal fun SuixingDrawer(
                                 val session = ownedSession
                                 val generation = ownedGeneration
                                 if (session != null && generation != null) {
-                                    val delta = horizontal - appliedHorizontal
-                                    if (delta != 0f) {
-                                        val progress = dragAccumulator.dragBy(generation, delta)
-                                        if (!progress.isNaN()) state.applyGestureFrame(session, progress)
-                                    }
+                                    state.presentDragChange(
+                                        session, dragAccumulator, generation, change, horizontal - appliedHorizontal, scope,
+                                    )
                                     appliedHorizontal = horizontal
                                 }
                                 if (change.changedToUpIgnoreConsumed()) {

@@ -10,11 +10,7 @@ void sx_search_free(std::uint8_t*, std::size_t);
 int sx_core_tokens(const std::uint16_t*, std::size_t, int*);
 bool sx_core_retry(int, bool, int, int, bool, bool, bool);
 int sx_drawer_drag_axis(float, float, float);
-struct DrawerDrag;
 struct VelocitySample;
-void sx_drawer_drag_begin(DrawerDrag*, float, float);
-float sx_drawer_drag_advance(DrawerDrag*, float);
-bool sx_drawer_drag_opens(const DrawerDrag*);
 float sx_drawer_velocity(const VelocitySample*, std::size_t, std::size_t, float);
 bool sx_drawer_settle_open(bool, float);
 int sx_core_json(std::uint64_t, const std::uint16_t*, std::size_t, SearchBuffer*);
@@ -59,20 +55,6 @@ extern "C" JNIEXPORT void JNICALL Java_com_suixing_agent_core_NativeCoreJni_nati
 extern "C" JNIEXPORT jint JNICALL Java_com_suixing_agent_core_NativeCoreJni_nativeDrawerAxis(JNIEnv*, jobject, jfloat x, jfloat y, jfloat slop) {
     return sx_drawer_drag_axis(x, y, slop);
 }
-extern "C" JNIEXPORT void JNICALL Java_com_suixing_agent_core_NativeCoreJni_nativeDrawerDragBegin(JNIEnv* env, jobject, jobject buffer, jfloat start, jfloat width) {
-    auto* state = static_cast<DrawerDrag*>(env->GetDirectBufferAddress(buffer));
-    if (!state || env->GetDirectBufferCapacity(buffer) != 7 * sizeof(float)) {
-        fail(env, "java/lang/IllegalArgumentException", "Invalid drawer drag state buffer.");
-        return;
-    }
-    sx_drawer_drag_begin(state, start, width);
-}
-extern "C" JNIEXPORT jfloat JNICALL Java_com_suixing_agent_core_NativeCoreJni_nativeDrawerDragAdvance(JNIEnv* env, jobject, jobject buffer, jfloat delta) {
-    return sx_drawer_drag_advance(static_cast<DrawerDrag*>(env->GetDirectBufferAddress(buffer)), delta);
-}
-extern "C" JNIEXPORT jboolean JNICALL Java_com_suixing_agent_core_NativeCoreJni_nativeDrawerDragOpens(JNIEnv* env, jobject, jobject buffer) {
-    return sx_drawer_drag_opens(static_cast<DrawerDrag*>(env->GetDirectBufferAddress(buffer))) ? JNI_TRUE : JNI_FALSE;
-}
 extern "C" JNIEXPORT jfloat JNICALL Java_com_suixing_agent_core_NativeCoreJni_nativeDrawerVelocity(JNIEnv* env, jobject, jobject buffer, jint next, jint count, jfloat maxVelocity) {
     auto* samples = static_cast<VelocitySample*>(env->GetDirectBufferAddress(buffer));
     if (!samples || env->GetDirectBufferCapacity(buffer) != 20 * 16 ||
@@ -96,18 +78,19 @@ extern "C" JNIEXPORT jint JNICALL Java_com_suixing_agent_core_NativeCoreJni_nati
 extern "C" JNIEXPORT jboolean JNICALL Java_com_suixing_agent_core_NativeCoreJni_nativeRetry(JNIEnv*, jobject, jint status, jboolean present, jint attempt, jint max, jboolean received, jboolean cancelled, jboolean mid) {
     return sx_core_retry(status, present == JNI_TRUE, attempt, max, received == JNI_TRUE, cancelled == JNI_TRUE, mid == JNI_TRUE) ? JNI_TRUE : JNI_FALSE;
 }
-extern "C" JNIEXPORT jintArray JNICALL Java_com_suixing_agent_core_NativeCoreJni_nativeTrimChunk(JNIEnv* env, jobject, jintArray costs, jbyteArray users, jint budget, jint used, jint kept) {
+extern "C" JNIEXPORT jintArray JNICALL Java_com_suixing_agent_core_NativeCoreJni_nativeTrimChunk(JNIEnv* env, jobject, jintArray costs, jbyteArray users, jint count, jint budget, jint used, jint kept) {
     if (!costs || !users || budget <= 0 || kept < 0) { fail(env, "java/lang/IllegalArgumentException", "Invalid history budget batch."); return nullptr; }
-    const auto count = env->GetArrayLength(costs);
-    if (count < 1 || count > 32 || count != env->GetArrayLength(users)) { fail(env, "java/lang/IllegalArgumentException", "Invalid history budget batch size."); return nullptr; }
-    auto costData = env->GetIntArrayElements(costs, nullptr);
-    if (!costData) return nullptr;
-    auto roleData = env->GetByteArrayElements(users, nullptr);
-    if (!roleData) { env->ReleaseIntArrayElements(costs, costData, JNI_ABORT); return nullptr; }
+    constexpr jsize maxBatch = 32;
+    if (count < 1 || count > maxBatch || count > env->GetArrayLength(costs) ||
+        count > env->GetArrayLength(users)) { fail(env, "java/lang/IllegalArgumentException", "Invalid history budget batch size."); return nullptr; }
+    jint costData[maxBatch];
+    jbyte roleData[maxBatch];
+    env->GetIntArrayRegion(costs, 0, count, costData);
+    if (env->ExceptionCheck()) return nullptr;
+    env->GetByteArrayRegion(users, 0, count, roleData);
+    if (env->ExceptionCheck()) return nullptr;
     std::int32_t values[4] = {};
     const int status = sx_core_trim_chunk(reinterpret_cast<const std::int32_t*>(costData), reinterpret_cast<const std::uint8_t*>(roleData), count, budget, used, kept, values);
-    env->ReleaseByteArrayElements(users, roleData, JNI_ABORT);
-    env->ReleaseIntArrayElements(costs, costData, JNI_ABORT);
     if (!succeeded(env, status)) return nullptr;
     auto result = env->NewIntArray(4);
     if (result) env->SetIntArrayRegion(result, 0, 4, values);

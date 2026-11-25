@@ -265,6 +265,8 @@ internal class ReasoningExpansion(
         return state
     }
 
+    fun retainedProse(blockId: String): TextRevealState? = viewports[blockId]?.prose
+
     private fun isProtected(blockId: String): Boolean = protectedPrefix?.let { blockId.startsWith(it) } == true
 
     private fun trimHistoricalViewports() {
@@ -387,6 +389,14 @@ internal fun thinkSlot(parts: List<Part>, index: Int, fallback: String): String 
     return "${part.runId.ifEmpty { fallback }}:$before"
 }
 
+internal fun reasoningPreview(text: String): String {
+    val start = text.indexOfFirst { !it.isWhitespace() }
+    if (start < 0) return ""
+    var end = text.indexOf('\n', start).takeIf { it >= 0 } ?: text.length
+    while (end > start && text[end - 1].isWhitespace()) end--
+    return text.substring(start, end)
+}
+
 /**
  * The model's thinking, folded into the reply's own card.
  *
@@ -446,16 +456,13 @@ internal fun ReasoningBlock(
     // think), and one that has settled follows 历史思考块默认展开. Off, a finished think folds to
     // its header — the reader's tap is the way in, and the table remembers it per conversation.
     val expanded = expansion.stored(blockId) ?: (streaming || preserveLiveExpansion || (!runStreaming && expandReasoning))
-    // **增量切行**（见 [IncrementalLines]）：文本是逐字变长的，`text.split('\n')` 每一拍都在
-    // 全文上重做一次切分 + 分配一个新列表。切分器记住上一次的文本与结果，只切新增那一段。
-    val shown = rememberTypedText(
+    val prose = if (streaming) expansion.viewport(blockId).prose else expansion.retainedProse(blockId)
+    val shown = if (prose == null) text else rememberTypedText(
         text = text,
         enabled = streaming,
         startAtZero = true,
-        retained = expansion.viewport(blockId).prose,
+        retained = prose,
     )
-    val splitter = remember { IncrementalLines() }
-    val lines = remember(shown) { splitter.linesFor(shown) }
     // **remember 真正的依赖**（原来每帧一个 buildList）：`meta` 只由这两个数决定。
     val meta = remember(reasoningTokens, elapsedMs) {
         buildList<String> {
@@ -463,12 +470,7 @@ internal fun ReasoningBlock(
             if (elapsedMs > 0) add(formatDuration(elapsedMs))
         }
     }
-    // Source order is also visual order. A trailing blank line owns the cursor
-    // immediately after a newline, rather than moving it back onto the preceding line.
-    val cursorAt = if (streaming) lines.lastIndex else -1
-    // IncrementalLines publishes an immutable snapshot. Key by identity instead of comparing
-    // every completed line again while the last line is still growing.
-    val firstLine = remember(IdentityKey(lines)) { lines.firstOrNull { it.isNotBlank() }?.trim().orEmpty() }
+    val firstLine = remember(shown) { reasoningPreview(shown) }
     // The chain itself, shared by both shapes: a think with no text at all (the
     // endpoint reported time but no chain) must not render as an empty slab, and a
     // monster chain stays bounded at 320dp of lazy list that follows its tail while
@@ -481,6 +483,13 @@ internal fun ReasoningBlock(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         } else {
+            val lines = if (streaming || shown !== text) {
+                val splitter = remember { IncrementalLines() }
+                remember(shown) { splitter.linesFor(shown) }
+            } else {
+                remember(text) { IndexedTextLines(text, universalNewlines = false) }
+            }
+            val cursorAt = if (streaming) lines.lastIndex else -1
             // Top-anchored lines keep an already-read wrapped line still while its tail grows.
             val viewport = remember(expansion, blockId) { expansion.viewport(blockId) }
             val inner = viewport.listState
@@ -556,7 +565,7 @@ internal fun ReasoningBlock(
                     } else {
                         // 思考链每一行都可选中复制（用户：「确实所有情况都要可复制」）——
                         // 由长按武装制满足：不按时零选区成本，长按那一刻容器就位。
-                        SelectableWhenArmed {
+                        SelectableWhenArmed(enabled = !(streaming && index == cursorAt)) {
                         MarkdownText(
                             text = line,
                             // 13sp with roomier leading than bodySmall's: a long chain of
@@ -860,9 +869,7 @@ internal fun ToolDetail(line: ToolLine, maxHeight: Dp = 180.dp, listState: LazyL
     val scheme = MaterialTheme.colorScheme
     val args = line.args.takeIf { it.isNotBlank() && it != "{}" }
     val output = line.message?.toolOutput?.takeIf { it.isNotBlank() }
-    // 行表在这里算（`LazyColumn` 的 content lambda **不是** `@Composable`，里面不能用 remember）。
-    // 不 remember 的话，工具块在流式期间每个发布节拍重组都会重跑一次 lines()。
-    val rows = remember(output) { output?.lines().orEmpty() }
+    val rows = remember(output) { output?.let { IndexedTextLines(it, universalNewlines = true) }.orEmpty() }
     // 工具输出的「复制」：写剪贴板 + Toast（用户：「复制后给个提示」）。
     val copyOutput = rememberCopyToClipboard()
     // 与思考块同一套形态：**虚拟列表 + 高度上限**，内容比上限短时按真实高度渲染。

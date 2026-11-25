@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import com.suixing.agent.core.decodeCoreValue
 import com.suixing.agent.core.encodeCoreBytes
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -13,10 +14,13 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.encodeToStream
 import java.io.File
 import java.io.FileOutputStream
+import java.io.OutputStream
 import java.util.UUID
 import java.nio.channels.FileChannel
 import java.nio.file.StandardOpenOption
@@ -230,35 +234,6 @@ class ChatRepository(
      * 0.8.317 迁移之后那个文件已经不存在了，详情弹窗因此对**每个**会话都显示
      * 「这个会话在磁盘上没有对应的文件」（用户实测）。
      */
-    /**
-     * 一串会话的日志尺寸（会话列表每行显示用），**一次 IO、一次锁**。
-     *
-     * **为什么不走 `chatFile`**：那个为了 `tail` 会把**整份日志**读成 String
-     * （30MB 会话 = 30MB 读 + 最多 60MB 中间字符串），而列表只需要 `length()`。
-     *
-     * **为什么是批量、而不是每行一次**：会话行是 LazyColumn 的 item。原来每行一个
-     * `LaunchedEffect` 调单项版本 —— 每行一次 `withContext(Dispatchers.IO)` 线程切换 +
-     * 一次 `lock.withLock`（这把锁和会话保存、流式写盘共用）；列表有 N 行时滚动一次就抢
-     * N 次全局锁，而且 `remember` 在 item 作用域里，滚出去再滚回来**又读一遍**。
-     * 现在一次线程切换、一次锁、一次遍历。`readMeta` 自带 meta 缓存
-     * （按 path+length+lastModified），所以重复调用只有 stat 的成本。
-     *
-     * 返回的字节数与 `chatFile().bytes` 同源同值（同一个文件、同一个 `length()`）；
-     * 取不到的 id 不出现在结果里。
-     */
-    internal suspend fun chatSizes(ids: List<String>): Map<String, Long> =
-        if (ids.isEmpty()) emptyMap() else withContext(Dispatchers.IO) {
-            lock.withLock {
-                val sizes = HashMap<String, Long>(ids.size)
-                for (id in ids) {
-                    val meta = store.readMeta(id) ?: continue
-                    val log = store.logFileOf(meta) ?: continue
-                    if (log.isFile) sizes[id] = log.length()
-                }
-                sizes
-            }
-        }
-
     internal suspend fun chatFile(id: String): ChatFile? = withContext(Dispatchers.IO) {
         lock.withLock {
             val meta = store.readMeta(id)
@@ -305,21 +280,16 @@ private fun readTailText(file: java.io.File, maxChars: Int = TAIL_MAX_CHARS): St
     return String(bytes, Charsets.UTF_8).takeLast(maxChars)
 }
 
-    /**
-     * 导出用：整份会话序列化成 JSON 文本（**不是**直接拷日志 —— 日志是 JSONL，
-     * 拷出去用户打不开；而旧 `.json` 已经不存在了）。
-     */
-    internal suspend fun exportJson(id: String): String? = withContext(Dispatchers.IO) {
-        val meta = store.readMeta(id)
-        val messages = if (meta != null) {
-            store.all(meta)
-        } else {
-            return@withContext null
-        }
-        val base = _conversations.value.firstOrNull { it.id == id }
-        val conversation = (base ?: meta?.toConversation() ?: return@withContext null)
-            .copy(messages = messages)
-        json.encodeToString(Conversation.serializer(), conversation)
+    /** Export one committed generation as the portable single-JSON conversation format. */
+    @OptIn(ExperimentalSerializationApi::class)
+    internal suspend fun exportJson(id: String, openOutput: () -> OutputStream?): Boolean = withContext(Dispatchers.IO) {
+        val snapshot = lock.withLock { store.readMeta(id)?.let(store::openRead) }
+            ?: return@withContext false
+        val conversation = snapshot.use { it.meta.toConversation(it.from(0)) }
+        currentCoroutineContext().ensureActive()
+        val output = openOutput() ?: return@withContext false
+        output.use { json.encodeToStream(Conversation.serializer(), conversation, it) }
+        true
     }
 
     internal suspend fun sessionTotals(id: String): ChatTotals? =
@@ -347,10 +317,9 @@ private fun readTailText(file: java.io.File, maxChars: Int = TAIL_MAX_CHARS): St
 
     /** Every message of one chat. Use only where the whole transcript is genuinely needed. */
     suspend fun readAll(id: String): List<StoredMessage> = withContext(Dispatchers.IO) {
-        lock.withLock {
-            val meta = store.readMeta(id) ?: return@withLock emptyList()
-            store.all(meta)
-        }
+        val snapshot = lock.withLock { store.readMeta(id)?.let(store::openRead) }
+            ?: return@withContext emptyList()
+        snapshot.use { it.from(0) }
     }
 
     /**
@@ -437,8 +406,16 @@ private fun readTailText(file: java.io.File, maxChars: Int = TAIL_MAX_CHARS): St
      * A supplied checkpoint list limits reuse to summaries retained by the request snapshot.
      */
     suspend fun readWire(id: String, checkpoints: List<ContextCheckpoint>? = null): WireHistory = withContext(Dispatchers.IO) {
-        // Pin the committed generation and byte range before releasing other writers.
-        val snapshot = lock.withLock { store.readMeta(id)?.let(store::openRead) }
+        // Like the transcript window, the descriptor pins the committed generation and end.
+        // Only a missing or replaced generation needs to retry behind the writer.
+        val opened = try {
+            store.committedRead(id) ?: store.readMeta(id)?.let(store::openRead)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            null
+        }
+        val snapshot = opened ?: lock.withLock { store.readMeta(id)?.let(store::openRead) }
             ?: return@withContext WireHistory(emptyList())
         snapshot.use {
             val meta = snapshot.meta
@@ -488,12 +465,18 @@ private fun readTailText(file: java.io.File, maxChars: Int = TAIL_MAX_CHARS): St
         beforeMessageId: String,
         turns: Int = OPEN_TURNS,
     ): EarlierPage? = withContext(Dispatchers.IO) {
-        lock.withLock {
+        if (beforeMessageId.isEmpty()) return@withContext null
+        val snapshot = lock.withLock {
             val meta = store.readMeta(id) ?: return@withLock null
-            val end = store.offsetOf(meta, beforeMessageId) ?: return@withLock null
-            if (end <= 0L) return@withLock EarlierPage(emptyList(), 0L, meta.gen)
-            val window = store.window(meta, end, turns)
-            EarlierPage(window.messages, window.startOffset, meta.gen)
+            if (store.logFileOf(meta) == null) return@withLock null
+            store.openRead(meta)
+        } ?: return@withContext null
+        // The ID scan and page read use one committed descriptor outside the writer lock.
+        snapshot.use {
+            val end = it.offsetOf(beforeMessageId) ?: return@use null
+            if (end == 0L) return@use EarlierPage(emptyList(), 0L, it.meta.gen)
+            val window = it.window(end, turns)
+            EarlierPage(window.messages, window.startOffset, it.meta.gen)
         }
     }
 

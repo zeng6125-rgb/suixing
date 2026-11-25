@@ -50,7 +50,37 @@ data class PerfSummary(
     val avgTotalMs: Long = 0,
     val avgCachePercent: Double = 0.0,
     val avgTokensPerSecond: Double = 0.0,
-)
+) {
+    companion object {
+        /** Summarize the same newest-first snapshot the page uses for its details. */
+        fun fromRecent(records: List<PerfRecord>): PerfSummary {
+            if (records.isEmpty()) return PerfSummary()
+            var ttftSum = 0L
+            var ttftN = 0
+            var totalSum = 0L
+            var totalN = 0
+            var cacheSum = 0.0
+            var cacheN = 0
+            var tpsSum = 0.0
+            var tpsN = 0
+            for (r in records.asReversed()) {
+                if (r.ttftMs > 0) { ttftSum += r.ttftMs; ttftN++ }
+                if (r.totalMs > 0) { totalSum += r.totalMs; totalN++ }
+                if (r.promptTokens > 0) { cacheSum += r.cachePercent; cacheN++ }
+                val tokensPerSecond = r.tokensPerSecond
+                if (tokensPerSecond > 0) { tpsSum += tokensPerSecond; tpsN++ }
+            }
+            return PerfSummary(
+                latest = records.first(),
+                count = records.size,
+                avgTtftMs = if (ttftN == 0) 0L else (ttftSum.toDouble() / ttftN).toLong(),
+                avgTotalMs = if (totalN == 0) 0L else (totalSum.toDouble() / totalN).toLong(),
+                avgCachePercent = if (cacheN == 0) 0.0 else cacheSum / cacheN,
+                avgTokensPerSecond = if (tpsN == 0) 0.0 else tpsSum / tpsN,
+            )
+        }
+    }
+}
 
 /**
  * 性能记录的本地存储：**有界**（只留最近 [MAX_RECORDS] 条）并落盘，跨重启可看。
@@ -111,36 +141,7 @@ class PerfMonitor(private val file: File) {
     }
 
     /** 顶部几个数字。没有任何记录时全 0，而不是编一个数。 */
-    fun summary(limit: Int = 50): PerfSummary = synchronized(lock) {
-        load()
-        val count = limit.coerceAtLeast(1).coerceAtMost(records.size)
-        val window = List(count) { index -> records[records.size - count + index] }
-        if (window.isEmpty()) return PerfSummary()
-        // **一个循环算四组平均**（优化清单 data-P2）：原来 4 条 `filter{}.map{}.average()`
-        // 会建 8 个中间 List。分组条件与分母完全不变（各算各的样本数）。
-        var ttftSum = 0L
-        var ttftN = 0
-        var totalSum = 0L
-        var totalN = 0
-        var cacheSum = 0.0
-        var cacheN = 0
-        var tpsSum = 0.0
-        var tpsN = 0
-        for (r in window) {
-            if (r.ttftMs > 0) { ttftSum += r.ttftMs; ttftN++ }
-            if (r.totalMs > 0) { totalSum += r.totalMs; totalN++ }
-            if (r.promptTokens > 0) { cacheSum += r.cachePercent; cacheN++ }
-            if (r.tokensPerSecond > 0) { tpsSum += r.tokensPerSecond; tpsN++ }
-        }
-        PerfSummary(
-            latest = window.last(),
-            count = window.size,
-            avgTtftMs = if (ttftN == 0) 0L else (ttftSum.toDouble() / ttftN).toLong(),
-            avgTotalMs = if (totalN == 0) 0L else (totalSum.toDouble() / totalN).toLong(),
-            avgCachePercent = if (cacheN == 0) 0.0 else cacheSum / cacheN,
-            avgTokensPerSecond = if (tpsN == 0) 0.0 else tpsSum / tpsN,
-        )
-    }
+    fun summary(limit: Int = 50): PerfSummary = PerfSummary.fromRecent(recent(limit.coerceAtLeast(1)))
 
     fun clear() {
         synchronized(lock) {

@@ -12,16 +12,13 @@ internal object NativeCoreJni {
     external fun nativeCreate(): Long
     external fun nativeCancel(handle: Long)
     external fun nativeDrawerAxis(horizontal: Float, vertical: Float, slop: Float): Int
-    external fun nativeDrawerDragBegin(buffer: ByteBuffer, progress: Float, widthPx: Float)
-    external fun nativeDrawerDragAdvance(buffer: ByteBuffer, deltaPx: Float): Float
-    external fun nativeDrawerDragOpens(buffer: ByteBuffer): Boolean
     external fun nativeDrawerVelocity(buffer: ByteBuffer, next: Int, count: Int, maximum: Float): Float
     external fun nativeDrawerReleaseOpen(openByDistance: Boolean, velocityDpPerSecond: Float): Boolean
     external fun nativeRelease(handle: Long)
     external fun nativeTokens(text: String): Int
     external fun nativeRetry(status: Int, present: Boolean, attempt: Int, max: Int, received: Boolean, cancelled: Boolean, midStream: Boolean): Boolean
     external fun nativeParseValue(handle: Long, text: String): ByteArray?
-    external fun nativeTrimChunk(costs: IntArray, users: ByteArray, budget: Int, used: Int, kept: Int): IntArray
+    external fun nativeTrimChunk(costs: IntArray, users: ByteArray, count: Int, budget: Int, used: Int, kept: Int): IntArray
     external fun nativeMeasureString(text: String): LongArray
     external fun nativeWriteString(text: String, sink: NativeJsonSink, scratch: ByteArray, quoted: Boolean)
 }

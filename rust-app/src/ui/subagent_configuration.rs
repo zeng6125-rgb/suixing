@@ -18,151 +18,164 @@ enum TemplateIntent {
 impl RustApplication {
     pub(super) fn subagent_settings(&mut self, ui: &mut egui::Ui) {
         let editable = self.state.loaded && !self.state.settings_pending;
-        ui.heading("子智能体");
-        ui.add_enabled_ui(editable, |ui| {
-            ui.horizontal(|ui| {
-                ui.label("同一主任务的并发子任务");
-                ui.add(
-                    egui::DragValue::new(&mut self.settings_draft.subagent_parallelism)
-                        .range(1..=3),
-                );
-            });
-            ui.horizontal(|ui| {
-                ui.label("主任务工具轮数（0 不主动限制）");
-                ui.add(
-                    egui::DragValue::new(&mut self.settings_draft.max_tool_rounds)
-                        .range(0..=u32::MAX),
-                );
-            });
-            egui::ComboBox::from_id_salt("parent_approval_mode")
-                .selected_text(self.settings_draft.approval_mode.label())
-                .show_ui(ui, |ui| {
-                    for mode in ApprovalMode::ALL {
-                        ui.selectable_value(
-                            &mut self.settings_draft.approval_mode,
-                            mode,
-                            mode.label(),
-                        );
-                    }
-                });
+        use super::settings::controls;
+        controls::first_section(ui, "任务委派");
+        controls::row(
+            ui,
+            &mut self.settings_draft.subagents_enabled,
+            "允许委派子任务",
+            "助手可将复杂任务拆开，子任务继承父任务的工具权限，可能增加模型调用。",
+        );
+        if self.settings_draft.subagents_enabled {
+            let title = format!("子任务并行数 {}", self.settings_draft.subagent_parallelism);
+            controls::slider(
+                ui,
+                &mut self.settings_draft.subagent_parallelism,
+                1..=3,
+                &title,
+                "每轮最多创建 6 个子任务。父任务正常结束前会等待子任务；停止父任务时一同取消。",
+            );
+        }
+        controls::section(ui, "子任务模型");
+        let mut choosing = self.settings_view.subagent_choosing_model
+            || self.settings_draft.subagent_model.is_some();
+        controls::choice_row(
+            ui,
+            "模型来源",
+            "默认跟随当前会话的模型。选好供应商和模型后，从下一次运行起仅对子任务生效。",
+            &mut choosing,
+            &[(false, "跟随当前会话"), (true, "指定模型")],
+        );
+        self.settings_view.subagent_choosing_model = choosing;
+        if choosing {
             model_selection(
                 ui,
                 "default_subagent_model",
                 &mut self.settings_draft.subagent_model,
                 &self.state.settings,
             );
-            egui::ComboBox::from_id_salt("default_subagent_profile")
-                .selected_text(
-                    self.settings_draft
-                        .subagent_profiles
-                        .iter()
-                        .find(|profile| {
-                            profile.id == self.settings_draft.default_subagent_profile_id
-                        })
-                        .map(|profile| profile.name.as_str())
-                        .unwrap_or("跟随父任务及子模型设置"),
-                )
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(
-                        &mut self.settings_draft.default_subagent_profile_id,
-                        String::new(),
-                        "跟随父任务及子模型设置",
-                    );
-                    for profile in &self.settings_draft.subagent_profiles {
-                        ui.selectable_value(
-                            &mut self.settings_draft.default_subagent_profile_id,
-                            profile.id.clone(),
-                            &profile.name,
-                        );
-                    }
-                });
-        });
+        } else {
+            self.settings_draft.subagent_model = None;
+        }
+        controls::section(ui, "子任务模板");
         let can_edit = editable && self.settings_draft == self.state.settings;
         let mut intent = None;
-        for profile in &self.state.settings.subagent_profiles {
-            ui.push_id(&profile.id, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(&profile.name).strong());
-                    if profile.id == self.state.settings.default_subagent_profile_id {
-                        ui.label("默认");
-                    }
-                });
-                ui.label(
-                    RichText::new(format!(
-                        "{} · {} · {}",
-                        profile
-                            .model
-                            .as_ref()
-                            .map(|model| model.model.as_str())
-                            .unwrap_or("继承模型"),
-                        profile
-                            .approval_mode
-                            .map(ApprovalMode::label)
-                            .unwrap_or("继承审批"),
-                        profile
-                            .allowed_tools
-                            .as_ref()
-                            .map(|tools| if tools.is_empty() {
-                                "仅文字".into()
-                            } else {
-                                format!("{} 个工具", tools.len())
+        controls::card(ui, 0).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            egui::Frame::NONE.inner_margin(16).show(ui, |ui| {
+                controls::text(ui, "默认模板", 17.0, 24.0, ui.visuals().text_color());
+                egui::ComboBox::from_id_salt("default_subagent_profile")
+                    .width(ui.available_width())
+                    .selected_text(
+                        self.settings_draft
+                            .subagent_profiles
+                            .iter()
+                            .find(|profile| {
+                                profile.id == self.settings_draft.default_subagent_profile_id
                             })
-                            .unwrap_or_else(|| "继承父工具".into())
-                    ))
-                    .small()
-                    .weak(),
-                );
-                ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled(can_edit, egui::Button::new("编辑"))
-                        .clicked()
-                    {
-                        intent = Some(TemplateIntent::Edit(profile.clone()));
-                    }
-                    if ui
-                        .add_enabled(
-                            can_edit && self.state.settings.subagent_profiles.len() < 256,
-                            egui::Button::new("复制"),
-                        )
-                        .clicked()
-                    {
-                        let mut copy = profile.clone();
-                        copy.id = unique_id();
-                        copy.name = format!("{}副本", copy.name);
-                        intent = Some(TemplateIntent::Edit(copy));
-                    }
-                    if ui
-                        .add_enabled(can_edit, egui::Button::new("设为默认"))
-                        .clicked()
-                    {
-                        intent = Some(TemplateIntent::Default(profile.id.clone()));
-                    }
-                    if ui
-                        .add_enabled(can_edit, egui::Button::new("删除"))
-                        .clicked()
-                    {
-                        intent = Some(TemplateIntent::Delete(profile.id.clone()));
-                    }
-                });
-                ui.separator();
+                            .map(|profile| profile.name.as_str())
+                            .unwrap_or("跟随父任务与子任务模型设置"),
+                    )
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut self.settings_draft.default_subagent_profile_id,
+                            String::new(),
+                            "跟随父任务",
+                        );
+                        for profile in &self.settings_draft.subagent_profiles {
+                            ui.selectable_value(
+                                &mut self.settings_draft.default_subagent_profile_id,
+                                profile.id.clone(),
+                                &profile.name,
+                            );
+                        }
+                    });
             });
-        }
-        if ui
-            .add_enabled(
-                can_edit && self.state.settings.subagent_profiles.len() < 256,
-                egui::Button::new("新建子任务模板"),
-            )
-            .clicked()
-        {
-            intent = Some(TemplateIntent::Edit(SubagentProfile {
-                id: unique_id(),
-                name: "新模板".into(),
-                ..Default::default()
-            }));
-        }
-        if !can_edit && editable {
-            ui.label(RichText::new("先保存或放弃当前配置草稿，再编辑已保存模板。").weak());
-        }
+            for profile in &self.state.settings.subagent_profiles {
+                ui.push_id(&profile.id, |ui| {
+                    egui::Frame::NONE.inner_margin(16).show(ui, |ui| {
+                        controls::text(
+                            ui,
+                            &format!(
+                                "{}{}",
+                                profile.name,
+                                if profile.id == self.state.settings.default_subagent_profile_id {
+                                    " · 默认"
+                                } else {
+                                    ""
+                                }
+                            ),
+                            17.0,
+                            24.0,
+                            ui.visuals().text_color(),
+                        );
+                        controls::description(
+                            ui,
+                            &format!(
+                                "{} · {} · {}",
+                                profile
+                                    .model
+                                    .as_ref()
+                                    .map(|model| model.model.as_str())
+                                    .unwrap_or("继承模型"),
+                                profile
+                                    .approval_mode
+                                    .map(ApprovalMode::label)
+                                    .unwrap_or("继承审批"),
+                                profile
+                                    .allowed_tools
+                                    .as_ref()
+                                    .map(|tools| if tools.is_empty() {
+                                        "仅文字".into()
+                                    } else {
+                                        format!("{} 个工具", tools.len())
+                                    })
+                                    .unwrap_or_else(|| "继承父工具".into())
+                            ),
+                        );
+                        ui.add_enabled_ui(can_edit, |ui| {
+                            ui.menu_button("操作", |ui| {
+                                if ui.button("编辑").clicked() {
+                                    intent = Some(TemplateIntent::Edit(profile.clone()));
+                                    ui.close();
+                                }
+                                if ui.button("复制").clicked() {
+                                    let mut copy = profile.clone();
+                                    copy.id = unique_id();
+                                    copy.name = format!("{}副本", copy.name);
+                                    intent = Some(TemplateIntent::Edit(copy));
+                                    ui.close();
+                                }
+                                if ui.button("设为默认").clicked() {
+                                    intent = Some(TemplateIntent::Default(profile.id.clone()));
+                                    ui.close();
+                                }
+                                if ui.button("删除").clicked() {
+                                    intent = Some(TemplateIntent::Delete(profile.id.clone()));
+                                    ui.close();
+                                }
+                            });
+                        });
+                    });
+                });
+            }
+            egui::Frame::NONE.inner_margin(16).show(ui, |ui| {
+                if self.state.settings.subagent_profiles.is_empty() {
+                    controls::description(ui, "还没有模板，可从新建模板开始。");
+                }
+                if ui
+                    .add_enabled(can_edit, egui::Button::new("新建模板").frame(false))
+                    .clicked()
+                {
+                    intent = Some(TemplateIntent::Edit(SubagentProfile {
+                        id: unique_id(),
+                        name: "新模板".into(),
+                        ..Default::default()
+                    }));
+                }
+            });
+        });
+        ui.add_space(24.0);
         if let Some(intent) = intent {
             match intent {
                 TemplateIntent::Edit(draft) => {

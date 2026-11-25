@@ -143,7 +143,7 @@ impl HistoryRuntime {
         runs: &'a Runs,
         source: &ViewSource,
     ) -> Result<(Snapshot<'a>, Arc<ProjectionIndex>), DisplayError> {
-        store
+        let conversation = store
             .conversation(source.conversation_id())
             .map_err(DisplayError::Invalid)?;
         self.clock = self.clock.saturating_add(1);
@@ -193,24 +193,18 @@ impl HistoryRuntime {
                     || false,
                 )?;
                 history.set_owner_stamp(stamp.clone());
-                let headers = Arc::new(history.headers().to_vec());
+                let headers = history.shared_headers();
                 (headers, Some(Arc::new(history)))
-            };
-            let choices = store
-                .conversation(source.conversation_id())
-                .map_err(|e| DisplayError::Invalid(e))?
-                .metadata
-                .active_runs
-                .clone();
-            let empty = std::collections::BTreeMap::new();
-            let choices = if matches!(source, ViewSource::Main { .. }) {
-                &choices
-            } else {
-                &empty
             };
             let projection = if let Some(projection) = reuse_projection {
                 projection
             } else {
+                let empty = std::collections::BTreeMap::new();
+                let choices = if matches!(source, ViewSource::Main { .. }) {
+                    &conversation.metadata.active_runs
+                } else {
+                    &empty
+                };
                 Arc::new(ProjectionIndex::new(
                     &headers,
                     choices,
@@ -452,13 +446,12 @@ impl HistoryRuntime {
         if body.kind != display::BodyKind::Text {
             return Err("只朗读回答正文".into());
         }
-        let (source, _) = self
+        let (source, projection) = self
             .snapshot(store, runs, &body.source)
             .map_err(|error| error.to_string())?;
-        let header = source
-            .headers()
-            .iter()
-            .find(|header| header.id == body.message_id)
+        let header = projection
+            .source_index(&body.message_id)
+            .and_then(|index| source.headers().get(index))
             .ok_or("回答不存在")?;
         if header.role != "assistant"
             || !header.complete
@@ -466,40 +459,13 @@ impl HistoryRuntime {
         {
             return Err("回答尚未结束或已变化".into());
         }
-        self.body_text(store, runs, body)
+        display::read_body_text(&projection, &source, body).map_err(|error| error.to_string())
     }
     fn body_text(&mut self, store: &Store, runs: &Runs, body: &BodyRef) -> Result<String, String> {
-        let (source, _) = self
+        let (source, projection) = self
             .snapshot(store, runs, &body.source)
             .map_err(|e| e.to_string())?;
-        let mut text = String::new();
-        let mut from = 0;
-        loop {
-            let page = display::read_body_page(
-                &source,
-                &display::BodyPageRequest {
-                    request_id: unique_id(),
-                    body: body.clone(),
-                    from_byte: from,
-                    max_bytes: display::MAX_BODY_PAGE_BYTES,
-                },
-                || false,
-            )
-            .map_err(|e| e.to_string())?;
-            if text.len().saturating_add(page.text.len()) > 20 * 1024 * 1024 {
-                return Err("完整正文超过20MiB预算，请使用分页复制".into());
-            }
-            text.push_str(&page.text);
-            if let Some(next) = page.next_byte {
-                if next <= from {
-                    return Err("正文分页没有前进".into());
-                }
-                from = next;
-            } else {
-                break;
-            }
-        }
-        Ok(text)
+        display::read_body_text(&projection, &source, body).map_err(|error| error.to_string())
     }
     pub(super) fn dispatch(
         &mut self,
@@ -579,11 +545,11 @@ impl HistoryRuntime {
                 }
                 Action::HistoryBody(request) => {
                     failure = Some((request.body.source.clone(), request.request_id.clone()));
-                    let (source, _) = self
+                    let (source, projection) = self
                         .snapshot(store, runs, &request.body.source)
                         .map_err(|e| e.to_string())?;
                     publish.emit(Event::HistoryBody(
-                        display::read_body_page(&source, &request, || false)
+                        display::read_body_page(&projection, &source, &request, || false)
                             .map_err(|e| e.to_string())?,
                     ));
                 }
@@ -611,10 +577,10 @@ impl HistoryRuntime {
                 }
                 Action::HistoryImage(request) => {
                     failure = Some((request.image.source.clone(), request.request_id.clone()));
-                    let (source, _) = self
+                    let (source, projection) = self
                         .snapshot(store, runs, &request.image.source)
                         .map_err(|e| e.to_string())?;
-                    let base64 = display::read_image(&source, &request.image, || false)
+                    let base64 = display::read_image(&projection, &source, &request.image, || false)
                         .map_err(|e| e.to_string())?;
                     IMAGE_WORKERS
                         .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
@@ -695,7 +661,9 @@ impl HistoryRuntime {
                         {
                             return Err("编辑范围不是有效UTF-8边界".into());
                         }
-                        if original.len() - (to - from) + replacement.len() > 20 * 1024 * 1024 {
+                        if original.len() - (to - from) + replacement.len()
+                            > display::MAX_BODY_TEXT_BYTES
+                        {
                             return Err("编辑后的消息超过20MiB预算".into());
                         }
                         let text =

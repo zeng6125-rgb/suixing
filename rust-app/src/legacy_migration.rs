@@ -14,6 +14,8 @@ mod transaction;
 mod workspace_assets;
 pub use chat_archive::{ChatArchive, ChatSegment, encode_chat_archive, read_chat_archive};
 pub(crate) use conversion::read_archived_blob_bounded;
+pub(crate) use conversion::remap_conversation_references;
+pub(crate) use conversion::settings as decode_shared_settings;
 pub use conversion::{prepare, read_archived_blob};
 pub(crate) use transaction::read_regular as read_owned_regular;
 pub use transaction::{

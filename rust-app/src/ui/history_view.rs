@@ -2,17 +2,17 @@
 //! Drawing emits intents; it performs no file reads, network requests or bitmap decode.
 use super::mobile_chat::{Icon, Icons, Skin, transcript_action};
 use super::{
-    history::{HistoryViews, ImagePixels, SourceView, WindowApplied},
+    history::{HistoryViews, ImagePixels, RowIndex, SourceView, WindowApplied},
     markdown::MarkdownRenderer,
 };
 use crate::display::{
     BodyKind, BodyPage, BodyPageRequest, BodyRef, CandidateNavigation, DisplayError, DisplayRow,
-    FooterPage, FooterRequest, ImageRef, ImageRequest, ReadPosition, SourceStamp, ViewSource,
-    WindowAt, WindowRequest,
+    FooterPage, FooterRequest, ImageRef, ImageRequest, ReadPosition, ReplyDetails, ReplySummary,
+    SourceStamp, ViewSource, WindowAt, WindowRequest,
 };
 use eframe::egui::{self, RichText, TextureHandle, Vec2};
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 const MAX_TEXTURE_BYTES: usize = 20 * 1024 * 1024;
@@ -86,11 +86,19 @@ struct Height {
     first_turn: bool,
     running: bool,
     latest: bool,
+    reply: ReplyDetails,
 }
 struct BodyHeight {
     message_hash: String,
     width: f32,
     points: f32,
+}
+struct UserBubbleWidth {
+    message_hash: String,
+    max: f32,
+    font_size: f32,
+    pixels_per_point: f32,
+    width: f32,
 }
 #[derive(Default)]
 struct LayoutState {
@@ -98,6 +106,8 @@ struct LayoutState {
     body_offsets: HashMap<(String, BodyKind), u64>,
     footer_offsets: HashMap<String, usize>,
     heights: HashMap<String, Height>,
+    user_widths: HashMap<String, UserBubbleWidth>,
+    row_index: Weak<RowIndex>,
     body_heights: HashMap<(String, BodyKind, u64), BodyHeight>,
     restore: Option<ReadPosition>,
     next_scroll: Option<f32>,
@@ -256,6 +266,7 @@ impl HistoryRenderer {
             // body pages, images and durable reading positions remain owned.
             for state in self.sources.values_mut() {
                 state.heights.clear();
+                state.user_widths.clear();
                 state.body_heights.clear();
                 if !behavior.auto_follow {
                     state.force_tail = false;
@@ -765,6 +776,12 @@ impl HistoryRenderer {
             restore: (!view.position.follow_tail).then(|| view.position.clone()),
             ..Default::default()
         });
+        let rows = view.row_index();
+        if state.row_index.as_ptr() != Arc::as_ptr(rows) {
+            state.heights.retain(|id, _| rows.ids.contains(id));
+            state.user_widths.retain(|id, _| rows.ids.contains(id));
+            state.row_index = Arc::downgrade(rows);
+        }
         state.touched = self.clock;
         state.presented_stamp = None;
         if state.last_width > 0.0
@@ -778,8 +795,10 @@ impl HistoryRenderer {
             ui.label(RichText::new(notice).small().weak());
         }
         let mut asks = Vec::new();
-        let source_error = RequestOwner::Window(source.clone());
-        if let Some(error) = self.errors.get(&source_error).cloned() {
+        let source_error = (!self.errors.is_empty()).then(|| RequestOwner::Window(source.clone()));
+        if let Some(source_error) = source_error
+            && let Some(error) = self.errors.get(&source_error).cloned()
+        {
             ui.label(RichText::new(error).color(ui.visuals().error_fg_color));
             if ui.button("重新读取").clicked() {
                 self.errors.remove(&source_error);
@@ -830,6 +849,7 @@ impl HistoryRenderer {
             });
         let output = scroll.show_viewport(ui, |ui, viewport| {
             drawn_offset = viewport.min.y;
+            let mut row_style = None;
             if let Some(cursor) = &view.before {
                 if ui
                     .add_enabled(!view.window_pending(), egui::Button::new("加载更早的消息"))
@@ -838,17 +858,13 @@ impl HistoryRenderer {
                     asks.push(Ask::Window(WindowAt::Before(cursor.clone())));
                 }
             }
-            let mut seen_turns = HashSet::new();
-            for row in &view.rows {
+            let overscan = ui.clip_rect().expand(320.0);
+            for (row, &first_turn) in view.rows.iter().zip(&rows.starts_turn) {
                 let before = ui.cursor().min.y;
                 let forced = desired_restore
                     .as_ref()
                     .is_some_and(|position| position.message_id == row.id);
                 let width = ui.available_width();
-                let first_turn = row
-                    .turn_id
-                    .as_ref()
-                    .is_some_and(|turn| seen_turns.insert(turn.clone()));
                 let latest = row.turn_id.as_deref() == tail_turn && view.after.is_none();
                 let saved_height = state.heights.get(&row.id).filter(|height| {
                     height.message_hash == row.text.message_hash
@@ -856,6 +872,7 @@ impl HistoryRenderer {
                         && height.first_turn == first_turn
                         && height.running == running
                         && height.latest == latest
+                        && height.reply == row.info.reply
                 });
                 let skip = saved_height.is_some_and(|height| {
                     !forced
@@ -863,11 +880,12 @@ impl HistoryRenderer {
                             egui::pos2(ui.cursor().min.x, before),
                             egui::vec2(width, height.points),
                         )
-                        .intersects(ui.clip_rect().expand(320.0))
+                        .intersects(overscan)
                 });
                 if skip {
                     ui.add_space(saved_height.map_or(0.0, |height| height.points));
                 } else {
+                    let same_height_key = saved_height.is_some();
                     let navigation = row
                         .turn_id
                         .as_ref()
@@ -890,6 +908,16 @@ impl HistoryRenderer {
                     let regenerate = navigation.filter(|_| {
                         move_regenerate && view.rows.back().is_some_and(|last| last.id == row.id)
                     });
+                    if let Some((skin, _)) = chrome
+                        && row_style.is_none()
+                    {
+                        let mut style = ui.style().as_ref().clone();
+                        style.spacing.item_spacing.y = 5.0;
+                        style
+                            .text_styles
+                            .insert(egui::TextStyle::Body, skin.font(15.0));
+                        row_style = Some(Arc::new(style));
+                    }
                     self.row(
                         ui,
                         view,
@@ -898,23 +926,31 @@ impl HistoryRenderer {
                         running,
                         editable,
                         chrome,
+                        row_style.as_ref(),
                         regenerate,
                         &mut asks,
                         &mut intents,
                         &mut body_layouts,
                     );
                     ui.add_space(8.0);
-                    state.heights.insert(
-                        row.id.clone(),
-                        Height {
-                            message_hash: row.text.message_hash.clone(),
-                            width,
-                            points: (ui.cursor().min.y - before).max(1.0),
-                            first_turn,
-                            running,
-                            latest,
-                        },
-                    );
+                    let points = (ui.cursor().min.y - before).max(1.0);
+                    if same_height_key && let Some(height) = state.heights.get_mut(&row.id) {
+                        height.width = width;
+                        height.points = points;
+                    } else {
+                        state.heights.insert(
+                            row.id.clone(),
+                            Height {
+                                message_hash: row.text.message_hash.clone(),
+                                width,
+                                points,
+                                first_turn,
+                                running,
+                                latest,
+                                reply: row.info.reply,
+                            },
+                        );
+                    }
                 }
             }
             if let Some(cursor) = &view.after {
@@ -1062,7 +1098,7 @@ impl HistoryRenderer {
                 } else {
                     restoring = true;
                 }
-            } else if view.rows.iter().any(|row| row.id == position.message_id) {
+            } else if rows.ids.contains(&position.message_id) {
                 // The anchored section was removed or its footer is empty.
                 state.restore = None;
                 state.turn_motion = None;
@@ -1144,26 +1180,22 @@ impl HistoryRenderer {
             state.next_scroll = None;
             state.force_tail = true;
         }
-        state
-            .heights
-            .retain(|id, _| view.rows.iter().any(|row| &row.id == id));
         if state.body_offsets.len() > 512 {
             state
                 .body_offsets
-                .retain(|(id, _), _| view.rows.iter().any(|row| &row.id == id));
+                .retain(|(id, _), _| rows.ids.contains(id));
         }
         if state.footer_offsets.len() > 288 {
-            state
-                .footer_offsets
-                .retain(|id, _| view.rows.iter().any(|row| &row.id == id));
+            state.footer_offsets.retain(|id, _| rows.ids.contains(id));
         }
         if state.reasoning_manual.len() > 512 {
-            state
-                .reasoning_manual
-                .retain(|id| view.rows.iter().any(|row| &row.id == id));
+            state.reasoning_manual.retain(|id| rows.ids.contains(id));
         }
         if state.body_heights.len() > 512 {
             state.body_heights.clear();
+        }
+        if state.user_widths.len() > 512 {
+            state.user_widths.retain(|id, _| rows.ids.contains(id));
         }
         if let Some(position) = &state.restore {
             if desired_restore
@@ -1326,14 +1358,19 @@ impl HistoryRenderer {
         running: bool,
         editable: bool,
         chrome: Option<(Skin, &Icons)>,
+        row_style: Option<&Arc<egui::Style>>,
         regenerate: Option<&CandidateNavigation>,
         asks: &mut Vec<Ask>,
         intents: &mut Vec<HistoryIntent>,
         layouts: &mut Vec<BodyLayout>,
     ) {
         let row_top = ui.cursor().min.y;
-        state.current_row = row.id.clone();
+        state.current_row.clone_from(&row.id);
         ui.push_id((&view.source, &row.id), |ui| {
+            // All rows inherit the same mobile style for this viewport.
+            if let Some(style) = row_style {
+                ui.set_style(Arc::clone(style));
+            }
             let mobile_user = chrome.is_some() && row.role == "user";
             let layout = if mobile_user {
                 egui::Layout::top_down(egui::Align::Max)
@@ -1341,10 +1378,6 @@ impl HistoryRenderer {
                 *ui.layout()
             };
             if let Some((skin, _)) = chrome {
-                ui.spacing_mut().item_spacing.y = 5.0;
-                ui.style_mut()
-                    .text_styles
-                    .insert(egui::TextStyle::Body, skin.font(15.0));
                 if mobile_user
                     && self.behavior.show_timestamps
                     && let Some(timestamp) = &row.info.timestamp_label
@@ -1371,11 +1404,34 @@ impl HistoryRenderer {
                         .as_ref()
                         .filter(|preview| preview.text.len() < 240 && row.images.is_empty())
                         .map_or(max, |preview| {
-                            ui.painter()
-                                .layout_no_wrap(preview.text.clone(), skin.font(15.0), skin.text)
-                                .size()
-                                .x
-                                .clamp(1.0, max.max(1.0))
+                            let font = skin.font(15.0);
+                            let pixels_per_point = ui.ctx().pixels_per_point();
+                            if let Some(cached) = state.user_widths.get(&row.id).filter(|cached| {
+                                cached.message_hash == row.text.message_hash
+                                    && (cached.max - max).abs() < 0.5
+                                    && (cached.font_size - font.size).abs() < 0.01
+                                    && (cached.pixels_per_point - pixels_per_point).abs() < 0.01
+                            }) {
+                                cached.width
+                            } else {
+                                let measured = ui
+                                    .painter()
+                                    .layout_no_wrap(preview.text.clone(), font.clone(), skin.text)
+                                    .size()
+                                    .x
+                                    .clamp(1.0, max.max(1.0));
+                                state.user_widths.insert(
+                                    row.id.clone(),
+                                    UserBubbleWidth {
+                                        message_hash: row.text.message_hash.clone(),
+                                        max,
+                                        font_size: font.size,
+                                        pixels_per_point,
+                                        width: measured,
+                                    },
+                                );
+                                measured
+                            }
                         })
                 } else {
                     ui.available_width() * self.behavior.bubble_fraction()
@@ -1435,13 +1491,19 @@ impl HistoryRenderer {
                             ui.horizontal_wrapped(|ui| {
                                 if row.role == "assistant" {
                                     if let Some(face) = self.assistant_faces.get(&view.source) {
-                                        face.draw(ui, if chrome.is_some() { 28.0 } else { 24.0 });
+                                        face.draw(ui, 24.0);
                                     }
                                 }
                                 if !mobile_user || row.steer {
                                     let label = RichText::new(role);
                                     ui.label(if let Some((skin, _)) = chrome {
-                                        label.font(skin.font(15.0)).color(skin.ink)
+                                        label
+                                            .font(skin.font(if row.role == "assistant" {
+                                                13.0
+                                            } else {
+                                                15.0
+                                            }))
+                                            .color(skin.ink)
                                     } else {
                                         label.small().strong()
                                     });
@@ -1481,6 +1543,11 @@ impl HistoryRenderer {
                                     );
                                 }
                             });
+                        }
+                        if let Some((skin, icons)) = chrome
+                            && let Some(summary) = row.info.reply.summary
+                        {
+                            reply_summary(ui, skin, icons, summary, running && !row.complete);
                         }
                         if let Some(note) = &row.info.trace_note {
                             egui::CollapsingHeader::new("执行说明")
@@ -1734,6 +1801,15 @@ impl HistoryRenderer {
                                         question_id: candidate.turn_id.clone(),
                                     });
                                 }
+                                if let Some((skin, icons)) = chrome {
+                                    if row.info.reply.footer {
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| reply_metrics(ui, skin, icons, row),
+                                        );
+                                    }
+                                    return;
+                                }
                                 if row.info.elapsed_ms > 0 {
                                     ui.label(
                                         RichText::new(format!(
@@ -1869,32 +1945,45 @@ impl HistoryRenderer {
             });
             return;
         }
-        let owner = RequestOwner::Body(body.clone(), offset);
         if page.is_none()
             && shown.is_none_or(|page| page.to_byte < body.bytes)
             && !view.body_pending(body)
-            && !self.errors.contains_key(&owner)
+            && (self.errors.is_empty()
+                || !self
+                    .errors
+                    .contains_key(&RequestOwner::Body(body.clone(), offset)))
         {
             asks.push(Ask::Body(body.clone(), offset));
         }
         if let Some(page) = shown {
-            let revealed = self.typewriter.prefix(
-                (
-                    body.source.clone(),
-                    body.message_id.clone(),
-                    body.kind.clone(),
-                    page.from_byte,
-                ),
-                &page.text,
-                self.behavior.typewriter && streaming && body.kind == BodyKind::Text,
-            );
-            if revealed < page.text.len() {
-                ui.ctx().request_repaint_after(Duration::from_millis(16));
-            }
-            let visible_text = &page.text[..revealed];
             if plain {
                 ui.add(egui::Label::new(&page.text).wrap().selectable(true));
             } else {
+                let revealed =
+                    if self.behavior.typewriter && streaming && body.kind == BodyKind::Text {
+                        self.typewriter.prefix(
+                            (
+                                body.source.clone(),
+                                body.message_id.clone(),
+                                body.kind.clone(),
+                                page.from_byte,
+                            ),
+                            &page.text,
+                            true,
+                            Instant::now(),
+                        )
+                    } else {
+                        self.typewriter.finish(
+                            &body.source,
+                            &body.message_id,
+                            &body.kind,
+                            page.from_byte,
+                        );
+                        page.text.len()
+                    };
+                if revealed < page.text.len() {
+                    ui.ctx().request_repaint_after(Duration::from_millis(16));
+                }
                 self.markdown.show(
                     ui,
                     (
@@ -1904,7 +1993,7 @@ impl HistoryRenderer {
                         page.from_byte,
                         &body.message_hash,
                     ),
-                    visible_text,
+                    &page.text[..revealed],
                     streaming || revealed < page.text.len(),
                     chrome,
                 );
@@ -1934,15 +2023,18 @@ impl HistoryRenderer {
                 || shown.is_some_and(|page| page.to_byte == body.bytes)
                 || body.bytes == 0,
         });
-        if let Some(error) = self.errors.get(&owner).cloned() {
-            ui.label(RichText::new(error).color(ui.visuals().error_fg_color));
-            if ui.small_button("重试读取").clicked() {
-                self.errors.remove(&owner);
-                asks.push(Ask::Body(body.clone(), offset));
-            }
-            if offset > 0 && ui.small_button("从头读取").clicked() {
-                set_body_offset(state, body, 0);
-                asks.push(Ask::Body(body.clone(), 0));
+        if !self.errors.is_empty() {
+            let owner = RequestOwner::Body(body.clone(), offset);
+            if let Some(error) = self.errors.get(&owner).cloned() {
+                ui.label(RichText::new(error).color(ui.visuals().error_fg_color));
+                if ui.small_button("重试读取").clicked() {
+                    self.errors.remove(&owner);
+                    asks.push(Ask::Body(body.clone(), offset));
+                }
+                if offset > 0 && ui.small_button("从头读取").clicked() {
+                    set_body_offset(state, body, 0);
+                    asks.push(Ask::Body(body.clone(), 0));
+                }
             }
         }
         if let Some(page) = shown {
@@ -2016,8 +2108,10 @@ impl HistoryRenderer {
                 asks.push(Ask::Image(image.clone(), 2160));
             }
         } else {
-            let owner = RequestOwner::Image(image.clone(), 512);
-            if let Some(error) = self.errors.get(&owner).cloned() {
+            let owner = (!self.errors.is_empty()).then(|| RequestOwner::Image(image.clone(), 512));
+            if let Some(owner) = owner
+                && let Some(error) = self.errors.get(&owner).cloned()
+            {
                 ui.label(RichText::new(error).color(ui.visuals().error_fg_color));
                 if ui.small_button("重新读取图片").clicked() {
                     self.errors.remove(&owner);
@@ -2045,8 +2139,11 @@ impl HistoryRenderer {
         let page = view.footer(&row.text, from);
         if page.is_none() {
             let top = ui.cursor().min.y;
-            let owner = RequestOwner::Footer(row.text.clone(), from);
-            if let Some(error) = self.errors.get(&owner).cloned() {
+            let owner =
+                (!self.errors.is_empty()).then(|| RequestOwner::Footer(row.text.clone(), from));
+            if let Some(owner) = owner
+                && let Some(error) = self.errors.get(&owner).cloned()
+            {
                 ui.label(RichText::new(error).color(ui.visuals().error_fg_color));
                 if ui.small_button("重新读取文件变更").clicked() {
                     self.errors.remove(&owner);
@@ -2202,8 +2299,11 @@ impl HistoryRenderer {
                         }
                     });
                 } else {
-                    let owner = RequestOwner::Footer(row.text.clone(), from);
-                    if let Some(error) = self.errors.get(&owner).cloned() {
+                    let owner = (!self.errors.is_empty())
+                        .then(|| RequestOwner::Footer(row.text.clone(), from));
+                    if let Some(owner) = owner
+                        && let Some(error) = self.errors.get(&owner).cloned()
+                    {
                         ui.label(RichText::new(error).color(ui.visuals().error_fg_color));
                         if ui.small_button("重新读取文件变更").clicked() {
                             self.errors.remove(&owner);
@@ -2279,8 +2379,11 @@ impl HistoryRenderer {
                         } else {
                             ui.spinner();
                         }
-                        let owner = RequestOwner::Image(image.clone(), 2160);
-                        if let Some(error) = self.errors.get(&owner).cloned() {
+                        let owner = (!self.errors.is_empty())
+                            .then(|| RequestOwner::Image(image.clone(), 2160));
+                        if let Some(owner) = owner
+                            && let Some(error) = self.errors.get(&owner).cloned()
+                        {
                             ui.label(error);
                             if ui.button("重新读取原图预览").clicked() {
                                 self.errors.remove(&owner);
@@ -2417,6 +2520,150 @@ impl HistoryRenderer {
         }
     }
 }
+fn reply_summary(ui: &mut egui::Ui, skin: Skin, icons: &Icons, summary: ReplySummary, live: bool) {
+    let mut parts = Vec::new();
+    if summary.elapsed_ms > 0 {
+        let seconds = summary.elapsed_ms / 1000;
+        let elapsed = if seconds < 60 {
+            format!("{seconds} 秒")
+        } else {
+            format!("{} 分 {:02} 秒", seconds / 60, seconds % 60)
+        };
+        parts.push(format!("用时 {elapsed}"));
+    }
+    if summary.thinking > 0 {
+        parts.push(format!("思考 {} 段", summary.thinking));
+    }
+    if summary.tools > 0 {
+        parts.push(format!("工具 {} 个", summary.tools));
+    }
+    let title = if parts.is_empty() {
+        if live {
+            "正在回复".into()
+        } else {
+            "本轮用量".into()
+        }
+    } else {
+        format!("本轮：{}", parts.join(" · "))
+    };
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        let (slot, _) = ui.allocate_exact_size(egui::vec2(24.0, 32.0), egui::Sense::hover());
+        icons.draw(ui, slot.center(), 16.0, Icon::Context, skin.ink);
+        ui.add(
+            egui::Label::new(RichText::new(title).font(skin.font(13.0)).color(skin.ink)).truncate(),
+        );
+    });
+}
+
+fn reply_metrics(ui: &mut egui::Ui, skin: Skin, icons: &Icons, row: &DisplayRow) {
+    let info = &row.info;
+    let total = info
+        .prompt_tokens
+        .unwrap_or(0)
+        .max(0)
+        .saturating_add(info.completion_tokens.unwrap_or(0).max(0));
+    if total > 0 {
+        let compact = match total {
+            0..1000 => total.to_string(),
+            1000..1_000_000 => format!("{:.1}k", total as f64 / 1000.0),
+            _ => format!("{:.1}M", total as f64 / 1_000_000.0),
+        };
+        let response = metric_button(ui, skin, icons, None, format!("用量 {compact} tok"));
+        egui::Popup::menu(&response)
+            .align(egui::RectAlign::TOP_END)
+            .gap(6.0)
+            .show(|ui| {
+                ui.label(format!("本轮用量 {total} tok"));
+                for (label, value) in [
+                    ("输入", info.prompt_tokens),
+                    ("输出", info.completion_tokens),
+                    ("缓存读取", info.cached_tokens),
+                ] {
+                    if let Some(value) = value.filter(|value| *value >= 0) {
+                        ui.label(format!("{label} {value} tok"));
+                    }
+                }
+                if let Some(model) = info.model.as_deref().filter(|model| !model.is_empty()) {
+                    ui.label(model);
+                }
+            });
+    }
+    let elapsed = if info.reply.run_elapsed_ms > 0 {
+        info.reply.run_elapsed_ms
+    } else {
+        info.elapsed_ms
+    };
+    if elapsed > 0 {
+        let caption = format!("{:.1}秒", elapsed as f64 / 1000.0);
+        let response = metric_button(ui, skin, icons, Some(Icon::Clock), caption.clone());
+        egui::Popup::menu(&response)
+            .align(egui::RectAlign::TOP_END)
+            .gap(6.0)
+            .show(|ui| {
+                ui.label(format!("总用时 {caption}"));
+                if info.first_token_ms > 0 {
+                    ui.label(format!("首字延迟 {} ms", info.first_token_ms));
+                }
+            });
+    }
+}
+
+fn metric_button(
+    ui: &mut egui::Ui,
+    skin: Skin,
+    icons: &Icons,
+    icon: Option<Icon>,
+    caption: String,
+) -> egui::Response {
+    let label = ui
+        .painter()
+        .layout_no_wrap(caption.clone(), skin.font(12.0), skin.ink);
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(label.size().x + 20.0, 28.0),
+        egui::Sense::click(),
+    );
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, caption.as_str()));
+    let center = rect.left_center() + egui::vec2(7.0, 0.0);
+    if let Some(icon) = icon {
+        icons.draw(ui, center, 15.0, icon, skin.ink);
+    } else {
+        let painter = ui.painter();
+        let stroke = egui::Stroke::new(1.15, skin.ink);
+        let top = center - egui::vec2(0.0, 4.0);
+        painter.add(egui::Shape::ellipse_stroke(
+            top,
+            egui::vec2(4.7, 1.8),
+            stroke,
+        ));
+        for x in [-4.7, 4.7] {
+            painter.line_segment(
+                [top + egui::vec2(x, 0.0), center + egui::vec2(x, 4.0)],
+                stroke,
+            );
+        }
+        for y in [0.0, 4.0] {
+            let base = center + egui::vec2(0.0, y);
+            painter.add(egui::epaint::QuadraticBezierShape::from_points_stroke(
+                [
+                    base - egui::vec2(4.7, 0.0),
+                    base + egui::vec2(0.0, 3.6),
+                    base + egui::vec2(4.7, 0.0),
+                ],
+                false,
+                egui::Color32::TRANSPARENT,
+                stroke,
+            ));
+        }
+    }
+    ui.painter().galley(
+        rect.left_center() + egui::vec2(18.0, -label.size().y / 2.0),
+        label,
+        skin.ink,
+    );
+    response
+}
+
 fn at_position(position: &ReadPosition) -> WindowAt {
     if position.follow_tail || position.message_id.is_empty() {
         WindowAt::Tail

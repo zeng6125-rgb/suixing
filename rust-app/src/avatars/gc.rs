@@ -338,8 +338,12 @@ pub(super) fn collect(
     namespace: &Path,
     root: &Path,
     active: &HashSet<String>,
+    shared_images: bool,
 ) -> Result<(), String> {
     expired_staging(namespace, active)?;
+    if shared_images {
+        return Ok(());
+    }
     let mut candidates = images(namespace)?;
     candidates.retain(|(path, metadata)| {
         native_path(path) && metadata.len() <= AVATAR_BYTES as u64 && old(metadata, ORPHAN_AGE)

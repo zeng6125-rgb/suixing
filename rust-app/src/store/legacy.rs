@@ -8,7 +8,7 @@ use crate::{
 
 impl Store {
     pub(crate) fn first_run_legacy_data(&self) -> Result<bool, String> {
-        if self.root != self.namespace_root {
+        if self.shared_files_root.is_some() || self.root != self.namespace_root {
             return Ok(false);
         }
         match fs::symlink_metadata(self.root.join("settings.json")) {
@@ -125,7 +125,7 @@ impl Store {
         }
         // Namespace assets and their ordinary permissions must exist before the
         // authoritative state pointer can expose their recorded aliases.
-        crate::store::workspace::publish_workspace(&self.workspace, &plan, &SecretBox)?;
+        crate::store::workspace::publish_workspace(&self.private_workspace(), &plan, &SecretBox)?;
         let namespace = self.namespace_root.clone();
         let legacy_root = self.legacy_source_root.clone();
         if self.current_migration_proof()? != current_proof {
@@ -134,7 +134,10 @@ impl Store {
         let receipt = legacy_migration::commit(&namespace, &snapshot, &staged)?;
         // The pointer is already published: every subsequent error must state
         // that fact and prevent an older actor snapshot from writing over it.
-        let mut next = match Store::open(namespace) {
+        let mut next = match Store::open_with_shared_files(
+            namespace,
+            self.shared_files_root.clone(),
+        ) {
             Ok(next) => next,
             Err(error) => {
                 let message = format!(
@@ -258,23 +261,25 @@ impl Store {
                 put_json(&mut files, "settings.json", &document)?;
             }
         }
-        let mut memories = self.memories.clone();
-        for memory in &plan.memories {
-            if let Some(old) = memories.iter().find(|old| old.id == memory.id) {
-                equal_record(old, memory, "记忆", &memory.id)?;
-            } else {
-                memories.push(memory.clone());
+        if self.shared_files_root.is_none() {
+            let mut memories = self.memories.clone();
+            for memory in &plan.memories {
+                if let Some(old) = memories.iter().find(|old| old.id == memory.id) {
+                    equal_record(old, memory, "记忆", &memory.id)?;
+                } else {
+                    memories.push(memory.clone());
+                }
             }
+            validate_memories(&memories)?;
+            put_json(
+                &mut files,
+                "memories.json",
+                &MemoryDocument {
+                    version: VERSION,
+                    memories,
+                },
+            )?;
         }
-        validate_memories(&memories)?;
-        put_json(
-            &mut files,
-            "memories.json",
-            &MemoryDocument {
-                version: VERSION,
-                memories,
-            },
-        )?;
         let mut skills = self.skills.clone();
         for skill in &plan.skills {
             if let Some(old) = skills.iter().find(|old| old.id == skill.id) {

@@ -252,8 +252,8 @@ internal fun ProviderDropdown(
                     trailingIcon = {
                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             Text("${provider.enabled.size} 模型", style = SettingsStyle.badge, color = colors.onSurfaceVariant)
-                            Box(Modifier.size(18.dp)) {
-                                if (chosen) Icon(ImageVector.vectorResource(R.drawable.ic_check), "当前供应商", tint = colors.primary)
+                            Box(Modifier.size(18.dp), contentAlignment = Alignment.Center) {
+                                if (chosen) Icon(ImageVector.vectorResource(R.drawable.ic_check), "当前供应商", Modifier.size(16.dp), tint = colors.primary)
                             }
                         }
                     },
@@ -345,8 +345,8 @@ internal fun CompactProtocolPicker(
                         }
                     },
                     trailingIcon = {
-                        Box(Modifier.size(18.dp)) {
-                            if (isChosen) Icon(ImageVector.vectorResource(R.drawable.ic_check), "当前协议", tint = colors.primary)
+                        Box(Modifier.size(18.dp), contentAlignment = Alignment.Center) {
+                            if (isChosen) Icon(ImageVector.vectorResource(R.drawable.ic_check), "当前协议", Modifier.size(16.dp), tint = colors.primary)
                         }
                     },
                     onClick = { onExpandedChange(false); onPick(value) },
@@ -407,8 +407,8 @@ internal fun EnabledModelDropdown(
                     },
                     leadingIcon = identity,
                     trailingIcon = {
-                        Box(Modifier.size(18.dp)) {
-                            if (chosen) Icon(ImageVector.vectorResource(R.drawable.ic_check), "当前模型", tint = colors.primary)
+                        Box(Modifier.size(18.dp), contentAlignment = Alignment.Center) {
+                            if (chosen) Icon(ImageVector.vectorResource(R.drawable.ic_check), "当前模型", Modifier.size(16.dp), tint = colors.primary)
                         }
                     },
                     onClick = { onExpandedChange(false); onPick(id) },

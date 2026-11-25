@@ -16,9 +16,11 @@ pub(super) struct View {
     query: String,
     filter: Filter,
     cached_query: String,
-    cached_filter: Filter,
+    cached_filter: Option<Filter>,
     indices: Vec<usize>,
-    dirty: bool,
+    active_order: Option<Vec<usize>>,
+    archived_order: Option<Vec<usize>>,
+    search_titles: Option<Vec<String>>,
     pending: Option<String>,
     rename: Option<(String, String)>,
     info_id: Option<String>,
@@ -31,10 +33,25 @@ impl View {
         self.info_id = None;
         self.info_request = None;
         self.info = None;
-        self.dirty = true;
+        self.invalidate();
     }
     pub(super) fn invalidate(&mut self) {
-        self.dirty = true;
+        self.active_order = None;
+        self.archived_order = None;
+        self.search_titles = None;
+        self.cached_filter = None;
+    }
+    pub(super) fn invalidate_order(&mut self) {
+        self.active_order = None;
+        self.cached_filter = None;
+    }
+    pub(super) fn active_order(&mut self, state: &ViewState) -> &[usize] {
+        self.active_order.get_or_insert_with(|| {
+            state
+                .conversation_preferences
+                .order
+                .indices(&state.conversations)
+        })
     }
     pub(super) fn apply(&mut self, update: &Update) {
         match update {
@@ -59,57 +76,52 @@ impl View {
             self.pending = None;
             if result.is_ok() {
                 self.rename = None;
-                self.dirty = true;
             }
         }
     }
-    fn refresh(
-        &mut self,
-        conversations: &[crate::display::ConversationSummary],
-        order: &crate::conversation_preferences::Order,
-    ) {
-        if !self.dirty && self.cached_query == self.query && self.cached_filter == self.filter {
+    fn refresh(&mut self, state: &ViewState) {
+        if self.cached_query == self.query && self.cached_filter == Some(self.filter) {
             return;
         }
+        let conversations = &state.conversations;
         let query = self.query.trim().to_lowercase();
-        self.indices = conversations
-            .iter()
-            .enumerate()
-            .filter_map(|(index, item)| {
-                let group = match self.filter {
-                    Filter::Active => !item.archived,
-                    Filter::Pinned => item.pinned && !item.archived,
-                    Filter::Archived => item.archived,
-                };
-                (group
-                    && (query.is_empty()
-                        || item.title.to_lowercase().contains(&query)
-                        || item.id.contains(&query)))
-                .then_some(index)
+        let order = if self.filter == Filter::Archived {
+            self.archived_order.get_or_insert_with(|| {
+                let mut indices: Vec<_> = conversations
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, item)| item.archived.then_some(index))
+                    .collect();
+                indices.sort_unstable_by(|&a, &b| {
+                    conversations[b]
+                        .updated_at
+                        .cmp(&conversations[a].updated_at)
+                        .then_with(|| conversations[a].id.cmp(&conversations[b].id))
+                });
+                indices
             })
-            .collect();
-        if self.filter == Filter::Archived {
-            self.indices.sort_by(|&a, &b| {
-                conversations[b]
-                    .updated_at
-                    .cmp(&conversations[a].updated_at)
-                    .then_with(|| conversations[a].id.cmp(&conversations[b].id))
-            });
         } else {
-            let visible = self
-                .indices
-                .iter()
-                .copied()
-                .collect::<std::collections::HashSet<_>>();
-            self.indices = order
-                .indices(conversations)
-                .into_iter()
-                .filter(|index| visible.contains(index))
-                .collect();
-        }
-        self.cached_query = self.query.clone();
-        self.cached_filter = self.filter;
-        self.dirty = false;
+            self.active_order
+                .get_or_insert_with(|| state.conversation_preferences.order.indices(conversations))
+        };
+        let titles = (!query.is_empty()).then(|| {
+            self.search_titles.get_or_insert_with(|| {
+                conversations
+                    .iter()
+                    .map(|item| item.title.to_lowercase())
+                    .collect()
+            })
+        });
+        self.indices.clear();
+        self.indices.extend(order.iter().copied().filter(|&index| {
+            let item = &conversations[index];
+            (self.filter != Filter::Pinned || item.pinned)
+                && titles
+                    .as_ref()
+                    .is_none_or(|titles| titles[index].contains(&query) || item.id.contains(&query))
+        }));
+        self.cached_query.clone_from(&self.query);
+        self.cached_filter = Some(self.filter);
     }
 }
 fn bytes_label(bytes: u64) -> String {
@@ -121,6 +133,71 @@ fn bytes_label(bytes: u64) -> String {
         format!("{bytes} 字节")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::display::ConversationSummary;
+
+    #[test]
+    fn searches_and_filters_reuse_drawer_order_across_large_conversation_lists() {
+        let mut state = ViewState::new(Default::default());
+        state.conversations = (0..8192)
+            .map(|index| ConversationSummary {
+                id: format!("chat-{index:04}"),
+                title: match index {
+                    1 | 2 | 3 | 4 | 5 => "会话 BETA".into(),
+                    _ => "一般会话".into(),
+                },
+                updated_at: if index == 5 { 4 } else { index },
+                assistant_id: None,
+                provider_id: None,
+                model: None,
+                approval_mode: None,
+                pinned: matches!(index, 1 | 2),
+                archived: matches!(index, 4 | 5),
+                checkpoint_count: 0,
+            })
+            .collect();
+        state.conversation_preferences.order.pinned = vec!["chat-0001".into()];
+        let mut view = View::default();
+        assert_eq!(&view.active_order(&state)[..2], &[1, 2]);
+        view.refresh(&state);
+        assert_eq!(view.indices.len(), 8190);
+        assert!(view.search_titles.is_none());
+        assert!(view.archived_order.is_none());
+
+        view.query = " BETA ".into();
+        view.refresh(&state);
+        assert_eq!(view.indices, [1, 2, 3]);
+        view.filter = Filter::Pinned;
+        view.refresh(&state);
+        assert_eq!(view.indices, [1, 2]);
+
+        state.conversation_preferences.order.pinned = vec!["chat-0002".into()];
+        view.invalidate_order();
+        view.refresh(&state);
+        assert_eq!(view.indices, [2, 1]);
+        assert_eq!(&view.active_order(&state)[..2], &[2, 1]);
+
+        view.filter = Filter::Archived;
+        view.refresh(&state);
+        assert_eq!(view.indices, [4, 5]);
+        view.query = "CHAT-0005".into();
+        view.refresh(&state);
+        assert_eq!(view.indices, [5]);
+
+        state.conversations[4].title = "新的 Gamma".into();
+        state.conversations.remove(5);
+        view.invalidate();
+        view.refresh(&state);
+        assert!(view.indices.is_empty());
+        view.query = "GAMMA".into();
+        view.refresh(&state);
+        assert_eq!(view.indices, [4]);
+    }
+}
+
 impl RustApplication {
     fn conversation_info_begin(&mut self, id: String) {
         if let Some(request_id) = self.conversation_manager.info_request.take() {
@@ -167,10 +244,7 @@ impl RustApplication {
                 ui.selectable_value(&mut self.conversation_manager.filter, filter, label);
             }
         });
-        self.conversation_manager.refresh(
-            &self.state.conversations,
-            &self.state.conversation_preferences.order,
-        );
+        self.conversation_manager.refresh(&self.state);
         ui.label(format!(
             "{} 个会话",
             self.conversation_manager.indices.len()

@@ -323,7 +323,7 @@ class DrawerPointerLoopTest {
         }
 
     @Test
-    fun `home decorations pause during a drag and resume when the drawer stops`() =
+    fun `home decorations pause until the drawer is fully closed`() =
         withPointerLoop(DrawerValue.Closed, shield = false, events = listOf(
             event(change(0L, 100f, 100f, previousPressed = false)),
             event(change(16L, 140f, 100f)),
@@ -335,6 +335,9 @@ class DrawerPointerLoopTest {
             assertFalse(homeDecorationMotion())
             frames(90)
             assertFalse(state.isMoving)
+            assertTrue(state.isOpen)
+            assertFalse(homeDecorationMotion())
+            state.snapTo(DrawerValue.Closed)
             assertTrue(homeDecorationMotion())
         }
 
@@ -350,6 +353,60 @@ class DrawerPointerLoopTest {
                 state.visualProgress.value,
                 0.0001f,
             )
+        }
+
+    @Test fun `a fast clear horizontal move begins following below ordinary slop`() {
+        for (opening in listOf(true, false)) {
+            val start = if (opening) 100f else 350f
+            val delta = if (opening) 6f else -6f
+            withPointerLoop(if (opening) DrawerValue.Closed else DrawerValue.Open,
+                shield = !opening, events = listOf(
+                    event(change(0L, start, start, previousPressed = false)),
+                    event(change(8L, start + delta, start, y = 1f)),
+                )) {
+                assertEquals(if (opening) 6f / 300f else 1f - 6f / 300f,
+                    state.visualProgress.value, 0.0001f)
+            }
+        }
+    }
+
+    @Test fun `a small diagonal slow or wrong direction move does not start the drawer early`() {
+        val undecidedMoves = listOf(
+            change(8L, 103f, 100f),
+            change(8L, 106f, 100f, y = 3f),
+            change(40L, 106f, 100f),
+            change(8L, 94f, 100f),
+        )
+        for (move in undecidedMoves) {
+            withPointerLoop(DrawerValue.Closed, shield = false, events = listOf(
+                event(change(0L, 100f, 100f, previousPressed = false)),
+                event(move),
+            )) {
+                assertEquals(0f, state.visualProgress.value, 0.0001f)
+                assertFalse(move.isConsumed)
+            }
+        }
+    }
+
+    @Test fun `a horizontal child keeps priority over an early drawer move`() {
+        val move = change(8L, 106f, 100f)
+        withPointerLoop(DrawerValue.Closed, shield = false, includeHost = true,
+            childOrientation = Orientation.Horizontal, events = listOf(
+                event(change(0L, 100f, 100f, previousPressed = false)),
+                event(move),
+            )) {
+            assertEquals(0f, state.visualProgress.value, 0.0001f)
+            assertFalse(move.isConsumed)
+        }
+    }
+
+    @Test fun `a small wrong way move at the open anchor can turn into a closing drag`() =
+        withPointerLoop(DrawerValue.Open, shield = false, events = listOf(
+            event(change(0L, 100f, 100f, previousPressed = false)),
+            event(change(8L, 106f, 100f)),
+            event(change(16L, 76f, 106f)),
+        )) {
+            assertEquals(1f - 24f / 300f, state.visualProgress.value, 0.0001f)
         }
 
     @Test
@@ -934,6 +991,31 @@ class DrawerPointerLoopTest {
             assertEquals("the final accelerating movement must produce a closing fling",
                 0f, state.visualProgress.value, 0.0001f)
         }
+
+    @Test fun `a very fast flick limits the spring step after leaving the finger`() {
+        for (opening in listOf(true, false)) {
+            val start = if (opening) 100f else 350f
+            val step = if (opening) 36f else -36f
+            val changes = (0..5).map { i ->
+                event(change(i * 8L, start + i * step, start + (i - 1).coerceAtLeast(0) * step,
+                    pressed = i != 5, previousPressed = i != 0))
+            }
+            withPointerLoop(if (opening) DrawerValue.Closed else DrawerValue.Open,
+                shield = !opening, events = changes) {
+                var previous = state.visualProgress.value
+                assertEquals(if (opening) 0.6f else 0.4f, previous, 0.0001f)
+                repeat(8) {
+                    frames(1)
+                    val current = state.visualProgress.value
+                    val distance = kotlin.math.abs(current - previous)
+                    assertTrue("opening=$opening spring step=$distance", distance <= 0.12f)
+                    previous = current
+                }
+                frames(90)
+                assertEquals(opening, state.isOpen)
+            }
+        }
+    }
 
     @Test fun `a host drag held still before up has no fling velocity`() =
         withPointerLoop(DrawerValue.Closed, shield = false, events = listOf(

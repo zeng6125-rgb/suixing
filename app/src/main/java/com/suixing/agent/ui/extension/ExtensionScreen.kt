@@ -57,6 +57,7 @@ fun ExtensionScreen(onBack: () -> Unit) {
                     PageTopBarAction(
                         icon = ImageVector.vectorResource(R.drawable.ic_plus),
                         contentDescription = "新增记忆",
+                        glyphSize = 22.dp,
                         onClick = { memoryNew++ },
                     )
                 },

@@ -4,7 +4,8 @@ use crate::display::{
     DisplayWindow, FooterPage, FooterRequest, ImageRef, ImageRequest, ReadPosition, SourceStamp,
     ViewSource, WindowAt, WindowCursor, WindowRequest,
 };
-use std::collections::{HashMap, VecDeque};
+use std::cell::OnceCell;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 const MAX_CACHED_ROWS: usize = 288;
@@ -44,6 +45,10 @@ impl ImagePixels {
                 == Some(self.rgba.len())
             && self.rgba.len() <= MAX_PIXEL_BYTES
     }
+
+    fn estimated_bytes(&self) -> usize {
+        self.rgba.len() + self.image.estimated_bytes()
+    }
 }
 
 pub struct WindowApplied {
@@ -61,10 +66,16 @@ struct PendingBody {
     request_id: String,
     from_byte: u64,
 }
+pub(super) struct RowIndex {
+    pub(super) ids: HashSet<String>,
+    pub(super) starts_turn: Vec<bool>,
+}
+
 pub struct SourceView {
     pub source: ViewSource,
     pub stamp: Option<SourceStamp>,
     pub rows: VecDeque<DisplayRow>,
+    row_index: OnceCell<Arc<RowIndex>>,
     pub before: Option<WindowCursor>,
     pub after: Option<WindowCursor>,
     pub candidates: HashMap<String, CandidateNavigation>,
@@ -78,6 +89,8 @@ pub struct SourceView {
     window: Option<PendingWindow>,
     body_requests: HashMap<BodyRef, PendingBody>,
     image_requests: HashMap<ImageRef, String>,
+    // Published after trimming so the shared limit can compare sources cheaply.
+    cached_bytes: usize,
     touched: u64,
 }
 impl SourceView {
@@ -99,6 +112,7 @@ impl SourceView {
             source,
             stamp: None,
             rows: VecDeque::new(),
+            row_index: OnceCell::new(),
             before: None,
             after: None,
             candidates: HashMap::new(),
@@ -112,10 +126,28 @@ impl SourceView {
             window: None,
             body_requests: HashMap::new(),
             image_requests: HashMap::new(),
+            cached_bytes: 0,
             touched,
         }
     }
-    fn data_bytes(&self) -> usize {
+    pub(super) fn row_index(&self) -> &Arc<RowIndex> {
+        self.row_index.get_or_init(|| {
+            let mut turns = HashSet::new();
+            let mut ids = HashSet::with_capacity(self.rows.len());
+            let mut starts_turn = Vec::with_capacity(self.rows.len());
+            for row in &self.rows {
+                ids.insert(row.id.clone());
+                starts_turn.push(
+                    row.turn_id
+                        .as_deref()
+                        .is_some_and(|turn| turns.insert(turn)),
+                );
+            }
+            Arc::new(RowIndex { ids, starts_turn })
+        })
+    }
+
+    fn measure_data_bytes(&self) -> usize {
         self.footer_pages
             .iter()
             .map(FooterPage::estimated_bytes)
@@ -133,7 +165,7 @@ impl SourceView {
             + self
                 .images
                 .iter()
-                .map(|image| image.rgba.len() + image.image.estimated_bytes())
+                .map(|image| image.estimated_bytes())
                 .sum::<usize>()
             + self
                 .candidates
@@ -142,8 +174,10 @@ impl SourceView {
                 .sum::<usize>()
     }
     fn clear_data(&mut self) {
+        self.cached_bytes = 0;
         self.needs_window = true;
         self.rows.clear();
+        self.row_index.take();
         self.body_pages.clear();
         self.images.clear();
         self.footer_pages.clear();
@@ -156,28 +190,54 @@ impl SourceView {
         self.image_requests.clear();
     }
     fn trim(&mut self) {
-        while self.data_bytes() > MAX_SOURCE_BYTES && !self.images.is_empty() {
-            self.images.pop_front();
+        self.cached_bytes = self.measure_data_bytes();
+        while self.cached_bytes > MAX_SOURCE_BYTES
+            && let Some(image) = self.images.pop_front()
+        {
+            self.cached_bytes -= image.estimated_bytes();
         }
-        while self.data_bytes() > MAX_SOURCE_BYTES && !self.body_pages.is_empty() {
-            self.body_pages.pop_front();
+        while self.cached_bytes > MAX_SOURCE_BYTES
+            && let Some(page) = self.body_pages.pop_front()
+        {
+            self.cached_bytes -= page.estimated_bytes();
         }
-        while self.data_bytes() > MAX_SOURCE_BYTES && !self.footer_pages.is_empty() {
-            self.footer_pages.pop_front();
+        while self.cached_bytes > MAX_SOURCE_BYTES
+            && let Some(page) = self.footer_pages.pop_front()
+        {
+            self.cached_bytes -= page.estimated_bytes();
         }
-        while self.rows.len() > MAX_CACHED_ROWS || self.data_bytes() > MAX_SOURCE_BYTES {
-            if self.rows.len() <= 1 {
-                break;
+        if self.rows.len() <= 1
+            || (self.rows.len() <= MAX_CACHED_ROWS && self.cached_bytes <= MAX_SOURCE_BYTES)
+        {
+            return;
+        }
+        let mut turn_counts: HashMap<_, usize> = self
+            .candidates
+            .keys()
+            .cloned()
+            .map(|turn| (turn, 0))
+            .collect();
+        if !turn_counts.is_empty() {
+            for turn in self.rows.iter().filter_map(|row| row.turn_id.as_deref()) {
+                if let Some(count) = turn_counts.get_mut(turn) {
+                    *count += 1;
+                }
             }
-            let anchor = self
-                .rows
+        }
+        let mut anchor = if self.position.follow_tail {
+            None
+        } else {
+            self.rows
                 .iter()
-                .position(|row| row.id == self.position.message_id);
-            let left = if self.position.follow_tail {
-                true
-            } else {
-                anchor.is_none_or(|index| index >= self.rows.len() / 2)
-            };
+                .position(|row| row.id == self.position.message_id)
+        };
+        let mut cut_front = false;
+        let mut cut_back = false;
+        while self.rows.len() > 1
+            && (self.rows.len() > MAX_CACHED_ROWS || self.cached_bytes > MAX_SOURCE_BYTES)
+        {
+            let left = anchor.is_none_or(|index| index >= self.rows.len() / 2);
+            let before = self.rows.len();
             let remove_batch = if left {
                 self.rows.front()
             } else {
@@ -185,10 +245,21 @@ impl SourceView {
             }
             .and_then(|row| row.batch_id.clone());
             loop {
-                if left {
-                    self.rows.pop_front();
+                let removed = if left {
+                    self.rows.pop_front()
                 } else {
-                    self.rows.pop_back();
+                    self.rows.pop_back()
+                }
+                .expect("a selected row batch is nonempty");
+                self.cached_bytes -= removed.estimated_bytes();
+                if let Some(turn) = removed.turn_id
+                    && let Some(count) = turn_counts.get_mut(&turn)
+                {
+                    *count -= 1;
+                    if *count == 0 {
+                        let candidate = self.candidates.remove(&turn).expect("counted candidate");
+                        self.cached_bytes -= candidate.estimated_bytes();
+                    }
                 }
                 let edge = if left {
                     self.rows.front()
@@ -199,24 +270,28 @@ impl SourceView {
                     break;
                 }
             }
-            // A discarded edge remains reachable through its boundary cursor.
             if left {
-                self.before = self.rows.front().map(|row| WindowCursor {
-                    stamp: self.stamp.clone().expect("cached rows have a stamp"),
-                    boundary_id: row.id.clone(),
-                });
+                cut_front = true;
+                anchor = anchor.and_then(|index| index.checked_sub(before - self.rows.len()));
             } else {
-                self.after = self.rows.back().map(|row| WindowCursor {
-                    stamp: self.stamp.clone().expect("cached rows have a stamp"),
-                    boundary_id: row.id.clone(),
-                });
+                cut_back = true;
+                anchor = anchor.filter(|&index| index < self.rows.len());
             }
-            self.candidates.retain(|turn, _| {
-                self.rows
-                    .iter()
-                    .any(|row| row.turn_id.as_ref() == Some(turn))
+        }
+        // Discarded edges remain reachable through the retained boundaries.
+        if cut_front {
+            self.before = self.rows.front().map(|row| WindowCursor {
+                stamp: self.stamp.clone().expect("cached rows have a stamp"),
+                boundary_id: row.id.clone(),
             });
         }
+        if cut_back {
+            self.after = self.rows.back().map(|row| WindowCursor {
+                stamp: self.stamp.clone().expect("cached rows have a stamp"),
+                boundary_id: row.id.clone(),
+            });
+        }
+        self.row_index.take();
     }
     pub fn body_page(&self, body: &BodyRef, from_byte: u64) -> Option<&BodyPage> {
         self.body_pages
@@ -484,16 +559,16 @@ impl HistoryViews {
         for candidate in page.candidates {
             view.candidates.insert(candidate.turn_id.clone(), candidate);
         }
-        for row in page.rows {
-            if let Some(index) = view.rows.iter().position(|old| old.id == row.id) {
-                view.rows[index] = row;
-            } else {
-                view.rows.push_back(row);
+        // The projection emits rows in source order. Its Before/After cursors
+        // exclude the retained boundary row, so adjacent pages can join directly.
+        if prepend {
+            for row in page.rows.into_iter().rev() {
+                view.rows.push_front(row);
             }
+        } else {
+            view.rows.extend(page.rows);
         }
-        view.rows
-            .make_contiguous()
-            .sort_by_key(|row| row.source_index);
+        view.row_index.take();
         view.anchor_missing = !page.anchor_found;
         view.needs_window = false;
         view.trim();
@@ -675,28 +750,227 @@ impl HistoryViews {
         Ok(())
     }
     fn enforce_total_budget(&mut self, active: &ViewSource) {
-        loop {
-            if self
-                .sources
-                .values()
-                .map(SourceView::data_bytes)
-                .sum::<usize>()
-                <= MAX_TOTAL_BYTES
-            {
-                return;
-            }
+        let mut bytes: usize = self.sources.values().map(|view| view.cached_bytes).sum();
+        while bytes > MAX_TOTAL_BYTES {
             let oldest = self
                 .sources
-                .values()
-                .filter(|view| &view.source != active && view.data_bytes() > 0)
-                .min_by_key(|view| view.touched)
-                .map(|view| view.source.clone());
+                .values_mut()
+                .filter(|view| &view.source != active && view.cached_bytes > 0)
+                .min_by_key(|view| view.touched);
             let Some(oldest) = oldest else {
                 return;
             };
-            if let Some(view) = self.sources.get_mut(&oldest) {
-                view.clear_data();
+            bytes -= oldest.cached_bytes;
+            oldest.clear_data();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn row_index_reuses_turn_starts_until_pagination_changes_the_window() {
+        let source = ViewSource::Main {
+            conversation_id: "chat".into(),
+        };
+        let stamp = SourceStamp {
+            generation: "test".into(),
+            revision: 1,
+            projection_revision: 1,
+        };
+        let mut views = HistoryViews::default();
+        views.open(source.clone(), None);
+        let cursor = |index| WindowCursor {
+            stamp: stamp.clone(),
+            boundary_id: format!("message-{index}"),
+        };
+        let load = |views: &mut HistoryViews, start: u32, at| {
+            let request = views.begin_window(&source, at).unwrap();
+            let end = start + 96;
+            let rows: Vec<_> = (start..end)
+                .map(|index| {
+                    let id = format!("message-{index}");
+                    let body = |kind| BodyRef {
+                        source: source.clone(),
+                        stamp: stamp.clone(),
+                        message_id: id.clone(),
+                        message_hash: "hash".into(),
+                        kind,
+                        bytes: 0,
+                    };
+                    DisplayRow {
+                        text: body(BodyKind::Text),
+                        thinking: body(BodyKind::Thinking),
+                        id,
+                        source_index: index,
+                        role: "assistant".into(),
+                        complete: true,
+                        steer: false,
+                        turn_id: Some(if index < 4 {
+                            "old-turn".into()
+                        } else {
+                            format!("turn-{}", if index == 250 { 0 } else { index / 100 })
+                        }),
+                        run_id: None,
+                        tool_name: None,
+                        tool_call_id: None,
+                        tool_output: None,
+                        tool_arguments: None,
+                        tool_calls: Vec::new(),
+                        preview: None,
+                        images: Vec::new(),
+                        file_activity_count: 0,
+                        batch_id: (index < 4).then(|| "old-batch".into()),
+                        info: Default::default(),
+                    }
+                })
+                .collect();
+            let candidates = rows
+                .iter()
+                .filter_map(|row| row.turn_id.as_deref())
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .map(|turn| CandidateNavigation {
+                    turn_id: turn.into(),
+                    selected_run: "selected".into(),
+                    position: 1,
+                    total: 2,
+                    previous: None,
+                    next: Some("other".into()),
+                })
+                .collect();
+            views
+                .apply_window(DisplayWindow {
+                    request_id: request.request_id,
+                    source: source.clone(),
+                    stamp: stamp.clone(),
+                    rows,
+                    total_source_rows: 384,
+                    total_selected_rows: 384,
+                    before: (start > 0).then(|| cursor(start)),
+                    after: (end < 384).then(|| cursor(end - 1)),
+                    candidates,
+                    anchor_found: true,
+                })
+                .unwrap()
+        };
+
+        load(
+            &mut views,
+            192,
+            WindowAt::Around {
+                message_id: "message-192".into(),
+            },
+        );
+        let initial = views.view(&source).unwrap().row_index().clone();
+        assert!(initial.starts_turn[0]);
+        assert!(Arc::ptr_eq(
+            &initial,
+            views.view(&source).unwrap().row_index()
+        ));
+        load(&mut views, 96, WindowAt::Before(cursor(192)));
+        let prepended = views.view(&source).unwrap().row_index().clone();
+        assert!(!Arc::ptr_eq(&initial, &prepended));
+        assert!(!prepended.starts_turn[192 - 96]);
+        assert!(!prepended.starts_turn[250 - 96]);
+
+        load(&mut views, 0, WindowAt::Before(cursor(96)));
+        let full = views.view(&source).unwrap().row_index().clone();
+        assert_eq!(full.ids.len(), MAX_CACHED_ROWS);
+        assert!(full.ids.contains("message-0"));
+        assert!(!full.starts_turn[96]);
+        assert!(
+            views
+                .view(&source)
+                .unwrap()
+                .candidates
+                .contains_key("old-turn")
+        );
+
+        load(&mut views, 288, WindowAt::After(cursor(287)));
+        let view = views.view(&source).unwrap();
+        let trimmed = view.row_index();
+        assert_eq!(trimmed.ids.len(), MAX_CACHED_ROWS);
+        assert!(!trimmed.ids.contains("message-95"));
+        assert!(trimmed.ids.contains("message-383"));
+        assert!(trimmed.starts_turn[0]);
+        assert!(!trimmed.starts_turn[250 - 96]);
+        assert_eq!(view.before.as_ref().unwrap().boundary_id, "message-96");
+        assert!(!view.candidates.contains_key("old-turn"));
+        assert!(view.candidates.contains_key("turn-0"));
+        assert_eq!(view.cached_bytes, view.measure_data_bytes());
+
+        let mut anchor = view.position.clone();
+        anchor.message_id = "message-100".into();
+        anchor.pixel_offset = 13.5;
+        anchor.follow_tail = false;
+        views.remember_position(anchor).unwrap();
+        let applied = load(&mut views, 0, WindowAt::Before(cursor(96)));
+        let view = views.view(&source).unwrap();
+        let restore = applied.restore.unwrap();
+        assert_eq!(restore.message_id, "message-100");
+        assert_eq!(restore.pixel_offset, 13.5);
+        assert!(view.row_index().ids.contains("message-100"));
+        assert_eq!(view.after.as_ref().unwrap().boundary_id, "message-287");
+        assert!(!view.candidates.contains_key("turn-3"));
+        assert_eq!(view.cached_bytes, view.measure_data_bytes());
+    }
+
+    #[test]
+    fn byte_limits_evict_old_images_then_the_least_recent_inactive_source() {
+        let mut views = HistoryViews::default();
+        let stamp = SourceStamp {
+            generation: "test".into(),
+            revision: 1,
+            projection_revision: 1,
+        };
+        let mut oldest = None;
+        for index in 0..8 {
+            let source = ViewSource::Main {
+                conversation_id: format!("chat-{index}"),
+            };
+            views.open(source.clone(), None);
+            views.confirm_open(&source, None, stamp.clone()).unwrap();
+            for image_index in 0..2 {
+                let image = ImageRef {
+                    source: source.clone(),
+                    stamp: stamp.clone(),
+                    message_id: "image-message".into(),
+                    message_hash: "hash".into(),
+                    image_index,
+                };
+                let request = views.begin_image_sized(image, 1024).unwrap();
+                views
+                    .apply_image(Arc::new(ImagePixels {
+                        request_id: request.request_id,
+                        image: request.image,
+                        width: 1024,
+                        height: 768,
+                        rgba: vec![0; 1024 * 768 * 4],
+                    }))
+                    .unwrap();
+            }
+            let view = views.view(&source).unwrap();
+            assert_eq!(view.images.len(), 1);
+            assert_eq!(view.images[0].image.image_index, 1);
+            assert_eq!(view.cached_bytes, view.measure_data_bytes());
+            if index == 0 {
+                oldest = Some(source);
             }
         }
+        // Eight 3 MiB images plus their metadata exceed the 24 MiB shared limit.
+        let oldest = views.view(&oldest.unwrap()).unwrap();
+        assert!(oldest.images.is_empty());
+        assert_eq!(oldest.cached_bytes, 0);
+        assert_eq!(
+            views
+                .sources
+                .values()
+                .filter(|view| !view.images.is_empty())
+                .count(),
+            7
+        );
     }
 }

@@ -39,6 +39,7 @@ pub(crate) struct UsageInput {
     conversations: BTreeSet<String>,
     records: Vec<UsageRecord>,
     receipt_uncertain: bool,
+    shared_files: Option<PathBuf>,
 }
 pub(crate) struct Projection {
     pub legacy: LegacyDocument,
@@ -59,22 +60,30 @@ impl Store {
                 .collect(),
             records: self.usage(),
             receipt_uncertain: self.write_blocked.is_some(),
+            shared_files: self.shared_files_root.clone(),
         }
     }
     pub(super) fn prepare_usage_deletion(&mut self, id: &str) -> Result<Deletion, String> {
-        let input = self.usage_input();
-        let zone = if crate::legacy_migration::archive_catalog(&self.namespace_root)?.is_some() {
-            crate::platform::calendar::zone_id()?
+        let (mut legacy, fingerprint) = if self.shared_files_root.is_some() {
+            // The shared deletion writes Compose's durable summary before removing its log.
+            (Vec::new(), String::new())
         } else {
-            String::new()
+            let zone = if crate::legacy_migration::archive_catalog(&self.namespace_root)?.is_some()
+            {
+                crate::platform::calendar::zone_id()?
+            } else {
+                String::new()
+            };
+            let projection = self.usage_input().project(&zone)?;
+            let child_prefix = format!("child/{id}/");
+            let summaries = projection
+                .legacy
+                .chats
+                .into_values()
+                .filter(|source| source.id == id || source.id.starts_with(&child_prefix))
+                .collect::<Vec<_>>();
+            (summaries, projection.legacy.source_fingerprint)
         };
-        let projection = input.project(&zone)?;
-        let mut legacy: Vec<_> = projection
-            .legacy
-            .chats
-            .into_values()
-            .filter(|source| source.id == id || source.id.starts_with(&format!("child/{id}/")))
-            .collect();
         // These are final token contributions, never transcript retention.
         let at = now()?;
         for source in &mut legacy {
@@ -85,7 +94,7 @@ impl Store {
             id: id.into(),
             prepared_at: at,
             committed_at: None,
-            fingerprint: projection.legacy.source_fingerprint,
+            fingerprint,
             legacy,
             request_ids: self
                 .usage
@@ -203,6 +212,9 @@ impl UsageInput {
         if !self.conversations.contains(id) {
             return Err("统计源未由Store会话metadata确认".into());
         }
+        if let Some(files) = self.shared_files.as_deref() {
+            return super::shared_chat::read(files, id);
+        }
         let document = if self.chats.join(format!("{id}.segments.json")).exists() {
             let (conversation, messages, queued_turns) =
                 crate::legacy_migration::read_chat_archive(&self.root, id)?;
@@ -243,9 +255,28 @@ impl UsageInput {
         self.check_namespace()?;
         let receipts = read_receipts(&self.root)?;
         let receipt_bytes = serde_json::to_vec(&receipts).map_err(|_| "删除回执无法编码")?;
-        let catalog = crate::legacy_migration::archive_catalog(&self.namespace)?;
-        let mut legacy = legacy_usage::empty();
-        let mut alive = BTreeSet::new();
+        let shared = self.shared_files.as_deref();
+        let catalog = if shared.is_none() {
+            crate::legacy_migration::archive_catalog(&self.namespace)?
+        } else {
+            None
+        };
+        let mut legacy = if let Some(files) = shared {
+            super::shared_usage::read(files, &self.conversations, chosen_zone, |at, zone| {
+                let stamp = crate::platform::calendar::day_for(at, zone)?;
+                Ok(legacy_usage::DayStamp {
+                    zone_id: stamp.zone_id,
+                    day: stamp.day,
+                })
+            })?
+        } else {
+            legacy_usage::empty()
+        };
+        let mut alive = if shared.is_some() {
+            self.conversations.clone()
+        } else {
+            BTreeSet::new()
+        };
         if let Some(catalog) = &catalog {
             if catalog.generation_root.join("state") != self.root {
                 return Err("归档来源不是当前Store活动代".into());
@@ -356,13 +387,22 @@ impl UsageInput {
             if self.conversations.contains(&receipt.id) && receipt.committed_at.is_none() {
                 continue;
             }
-            if legacy.source_fingerprint.is_empty() && !receipt.legacy.is_empty() {
+            if shared.is_none()
+                && legacy.source_fingerprint.is_empty()
+                && !receipt.legacy.is_empty()
+            {
                 legacy.source_fingerprint = receipt.fingerprint.clone();
             }
-            if !receipt.legacy.is_empty() && legacy.source_fingerprint != receipt.fingerprint {
+            if shared.is_none()
+                && !receipt.legacy.is_empty()
+                && legacy.source_fingerprint != receipt.fingerprint
+            {
                 return Err("删除用量回执来自另一旧来源指纹".into());
             }
             for source in &receipt.legacy {
+                if shared.is_some() && legacy.chats.contains_key(&source.id) {
+                    continue;
+                }
                 let mut final_source = source.clone();
                 if receipt.committed_at.is_none() || self.receipt_uncertain {
                     final_source.deleted = false;

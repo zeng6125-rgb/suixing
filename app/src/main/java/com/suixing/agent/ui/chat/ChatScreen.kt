@@ -25,7 +25,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.FrameRateCategory
 import androidx.compose.ui.preferredFrameRate
 import androidx.compose.ui.graphics.Brush
-import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
@@ -281,21 +280,14 @@ fun ChatScreen(
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
         snackbarHost = { SnackbarHost(snackbarHostState) },
     ) { padding ->
-        // Light mode fades a whisper of brand colour into the bottom of the canvas, the
-        // way the reference apps tint their own surface; dark stays flat because the same
-        // gradient over #0F1412 bands on OLED.
-        val canvas = if (LocalDarkTheme.current) {
-            SolidColor(MaterialTheme.colorScheme.surface)
-        } else {
-            Brush.verticalGradient(
-                listOf(
-                    MaterialTheme.colorScheme.surface,
-                    MaterialTheme.colorScheme.primary.copy(alpha = 0.06f),
-                ),
-            )
-        }
         // The top fade layer needs one solid colour: the canvas brush's own top stop.
         val canvasColor = MaterialTheme.colorScheme.surface
+        val canvas = if (!LocalDarkTheme.current) {
+            val tint = MaterialTheme.colorScheme.primary
+            remember(canvasColor, tint) {
+                Brush.verticalGradient(listOf(canvasColor, tint.copy(alpha = 0.06f)))
+            }
+        } else null
         // The header is a real bar again: it owns the status bar strip and the transcript
         // starts below it, so nothing scrolls under a translucent band of controls.
         // The transcript and the jump button share one box: the button belongs to the
@@ -308,7 +300,7 @@ fun ChatScreen(
         Box(
             Modifier
                 .fillMaxSize()
-                .then(if (LocalDarkTheme.current) Modifier else Modifier.background(canvas))
+                .then(if (canvas == null) Modifier else Modifier.background(canvas))
                 .padding(padding),
         ) {
 

@@ -67,7 +67,7 @@ pub(crate) fn memory_id(key: &str) -> String {
     format!("legacy-memory-{hex}")
 }
 fn memory(store: &Store, key: &str) -> Option<Memory> {
-    let id = memory_id(key);
+    let id = store.memory_id_for_key(key);
     store.memories().into_iter().find(|note| note.id == id)
 }
 pub(crate) fn prepare(call: &ToolCall, store: &Store) -> Result<Prepared, String> {
@@ -103,11 +103,9 @@ pub(crate) fn prepare(call: &ToolCall, store: &Store) -> Result<Prepared, String
                 json!({"ok":true,"notes":store.memories()})
             } else {
                 let note = memory(store, &key);
-                let value = note.as_ref().map(|note| {
-                    note.text
-                        .strip_prefix(&format!("{key}: "))
-                        .unwrap_or(&note.text)
-                });
+                let value = note
+                    .as_ref()
+                    .map(|note| store.memory_value_for_key(&key, &note.text));
                 json!({"ok":true,"key":key,"found":note.is_some(),"value":value})
             };
             if serde_json::to_vec(&result)
@@ -128,7 +126,7 @@ pub(crate) fn prepare(call: &ToolCall, store: &Store) -> Result<Prepared, String
             Ok(Prepared::WriteMemory {
                 namespace,
                 before: memory(store, &key),
-                text: format!("{key}: {value}"),
+                text: store.memory_text_for_key(&key, &value),
                 key,
             })
         }
@@ -206,7 +204,7 @@ impl Prepared {
                 if !equal {
                     return Err("记忆在审批期间已变化，未覆盖新值".into());
                 }
-                let saved = store.save_keyed_memory(memory_id(&key), text.clone())?;
+                let saved = store.save_keyed_memory(&key, text.clone())?;
                 Ok(
                     json!({"ok":true,"key":key,"saved":saved.text==text,"id":saved.id,"updated_at":saved.updated_at}),
                 )

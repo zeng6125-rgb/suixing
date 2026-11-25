@@ -52,12 +52,17 @@ internal object HistoryTrim {
         var from = messages.size
         var used = 0
         var oldestUser = -1
+        val costs = IntArray(minOf(8, from))
+        val users = ByteArray(costs.size)
         while (from > 0) {
             // Estimate the next suffix batch, then stop requesting batches at the budget boundary.
-            val count = minOf(8, from)
-            val costs = IntArray(count) { TokenEstimates.of(messages[from - 1 - it]) }
-            val users = ByteArray(count) { if (messages[from - 1 - it].role == Roles.USER) 1 else 0 }
-            val state = NativeCoreJni.nativeTrimChunk(costs, users, budget, used, messages.size - from)
+            val count = minOf(costs.size, from)
+            for (index in 0 until count) {
+                val message = messages[from - 1 - index]
+                costs[index] = TokenEstimates.of(message)
+                users[index] = if (message.role == Roles.USER) 1 else 0
+            }
+            val state = NativeCoreJni.nativeTrimChunk(costs, users, count, budget, used, messages.size - from)
             if (state.size != 4 || state[1] !in 0..count || state[2] !in 0..1 ||
                 (state[1] == 0 && state[2] != 1) || state[3] !in (-1 until state[1])) {
                 throw IOException("原生历史裁剪响应无效")

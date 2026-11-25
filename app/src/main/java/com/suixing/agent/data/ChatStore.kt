@@ -12,6 +12,7 @@ import java.nio.channels.FileChannel
 import java.nio.file.Files
 import java.nio.file.StandardOpenOption
 import java.nio.file.attribute.BasicFileAttributes
+import java.nio.file.attribute.FileTime
 
 /**
  * 会话存储：每个会话一个 meta + 一份只追加的消息日志（#30/#31）。
@@ -209,6 +210,7 @@ internal class ChatStore(private val root: File) {
             // 全量解析常驻后 RSS 413 MB）。meta 里本来就存着 messageCount，这里直接带上去。
             messageCount = messageCount,
             turnCount = turnCount,
+            committedLogBytes = logBytes,
         )
 
         /** The same conversation with [messages] attached — what [readTail] hands the screen. */
@@ -256,11 +258,10 @@ internal class ChatStore(private val root: File) {
      * **带缓存的 meta 读取**（优化清单 data-P1）。
      *
      * `readMeta` 原来每次都是 `isFile + readText + decode`，而一次用户操作里会被调用 2~3 遍
-     * （`save()` → `writeTail()` → `write()`，以及会话列表批量取尺寸的那一轮）。缓存键带上
-     * 长度与 mtime，任何写入都会让键变化；`writeMeta` 里另有显式失效，兜住"同毫秒同长度"的
-     * 边角情况。只留最近 16 条。
+     * （`save()` → `writeTail()` → `write()`）。保留文件系统的
+     * 完整修改时间和文件身份，以识别同长度的快速替换。只留最近 16 条。
      */
-    private data class MetaKey(val path: String, val length: Long, val modified: Long)
+    private data class MetaKey(val path: String, val length: Long, val modified: FileTime, val identity: Any?)
     private data class CommittedMeta(val meta: ConversationMeta, val key: MetaKey)
 
     private val metaCache = object : LinkedHashMap<MetaKey, ConversationMeta>(8, 0.75f, true) {
@@ -278,7 +279,7 @@ internal class ChatStore(private val root: File) {
             return null
         }
         if (!attributes.isRegularFile) return null
-        return MetaKey(file.absolutePath, attributes.size(), attributes.lastModifiedTime().toMillis())
+        return MetaKey(file.absolutePath, attributes.size(), attributes.lastModifiedTime(), attributes.fileKey())
     }
 
     fun readMeta(id: String): ConversationMeta? {
@@ -639,7 +640,7 @@ internal class ChatStore(private val root: File) {
      * 「加载更早」. Returns from the start of a turn, so a card of tool results never shows up on
      * screen without the question that asked for it.
      *
-     * Reads a window and grows it (×4) until it holds enough turns: a turn here can be megabytes
+     * Reads a window and grows it until it holds enough turns: a turn here can be megabytes
      * when the answer carried screenshots, so the window is measured in what it found, not in a
      * fixed size.
      */
@@ -693,7 +694,9 @@ internal class ChatStore(private val root: File) {
                 )
             }
             if (atStart) return MessageWindow(entries.map { it.message }, 0, atStart = true)
-            budget = (budget * 4).coerceAtMost(end)
+            // On longer logs, try 512 KiB before 1 MiB to avoid decoding extra messages.
+            val growth = if (end > INITIAL_WINDOW_BYTES * 4 && budget < INITIAL_WINDOW_BYTES * 4) 2 else 4
+            budget = (budget * growth).coerceAtMost(end)
         }
     }
 

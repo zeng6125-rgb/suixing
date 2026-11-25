@@ -2,7 +2,7 @@ use super::*;
 
 enum Target {
     Navigate(Navigation, bool),
-    SettingsRoot,
+    SettingsParent,
 }
 
 #[derive(Default)]
@@ -38,16 +38,16 @@ impl RustApplication {
         }
     }
 
-    pub(super) fn settings_request_root(&mut self) {
+    pub(super) fn settings_request_parent(&mut self) {
         if self.settings_draft != self.state.settings {
-            self.settings_leave.target = Some(Target::SettingsRoot);
+            self.settings_leave.target = Some(Target::SettingsParent);
             self.settings_leave.saving = self
                 .settings_view
                 .pending
                 .as_ref()
                 .map(|(id, _, _)| id.clone());
         } else {
-            self.settings_show_root();
+            self.settings_show_parent();
         }
     }
 
@@ -67,13 +67,16 @@ impl RustApplication {
         if let Some(target) = self.settings_leave.target.take() {
             match target {
                 Target::Navigate(navigation, narrow) => self.navigate(navigation, narrow),
-                Target::SettingsRoot => self.settings_show_root(),
+                Target::SettingsParent => self.settings_show_parent(),
             }
         }
     }
 
     pub(super) fn settings_leave_dialog(&mut self, ctx: &egui::Context) {
         if self.settings_leave.target.is_none() {
+            return;
+        }
+        if self.settings_autosaves() && self.settings_leave.saving.is_some() {
             return;
         }
         let waiting = self.settings_leave.saving.is_some();
@@ -125,11 +128,22 @@ impl RustApplication {
             self.finish_settings_leave();
         }
         let native = crate::platform::navigation::take_back();
+        let browser_back =
+            ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::BrowserBack));
         let escape = self.state.page != Page::Terminal
             && ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
-        if native.is_none() && !escape {
+        if native.is_none() && !escape && !browser_back {
             return;
         }
+        self.go_back(ctx, native.as_ref(), native.is_some() || browser_back);
+    }
+
+    pub(super) fn go_back(
+        &mut self,
+        ctx: &egui::Context,
+        native: Option<&crate::platform::navigation::BackRequest>,
+        system_back: bool,
+    ) {
         if egui::Popup::is_any_open(ctx) {
             egui::Popup::close_all(ctx);
             return;
@@ -143,7 +157,7 @@ impl RustApplication {
         if self.avatar_back() || self.close_navigation_editor() {
             return;
         }
-        if let Some(request) = native.as_ref().filter(|request| request.keyboard_visible) {
+        if let Some(request) = native.filter(|request| request.keyboard_visible) {
             if let Err(error) = request.hide_keyboard() {
                 self.state.error(error);
             }
@@ -158,7 +172,7 @@ impl RustApplication {
             self.drawer_motion.cancel();
             return;
         }
-        if self.settings_back() {
+        if self.legacy_confirm.take().is_some() || self.settings_back() {
             return;
         }
         if self.state.page == Page::Files {
@@ -176,8 +190,9 @@ impl RustApplication {
             }
         }
         if self.state.page != Page::Chat {
-            self.navigate(Navigation::Page(Page::Chat), false);
-        } else if native.is_some() {
+            let previous = self.page_history.last().copied().unwrap_or(Page::Chat);
+            self.navigate(Navigation::Back(previous), true);
+        } else if system_back {
             if let Err(error) = crate::platform::navigation::background() {
                 self.state.error(error);
             }
@@ -191,6 +206,7 @@ impl RustApplication {
             || self.plugin_import.take().is_some()
             || self.mcp_editor.take().is_some()
             || self.plugin_environment_editor.take().is_some()
+            || self.schedule_editor.take().is_some()
         {
             return true;
         }

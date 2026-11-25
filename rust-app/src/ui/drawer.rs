@@ -1,4 +1,5 @@
 use eframe::egui::{self, Event, PointerButton, Pos2, Rect};
+use std::{collections::BTreeSet, sync::OnceLock};
 use suixing_search::drawer_gesture::{DragAxis, INPUT_GAIN, drag_axis, drag_offset, release_open};
 
 const EDGE: f32 = 32.0;
@@ -7,6 +8,8 @@ const SPRING_STIFFNESS: f32 = 850.0;
 const SPRING_THRESHOLD: f32 = 0.003;
 const HOME_CORNER_RADIUS: f32 = 57.33;
 const HOME_SHADOW_EXTENT: u8 = 16;
+const HOME_CORNER_STEPS: usize = 20;
+static HOME_CORNER_RAYS: OnceLock<[(egui::Vec2, f32); HOME_CORNER_STEPS + 1]> = OnceLock::new();
 // Compose's shadow color is modulated by the platform light. Match its visible penumbra.
 const HOME_SHADOW_ALPHA: f32 = 0.026;
 
@@ -64,6 +67,127 @@ pub(super) fn home_layer(
     home
 }
 
+pub(super) fn finish_home_paint(parent: egui::LayerId, home: &egui::Ui) {
+    let ctx = home.ctx();
+    let layer = home.layer_id();
+    let Some(transform) = ctx.layer_transform_to_global(layer) else {
+        return;
+    };
+    // Keep the input transform on the widget layer. Move its paint to a sibling so
+    // egui scales the finished vertices instead of copying and scaling every galley.
+    let paint = egui::LayerId::new(layer.order, layer.id.with("paint"));
+    ctx.set_sublayer(parent, paint);
+    ctx.graphics_mut(|graphics| {
+        let mut list = std::mem::take(graphics.entry(layer));
+        list.transform_after_rounding(transform);
+        *graphics.entry(paint) = list;
+    });
+}
+
+pub(super) struct FrozenTranscript {
+    rect: Rect,
+    pixels_per_point: f32,
+    font_fill: f32,
+    shapes: Vec<egui::epaint::ClippedShape>,
+    _textures: Vec<egui::TextureHandle>,
+}
+
+impl FrozenTranscript {
+    pub(super) fn show(
+        ui: &mut egui::Ui,
+        snapshot: &mut Option<Self>,
+        freeze: bool,
+        draw: impl FnOnce(&mut egui::Ui),
+    ) {
+        if !freeze {
+            *snapshot = None;
+            draw(ui);
+            return;
+        }
+        let ctx = ui.ctx().clone();
+        let layer = ui.layer_id();
+        let rect = ui.max_rect();
+        let clip = ui.clip_rect();
+        let pixels_per_point = ctx.pixels_per_point();
+        let font_fill = ctx.fonts(|fonts| fonts.font_atlas_fill_ratio());
+        if let Some(frozen) = snapshot.as_mut().filter(|frozen| {
+            frozen.rect == rect
+                && frozen.pixels_per_point == pixels_per_point
+                && font_fill >= frozen.font_fill
+        }) {
+            frozen.font_fill = font_fill;
+            ctx.graphics_mut(|graphics| {
+                let list = graphics.entry(layer);
+                for shape in &frozen.shapes {
+                    let visible = shape.clip_rect.intersect(clip);
+                    if visible.is_positive() {
+                        let index = list.add(visible, shape.shape.clone());
+                        list.mutate_shape(index, |entry| {
+                            entry.transform_after_tessellation = shape.transform_after_tessellation;
+                        });
+                    }
+                }
+            });
+            return;
+        }
+        let start = ctx.graphics_mut(|graphics| graphics.entry(layer).next_idx());
+        // Capture the full panel so the right-hand part can reappear during closing.
+        ui.set_clip_rect(rect);
+        draw(ui);
+        ui.set_clip_rect(clip);
+        let shapes: Vec<_> = ctx.graphics_mut(|graphics| {
+            let list = graphics.entry(layer);
+            let shapes = list
+                .all_entries()
+                .skip(start.0)
+                .filter(|entry| !matches!(entry.shape, egui::Shape::Noop))
+                .cloned()
+                .collect();
+            for i in start.0..list.next_idx().0 {
+                list.mutate_shape(egui::layers::ShapeIdx(i), |entry| {
+                    entry.clip_rect = entry.clip_rect.intersect(clip);
+                });
+            }
+            shapes
+        });
+        let mut ids = BTreeSet::new();
+        for entry in &shapes {
+            texture_ids(&entry.shape, &mut ids);
+        }
+        let manager = ctx.tex_manager();
+        // A history update can evict an image while its frozen frame is still visible.
+        let textures = ids
+            .into_iter()
+            .map(|id| {
+                manager.write().retain(id);
+                egui::TextureHandle::new(manager.clone(), id)
+            })
+            .collect();
+        *snapshot = Some(Self {
+            rect,
+            pixels_per_point,
+            font_fill: ctx.fonts(|fonts| fonts.font_atlas_fill_ratio()),
+            shapes,
+            _textures: textures,
+        });
+    }
+}
+
+fn texture_ids(shape: &egui::Shape, ids: &mut BTreeSet<egui::TextureId>) {
+    match shape {
+        egui::Shape::Vec(shapes) => {
+            for shape in shapes {
+                texture_ids(shape, ids);
+            }
+        }
+        egui::Shape::Mesh(mesh) if matches!(mesh.texture_id, egui::TextureId::Managed(id) if id != 0) =>
+        {
+            ids.insert(mesh.texture_id);
+        }
+        _ => {}
+    }
+}
+
 pub(super) fn paint_home_corners(
     home: &egui::Ui,
     viewport: Rect,
@@ -75,23 +199,45 @@ pub(super) fn paint_home_corners(
     }
     let radius = home_corner_radius(viewport);
     let extent = f32::from(HOME_SHADOW_EXTENT);
-    let feather = 1.0 / home.ctx().pixels_per_point();
-    let mut mask = egui::Mesh::default();
+    let ctx = home.ctx();
+    let layer = home.layer_id();
+    let to_global = ctx.layer_transform_to_global(layer).unwrap_or_default();
+    let clip = (to_global.inverse() * ctx.viewport_rect()).intersect(viewport);
+    let feather = 1.0 / ctx.pixels_per_point();
     // The drawer ends to the left of the page. Its solid backing is also behind the corners.
-    for (corner, sign) in [
+    let visible = [
         (viewport.left_top(), egui::vec2(-1.0, -1.0)),
         (viewport.right_top(), egui::vec2(1.0, -1.0)),
         (viewport.right_bottom(), egui::vec2(1.0, 1.0)),
         (viewport.left_bottom(), egui::vec2(-1.0, 1.0)),
-    ] {
+    ]
+    .into_iter()
+    .filter(|(corner, sign)| {
+        let bounds = Rect::from_two_pos(*corner, *corner - *sign * radius);
+        bounds.expand(feather).intersects(clip)
+    });
+    let count = visible.clone().count();
+    if count == 0 {
+        return;
+    }
+    let rays = HOME_CORNER_RAYS.get_or_init(|| {
+        std::array::from_fn(|step| {
+            let angle = std::f32::consts::FRAC_PI_2 * step as f32 / HOME_CORNER_STEPS as f32;
+            let (sin, cos) = angle.sin_cos();
+            (egui::vec2(cos, sin), cos.max(sin))
+        })
+    });
+    let mut mask = egui::Mesh {
+        vertices: Vec::with_capacity(count * (HOME_CORNER_STEPS + 1) * 4),
+        indices: Vec::with_capacity(count * HOME_CORNER_STEPS * 18),
+        ..Default::default()
+    };
+    for (corner, sign) in visible {
         let center = corner - sign * radius;
         let base = mask.vertices.len() as u32;
-        const STEPS: u32 = 20;
-        for step in 0..=STEPS {
-            let angle = std::f32::consts::FRAC_PI_2 * step as f32 / STEPS as f32;
-            let (sin, cos) = angle.sin_cos();
-            let direction = egui::vec2(cos * sign.x, sin * sign.y);
-            let outer = radius / cos.max(sin);
+        for &(ray, edge) in rays {
+            let direction = egui::vec2(ray.x * sign.x, ray.y * sign.y);
+            let outer = radius / edge;
             mask.colored_vertex(
                 center + direction * (radius - feather).max(0.0),
                 egui::Color32::TRANSPARENT,
@@ -108,7 +254,7 @@ pub(super) fn paint_home_corners(
                 );
             }
         }
-        for step in 0..STEPS {
+        for step in 0..HOME_CORNER_STEPS as u32 {
             for band in 0..3 {
                 let i = base + 4 * step + band;
                 mask.add_triangle(i, i + 1, i + 4);
@@ -116,11 +262,7 @@ pub(super) fn paint_home_corners(
             }
         }
     }
-    let ctx = home.ctx();
-    let layer = home.layer_id();
-    let to_global = ctx.layer_transform_to_global(layer).unwrap_or_default();
-    let clip = to_global.inverse() * ctx.viewport_rect();
-    egui::Painter::new(ctx.clone(), layer, clip.intersect(viewport)).add(egui::Shape::mesh(mask));
+    egui::Painter::new(ctx.clone(), layer, clip).add(egui::Shape::mesh(mask));
 }
 
 pub(super) fn overlay<R>(
@@ -165,6 +307,7 @@ pub(super) struct DrawerMotion {
     position: f32,
     velocity: f32,
     pointer: Option<DrawerPointer>,
+    empty_chat_area: Option<Rect>,
 }
 
 struct DrawerPointer {
@@ -198,6 +341,10 @@ impl DrawerMotion {
         self.pointer = None;
     }
 
+    pub(super) fn set_empty_chat_area(&mut self, area: Rect) {
+        self.empty_chat_area = Some(area);
+    }
+
     pub(super) fn update(
         &mut self,
         ctx: &egui::Context,
@@ -209,6 +356,7 @@ impl DrawerMotion {
         if ctx.current_pass_index() != 0 {
             return;
         }
+        let empty_chat_area = self.empty_chat_area.take();
         if ctx.any_popup_open() || ctx.memory(|memory| memory.top_modal_layer().is_some()) {
             self.cancel();
         } else {
@@ -235,12 +383,11 @@ impl DrawerMotion {
                             let progress = self.progress();
                             let on_shield = (progress > 0.0 || *open)
                                 && pos.x >= viewport.left() + width * progress;
-                            if viewport.contains(pos)
-                                && (on_shield
-                                    || (gestures
-                                        && progress == 0.0
-                                        && pos.x <= viewport.left() + EDGE))
-                            {
+                            let can_open = gestures
+                                && progress == 0.0
+                                && (pos.x <= viewport.left() + EDGE
+                                    || empty_chat_area.is_some_and(|area| area.contains(pos)));
+                            if viewport.contains(pos) && (on_shield || can_open) {
                                 self.pointer = Some(DrawerPointer {
                                     down: pos,
                                     last: pos,
@@ -376,6 +523,37 @@ mod tests {
     }
 
     #[test]
+    fn an_interior_swipe_opens_the_drawer_only_in_the_empty_chat_area() {
+        let ctx = egui::Context::default();
+        let viewport = Rect::from_min_max(Pos2::ZERO, point(385.0, 800.0));
+        let empty_chat = Rect::from_min_max(point(0.0, 60.0), point(385.0, 680.0));
+        for (y, expected) in [(720.0, false), (300.0, true)] {
+            let mut motion = DrawerMotion::default();
+            let mut open = false;
+            let start = point(120.0, y);
+            let end = point(280.0, y);
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(viewport),
+                    events: vec![
+                        button(start, true),
+                        Event::PointerMoved(end),
+                        button(end, false),
+                    ],
+                    ..Default::default()
+                },
+                |_ui| {
+                    motion.set_empty_chat_area(empty_chat);
+                    motion.update(&ctx, viewport, true, 1.0, &mut open);
+                },
+            )
+            .textures_delta
+            .clear();
+            assert_eq!(open, expected);
+        }
+    }
+
+    #[test]
     fn edge_drag_follows_reversal_and_tapping_the_shield_closes() {
         let ctx = egui::Context::default();
         let viewport = Rect::from_min_max(Pos2::ZERO, point(385.0, 800.0));
@@ -438,6 +616,7 @@ mod tests {
                 },
                 |ui| {
                     let backdrop = ui.visuals().faint_bg_color;
+                    let parent = ui.layer_id();
                     let mut home = home_layer(ui, viewport, viewport, progress, backdrop);
                     let transform = ctx
                         .layer_transform_to_global(home.layer_id())
@@ -457,6 +636,7 @@ mod tests {
                         ui.label("drawer");
                         None::<()>
                     });
+                    finish_home_paint(parent, &home);
                 },
             )
             .textures_delta
@@ -471,6 +651,144 @@ mod tests {
         run(0.5, Vec::new());
         assert!(!run(0.5, vec![Event::PointerMoved(pos), button(pos, true)]));
         assert!(!run(0.5, vec![button(pos, false)]));
+    }
+
+    #[test]
+    fn home_paint_keeps_the_same_galley_when_the_drawer_scales_it() {
+        let ctx = egui::Context::default();
+        let viewport = Rect::from_min_max(Pos2::ZERO, point(385.0, 800.0));
+        let position = point(40.0, 50.0);
+        let mut drawn = None;
+        let output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(viewport),
+                ..Default::default()
+            },
+            |ui| {
+                let home = home_layer(ui, viewport, viewport, 0.5, egui::Color32::BLACK);
+                let galley = home.painter().layout_no_wrap(
+                    "会话 chat".into(),
+                    egui::FontId::proportional(15.0),
+                    egui::Color32::WHITE,
+                );
+                home.painter()
+                    .galley(position, galley.clone(), egui::Color32::WHITE);
+                let transform = ctx.layer_transform_to_global(home.layer_id()).unwrap();
+                let clip = home.clip_rect();
+                finish_home_paint(ui.layer_id(), &home);
+                assert_eq!(
+                    ctx.layer_transform_to_global(home.layer_id()),
+                    Some(transform)
+                );
+                drawn = Some((galley, transform, clip));
+            },
+        );
+        let (galley, transform, clip) = drawn.unwrap();
+        let text = output
+            .shapes
+            .into_iter()
+            .find(|shape| matches!(shape.shape, egui::Shape::Text(_)))
+            .expect("transformed home text");
+        assert_eq!(text.clip_rect, transform * clip);
+        assert_eq!(text.transform_after_tessellation, transform);
+        let egui::Shape::Text(text) = text.shape else {
+            unreachable!();
+        };
+        assert_eq!(text.pos, position);
+        assert!(std::sync::Arc::ptr_eq(&text.galley, &galley));
+    }
+
+    #[test]
+    fn frozen_transcript_reveals_the_same_image_during_close_and_releases_it_at_zero() {
+        let ctx = egui::Context::default();
+        let viewport = Rect::from_min_max(Pos2::ZERO, point(385.0, 800.0));
+        let mut texture = Some(ctx.load_texture(
+            "history image",
+            egui::ColorImage::filled([2, 2], egui::Color32::WHITE),
+            egui::TextureOptions::LINEAR,
+        ));
+        let texture_id = texture.as_ref().unwrap().id();
+        let image = Rect::from_min_max(point(315.0, 200.0), point(345.0, 230.0));
+        let mut snapshot = None;
+        let mut layouts = 0;
+        for progress in [0.75, 1.0, 0.1, 0.0] {
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(viewport),
+                    ..Default::default()
+                },
+                |ui| {
+                    let mut home =
+                        home_layer(ui, viewport, viewport, progress, egui::Color32::BLACK);
+                    FrozenTranscript::show(&mut home, &mut snapshot, progress > 0.0, |ui| {
+                        layouts += 1;
+                        ui.label("会话正文");
+                        if let Some(texture) = &texture {
+                            ui.painter().image(
+                                texture.id(),
+                                image,
+                                Rect::from_min_max(Pos2::ZERO, point(1.0, 1.0)),
+                                egui::Color32::WHITE,
+                            );
+                        }
+                    });
+                    finish_home_paint(ui.layer_id(), &home);
+                },
+            );
+            if progress > 0.0 {
+                let shape = output
+                    .shapes
+                    .iter()
+                    .find(|entry| entry.shape.texture_id() == texture_id)
+                    .expect("retained image");
+                let center = shape.transform_after_tessellation * image.center();
+                assert_eq!(shape.clip_rect.contains(center), progress < 0.2);
+                assert_eq!(layouts, 1);
+                texture = None;
+                assert!(ctx.tex_manager().read().meta(texture_id).is_some());
+            } else {
+                assert_eq!(layouts, 2);
+                assert!(snapshot.is_none());
+                assert!(ctx.tex_manager().read().meta(texture_id).is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn home_corner_mesh_skips_only_corners_outside_the_transformed_viewport() {
+        let viewport = Rect::from_min_max(Pos2::ZERO, point(385.0, 800.0));
+        for (progress, expected_corners) in [(0.01, 4), (1.0, 2)] {
+            let ctx = egui::Context::default();
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(viewport),
+                    ..Default::default()
+                },
+                |ui| {
+                    let backdrop = ui.visuals().faint_bg_color;
+                    let home = home_layer(ui, viewport, viewport, progress, backdrop);
+                    paint_home_corners(&home, viewport, progress, backdrop);
+                },
+            );
+            output.textures_delta.clear();
+            let mesh = output
+                .shapes
+                .iter()
+                .find_map(|shape| match &shape.shape {
+                    egui::Shape::Mesh(mesh) => Some(mesh),
+                    _ => None,
+                })
+                .expect("home corner mesh");
+            assert_eq!(
+                mesh.vertices.len(),
+                expected_corners * (HOME_CORNER_STEPS + 1) * 4
+            );
+            assert_eq!(
+                mesh.indices.len(),
+                expected_corners * HOME_CORNER_STEPS * 18
+            );
+            assert!(mesh.is_valid());
+        }
     }
 
     #[test]

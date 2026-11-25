@@ -23,6 +23,7 @@ const STREAM_INTERVAL: Duration = Duration::from_millis(150);
 pub struct MarkdownRenderer {
     entries: HashMap<Id, SourceCache>,
     raw_entries: HashMap<Id, RawFallback>,
+    source_bytes: usize,
     clock: u64,
 }
 
@@ -41,7 +42,7 @@ impl MarkdownRenderer {
         self.clock = self.clock.saturating_add(1);
         if text.len() > SOURCE_BYTES {
             // Only the oversized source itself is released, never another active document.
-            self.entries.remove(&id);
+            self.discard(id);
             self.show_raw(ui, id, text);
             return;
         }
@@ -58,8 +59,10 @@ impl MarkdownRenderer {
         let entry = self.entries.entry(id).or_default();
         entry.used = self.clock;
         entry.seen_frame = frame;
+        let previous_bytes = entry.source.len();
+        entry.update(text, streaming, id, ui.ctx());
+        self.source_bytes = self.source_bytes - previous_bytes + entry.source.len();
         ui.push_id(id, |ui| {
-            entry.update(text, streaming, id, ui.ctx());
             if entry.failed {
                 entry.raw.show(ui, text, id.with("original"));
             } else {
@@ -82,21 +85,24 @@ impl MarkdownRenderer {
     pub fn clear(&mut self) {
         self.entries.clear();
         self.raw_entries.clear();
+        self.source_bytes = 0;
+    }
+
+    fn discard(&mut self, id: Id) {
+        if let Some(removed) = self.entries.remove(&id) {
+            self.source_bytes -= removed.source.len();
+        }
     }
 
     // Do not churn active documents through the LRU when a long visible transcript fills it.
     // Inactive views can be evicted; an over-budget active source uses its cached original page.
     fn admit(&mut self, current: Id, bytes: usize, frame: u64) -> bool {
+        let existing = self.entries.get(&current);
+        let new_entry = existing.is_none();
+        let current_bytes = existing.map_or(0, |entry| entry.source.len());
         loop {
-            let new_entry = !self.entries.contains_key(&current);
-            let source_bytes = self
-                .entries
-                .iter()
-                .filter(|(key, _)| **key != current)
-                .map(|(_, entry)| entry.source.len())
-                .sum::<usize>();
             if (!new_entry || self.entries.len() < CACHE_ENTRIES)
-                && source_bytes.saturating_add(bytes) <= CACHE_SOURCE_BYTES
+                && self.source_bytes - current_bytes + bytes <= CACHE_SOURCE_BYTES
             {
                 return true;
             }
@@ -111,7 +117,7 @@ impl MarkdownRenderer {
             let Some(inactive) = inactive else {
                 return false;
             };
-            self.entries.remove(&inactive);
+            self.discard(inactive);
         }
     }
 
@@ -191,20 +197,21 @@ impl SourceCache {
     }
 
     fn update(&mut self, text: &str, streaming: bool, id: Id, context: &egui::Context) {
-        let now = Instant::now();
         let changed = self.source != text;
         let just_completed = self.was_streaming && !streaming;
         self.was_streaming = streaming;
-        if !changed && !just_completed {
-            // A debounce repaint still needs to prepare the raw tail once its delay expires.
-            if !self.tail_plain
-                || self.failed
-                || self
-                    .last_parse
-                    .is_none_or(|at| now.duration_since(at) < STREAM_INTERVAL)
-            {
-                return;
-            }
+        let unchanged = !changed && !just_completed;
+        if unchanged && (!self.tail_plain || self.failed) {
+            return;
+        }
+        let now = Instant::now();
+        // A debounce repaint still needs to prepare the raw tail once its delay expires.
+        if unchanged
+            && self
+                .last_parse
+                .is_none_or(|at| now.duration_since(at) < STREAM_INTERVAL)
+        {
+            return;
         }
         if changed {
             if !text.starts_with(&self.source) {
@@ -549,12 +556,11 @@ impl PreparedBullet {
         for (index, text) in self.items.iter_mut().enumerate() {
             ui.push_id(id.with(index), |ui| {
                 ui.horizontal_top(|ui| {
-                    let marker = if self.ordered {
-                        format!("{}.", self.start.saturating_add(index as u32))
+                    if self.ordered {
+                        ui.label(format!("{}.", self.start.saturating_add(index as u32)));
                     } else {
-                        "•".into()
-                    };
-                    ui.label(marker);
+                        ui.label("•");
+                    }
                     ui.vertical(|ui| {
                         text.show(ui, TextKind::Body);
                         if let Some(children) = self.children.get_mut(&index) {
@@ -935,5 +941,72 @@ impl RawPage {
                 text.show(ui, TextKind::Body);
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rendered_sources_keep_the_byte_total_after_append_rewrite_and_clear() {
+        let context = egui::Context::default();
+        let mut renderer = MarkdownRenderer::default();
+        for (key, text, expected_bytes) in [
+            ("reply", "first", 5),
+            ("thinking", "other", 10),
+            ("reply", "first more", 15),
+            ("reply", "new", 8),
+        ] {
+            let mut result = context.run_ui(egui::RawInput::default(), |ui| {
+                renderer.show(ui, key, text, false, None);
+            });
+            result.textures_delta.clear();
+            assert_eq!(renderer.source_bytes, expected_bytes);
+        }
+        renderer.discard(Id::unique(("jagent_markdown", "reply")));
+        assert_eq!(renderer.source_bytes, 5);
+        renderer.clear();
+        assert_eq!(renderer.source_bytes, 0);
+    }
+
+    #[test]
+    fn byte_budget_counts_a_replacement_once_and_evicts_only_inactive_sources() {
+        let count = CACHE_SOURCE_BYTES / SOURCE_BYTES;
+        let mut renderer = MarkdownRenderer::default();
+        for index in 0..count {
+            renderer.entries.insert(
+                Id::unique(index),
+                SourceCache {
+                    source: "x".repeat(SOURCE_BYTES),
+                    used: index as u64,
+                    seen_frame: 100,
+                    ..Default::default()
+                },
+            );
+        }
+        renderer.source_bytes = count * SOURCE_BYTES;
+        let new = Id::unique(count);
+        assert!(renderer.admit(Id::unique(0usize), SOURCE_BYTES, 101));
+        assert!(!renderer.admit(new, 1, 101));
+        assert_eq!(renderer.source_bytes, CACHE_SOURCE_BYTES);
+        assert!(renderer.admit(new, 1, 102));
+        assert!(!renderer.entries.contains_key(&Id::unique(0usize)));
+        assert_eq!(renderer.source_bytes, CACHE_SOURCE_BYTES - SOURCE_BYTES);
+    }
+
+    #[test]
+    fn ordered_and_unordered_bullets_render_across_frames() {
+        let context = egui::Context::default();
+        let mut renderer = MarkdownRenderer::default();
+        let source = "- alpha\n  - nested\n3. beta\n4. gamma";
+        for _ in 0..2 {
+            let mut result = context.run_ui(egui::RawInput::default(), |ui| {
+                renderer.show(ui, "bullets", source, true, None);
+            });
+            result.textures_delta.clear();
+            assert!(!result.shapes.is_empty());
+            assert_eq!(renderer.source_bytes, source.len());
+        }
     }
 }

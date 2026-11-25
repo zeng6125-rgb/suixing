@@ -1,75 +1,76 @@
-use super::{choices, integer_choices};
+use super::controls;
 use crate::state::Settings;
-use eframe::egui::{self, RichText};
+use eframe::egui;
 
 pub(super) fn draw(ui: &mut egui::Ui, settings: &mut Settings, can_reset: bool) -> bool {
-    let appearance = &mut settings.behavior;
-    ui.heading("主题与配色");
-    integer_choices(
+    let a = &mut settings.behavior;
+    controls::first_section(ui, "主题与配色");
+    controls::choice_row(
         ui,
         "主题",
-        &mut appearance.theme_mode,
+        "",
+        &mut a.theme_mode,
         &[(0, "跟随系统"), (1, "浅色"), (2, "深色")],
     );
-    integer_choices(
+    controls::choice_row(
         ui,
         "配色",
-        &mut appearance.palette_mode,
+        "「跟随壁纸」需要安卓 12 以上，会改用系统动态取色。",
+        &mut a.palette_mode,
         &[(1, "跟随壁纸"), (2, "JAgent 配色"), (3, "Codex")],
     );
-    ui.label(
-        RichText::new("跟随壁纸在Android12以上采用系统动态取色。")
-            .small()
-            .weak(),
-    );
-    ui.separator();
-    ui.heading("文字与布局");
-    integer_choices(
+    controls::section(ui, "文字与布局");
+    controls::choice_row(
         ui,
         "字号",
-        &mut appearance.font_scale,
+        "正文字号，立即生效。",
+        &mut a.font_scale,
         &[(0, "小"), (1, "标准"), (2, "大"), (3, "特大")],
     );
-    integer_choices(
+    controls::choice_row(
         ui,
         "圆角",
-        &mut appearance.corner_scale,
+        "卡片、按钮与输入框的圆角大小。",
+        &mut a.corner_scale,
         &[(0, "方正"), (1, "标准"), (2, "圆润")],
     );
-    choices(
+    controls::choice_row(
         ui,
         "助手回复样式",
-        &mut appearance.assistant_card,
+        "「卡片」保留圆角、底色与描边；「扁平」只留头像和名称，正文直接铺在页面上。",
+        &mut a.assistant_card,
         &[(true, "卡片"), (false, "扁平")],
     );
-    ui.add_enabled_ui(!appearance.assistant_card, |ui| {
-        integer_choices(
-            ui,
-            "扁平正文留白",
-            &mut appearance.flat_padding,
-            &[(0, "紧凑"), (1, "标准"), (2, "宽松")],
-        );
-    });
-    integer_choices(
+    controls::choice_row(
+        ui,
+        "扁平正文留白",
+        "「扁平」样式下正文的左右留白：2 / 6 / 10dp。列表本身还留 16dp，所以正文距屏幕边缘是 18 / 22 / 26dp。",
+        &mut a.flat_padding,
+        &[(0, "紧凑"), (1, "标准"), (2, "宽松")],
+    );
+    controls::choice_row(
         ui,
         "气泡宽度",
-        &mut appearance.bubble_width,
+        "助手回复最多占屏幕的宽度比例。",
+        &mut a.bubble_width,
         &[(0, "窄"), (1, "标准"), (2, "宽")],
     );
-    ui.separator();
-    ui.heading("动效与提示");
-    choices(
+    controls::section(ui, "动效与提示");
+    controls::choice_row(
         ui,
         "打字机效果",
-        &mut appearance.typewriter,
+        "正在生成的正文与思考逐字显示；关掉则一收到就整块出现。已结束的回答不受影响。",
+        &mut a.typewriter,
         &[(true, "开"), (false, "关")],
     );
-    integer_choices(
+    controls::choice_row(
         ui,
         "提示条自动消失",
-        &mut appearance.banner_seconds,
-        &[(5, "5秒"), (10, "10秒"), (30, "30秒"), (0, "不消失")],
+        "屏幕上方那条提示（例如连接中断）几秒后自己消失；「不消失」只能手点 × 关掉。回答卡片里的原因不受这里影响。",
+        &mut a.banner_seconds,
+        &[(5, "5 秒"), (10, "10 秒"), (30, "30 秒"), (0, "不消失")],
     );
+    ui.add_space(12.0);
     ui.add_enabled(can_reset, egui::Button::new("恢复默认外观"))
         .clicked()
 }

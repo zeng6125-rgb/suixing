@@ -11,6 +11,8 @@ import java.util.Locale
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.ConcurrentHashMap
 
+private const val LOCAL_HOST_SUFFIX = ".jagent.invalid"
+
 /** Each opened directory has one HTTPS origin, including its relative assets and history. */
 internal class BrowserLocalFiles(restoredRoots: List<String> = emptyList()) {
     private val roots = CopyOnWriteArrayList(restoredRoots.map(::File))
@@ -39,14 +41,16 @@ internal class BrowserLocalFiles(restoredRoots: List<String> = emptyList()) {
         return directories[uri.host ?: return null]
     }
 
-    fun fileForUrl(url: String): File? {
-        val uri = URI(url)
+    fun fileForUrl(url: String): File? = fileForUri(URI(url))
+
+    private fun fileForUri(uri: URI): File? {
         val directory = root(uri) ?: return null
         val file = File(directory, uri.path.removePrefix("/")).canonicalFile
         return file.takeIf { it.toPath().startsWith(directory.toPath()) && it.isFile }
     }
 
     fun displayUrl(url: String): String {
+        if (LOCAL_HOST_SUFFIX !in url) return url
         val uri = runCatching { URI(url) }.getOrNull() ?: return url
         val directory = root(uri) ?: return url
         return buildString {
@@ -57,10 +61,11 @@ internal class BrowserLocalFiles(restoredRoots: List<String> = emptyList()) {
     }
 
     fun response(url: String): WebResourceResponse? {
+        if (LOCAL_HOST_SUFFIX !in url) return null
         val uri = runCatching { URI(url) }.getOrNull() ?: return null
-        if (uri.host?.endsWith(".jagent.invalid") != true) return null
+        if (uri.host?.endsWith(LOCAL_HOST_SUFFIX) != true) return null
         return try {
-            val file = fileForUrl(url)
+            val file = fileForUri(uri)
             if (file == null) notFound() else {
                 val mime = browserMimeType(file.name)
                 WebResourceResponse(mime, if (mime.startsWith("text/") || mime in TEXT_MIMES) "UTF-8" else null,
@@ -84,7 +89,7 @@ private fun localHost(directory: File): String {
             append("0123456789abcdef"[value and 15])
         }
     }
-    return "local-${hex.take(32)}.${hex.drop(32)}.jagent.invalid"
+    return "local-${hex.take(32)}.${hex.drop(32)}$LOCAL_HOST_SUFFIX"
 }
 
 private val TEXT_MIMES = setOf("application/javascript", "application/json", "application/xhtml+xml", "image/svg+xml")

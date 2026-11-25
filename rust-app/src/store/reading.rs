@@ -4,6 +4,37 @@ use crate::display::{HistorySource, ReadPosition, SourceStamp, ViewSource};
 pub(super) struct ReadingDocument {
     pub positions: Vec<ReadPosition>,
 }
+
+pub(super) fn shared_positions(files: &Path) -> Result<Option<Vec<ReadPosition>>, String> {
+    let Some(preferences) = shared_preferences::read(files, shared_preferences::VIEWPORTS)? else {
+        return Ok(None);
+    };
+    let mut positions = Vec::new();
+    for (key, text) in preferences.strings {
+        let Some(id) = key.strip_prefix("position/") else {
+            continue;
+        };
+        let Ok(mut bookmark) = serde_json::from_str::<crate::legacy_reading::Bookmark>(&text)
+        else {
+            continue;
+        };
+        if bookmark.conversation_id != id {
+            continue;
+        }
+        let source = ViewSource::Main {
+            conversation_id: id.into(),
+        };
+        let native = bookmark
+            .extra
+            .remove("rustPosition")
+            .and_then(|value| serde_json::from_value::<ReadPosition>(value).ok())
+            .filter(|position| position.source == source && position.validate().is_ok());
+        if let Some(position) = native.or_else(|| bookmark.position().ok()) {
+            positions.push(position);
+        }
+    }
+    Ok(Some(positions))
+}
 pub(super) fn validate(positions: &[ReadPosition]) -> Result<(), String> {
     if positions.len() > crate::legacy_reading::MAX_POSITIONS {
         return Err("阅读位置超过8192条，已有位置保留".into());
@@ -39,7 +70,9 @@ impl Store {
         }
     }
     pub(super) fn advance_history_path(&mut self, path: &Path) {
-        let Ok(relative) = path.strip_prefix(&self.root) else {
+        let Ok(relative) = path.strip_prefix(&self.root).or_else(|_| {
+            path.strip_prefix(self.shared_files_root.as_deref().unwrap_or(&self.root))
+        }) else {
             return;
         };
         let parts = relative
@@ -47,6 +80,7 @@ impl Store {
             .filter_map(|p| p.as_os_str().to_str())
             .collect::<Vec<_>>();
         let key = match parts.as_slice() {
+            ["chats", "store", file] => file.strip_suffix(".meta").map(|id| (id.to_owned(), None)),
             ["conversations", file] => file
                 .strip_suffix(".segments.json")
                 .or_else(|| file.strip_suffix(".json"))
@@ -100,6 +134,26 @@ impl Store {
         positions.retain(|p| p.source != position.source);
         if positions.len() >= crate::legacy_reading::MAX_POSITIONS {
             return Err("阅读位置已达8192条上限，已有位置未删除".into());
+        }
+        if let ViewSource::Main { conversation_id } = &position.source
+            && let Some(files) = self.shared_files_root.as_deref()
+        {
+            let key = format!("position/{conversation_id}");
+            let mut bookmark = if let Some(legacy) = &position.legacy {
+                serde_json::to_value(legacy).map_err(|error| error.to_string())?
+            } else {
+                serde_json::json!({
+                    "conversationId":conversation_id, "messageId":(!position.message_id.is_empty()).then_some(&position.message_id),
+                    "followLatest":position.follow_tail, "topAnchored":true,
+                })
+            };
+            bookmark["rustPosition"] =
+                serde_json::to_value(&position).map_err(|error| error.to_string())?;
+            let value = crate::legacy_import::LegacyPreferenceValue::String(bookmark.to_string());
+            shared_preferences::save(files, shared_preferences::VIEWPORTS, &key, Some(&value))?;
+            positions.push(position);
+            self.reading_positions = positions;
+            return Ok(());
         }
         positions.push(position);
         validate(&positions)?;

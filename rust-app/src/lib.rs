@@ -83,7 +83,7 @@ fn android_main(app: winit::platform::android::activity::AndroidApp) {
         "JAgent",
         options,
         Box::new(move |cc| {
-            let bridge = controller::spawn(data.clone(), cc.egui_ctx.clone())?;
+            let bridge = controller::spawn(data.clone(), cc.egui_ctx.clone());
             Ok(Box::new(
                 ui::RustApplication::new(cc, data.clone())
                     .with_window_insets(app, cc.egui_ctx.clone())

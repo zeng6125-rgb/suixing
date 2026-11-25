@@ -6,10 +6,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -42,6 +40,7 @@ import androidx.compose.ui.Modifier
 import com.suixing.agent.ui.drawer.drawerScrollPriority
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
@@ -183,16 +182,19 @@ private fun parseMarkdownBlocks(
     fun info(i: Int, knownTrimmed: String? = null): LineInfo = lineInfo[i] ?: run {
         val rawLine = lines[i]
         val rawTrimmed = knownTrimmed ?: rawLine.trim()
-        // Match only as far as dispatch needs, in exactly the same priority order.
-        val empty = rawTrimmed.isEmpty()
-        val fence = if (!empty) MD_FENCE.matchEntire(rawTrimmed) else null
-        val heading = if (!empty && fence == null) MD_HEADING.matchEntire(rawTrimmed) else null
-        val rule = !empty && fence == null && heading == null && MD_RULE.matches(rawTrimmed)
-        val quote = !empty && fence == null && heading == null && !rule && rawTrimmed.startsWith('>')
+        // Reject impossible regex matches by their opening marker before creating a matcher.
+        val marker = rawTrimmed.firstOrNull()
+        val empty = marker == null
+        val fence = if (marker == '`') MD_FENCE.matchEntire(rawTrimmed) else null
+        val heading = if (marker == '#') MD_HEADING.matchEntire(rawTrimmed) else null
+        val rule = (marker == '-' || marker == '*' || marker == '_') && MD_RULE.matches(rawTrimmed)
+        val quote = marker == '>'
         val table = !empty && fence == null && heading == null && !rule && !quote && isTableStart(lines, i)
         val listCandidate = !empty && fence == null && heading == null && !rule && !quote && !table
-        val bullet = if (listCandidate) MD_BULLET.matchEntire(rawLine) else null
-        val ordered = if (listCandidate && bullet == null) MD_ORDERED.matchEntire(rawLine) else null
+        val bullet = if (listCandidate && (marker == '-' || marker == '*' || marker == '+')) {
+            MD_BULLET.matchEntire(rawLine)
+        } else null
+        val ordered = if (listCandidate && marker in '0'..'9') MD_ORDERED.matchEntire(rawLine) else null
         LineInfo(
             trimmed = rawTrimmed,
             empty = empty,
@@ -944,6 +946,9 @@ internal fun rememberGrowingMarkdown(
     // ambiguous block transitions fall back to the normal parser. Text measurement
     // and inline syntax in a formatted tail still have a growing-input cost.
     if (settled) SettledBlocks.get(text)?.let { return it }
+    if (settled && retained == null && text.length < SettledBlocks.MIN_CHARS) {
+        return remember(text) { parseMarkdown(text) }
+    }
     val source = androidx.compose.runtime.rememberUpdatedState(GrowingMarkdownSource(text, appendFrom, sourceId))
     val blocks = remember(live, settled, if (settled) text else null, sourceId) {
         mutableStateOf(live.cachedPrefixBlocksFor(text).orEmpty(), referentialEqualityPolicy())
@@ -1355,7 +1360,8 @@ fun MarkdownBlocks(
     Column(modifier) {
         blocks.forEachIndexed { index, block ->
             key(keys[index]) {
-                if (index > 0) Spacer(Modifier.height(gapBetween(blocks[index - 1], block)))
+                val blockModifier = if (index == 0) Modifier else
+                    Modifier.padding(top = gapBetween(blocks[index - 1], block))
                 // Lists and tables refine the block key by item/child or row/cell below.
                 val blockReadingKey = remember(readingKey, index, block is MdBlock.Rule) {
                     readingKey?.takeUnless { block is MdBlock.Rule }?.let { "$it:block:$index" }
@@ -1367,6 +1373,7 @@ fun MarkdownBlocks(
                         color = color,
                         palette = palette,
                         onUrlClick = onUrlClick,
+                        modifier = blockModifier,
                         cursor = index == cursorAt,
                         growing = growing && index == blocks.lastIndex,
                     )
@@ -1417,19 +1424,21 @@ private fun MarkdownBlock(
     color: Color,
     palette: MarkdownPalette,
     onUrlClick: ((String) -> Unit)?,
+    modifier: Modifier = Modifier,
     cursor: Boolean = false,
     growing: Boolean = false,
 ) {
     when (block) {
-        is MdBlock.Heading -> HeadingBlock(block, color, palette, onUrlClick, cursor)
-        is MdBlock.Paragraph -> InlineText(block.text, style, color, palette, onUrlClick, cursor = cursor)
-        is MdBlock.Bullet -> BulletBlock(block, style, color, palette, onUrlClick, cursor)
-        is MdBlock.Code -> CodeBlock(block, palette, cursor)
-        is MdBlock.Quote -> QuoteBlock(block, style, color, palette, onUrlClick, cursor)
+        is MdBlock.Heading -> HeadingBlock(block, color, palette, onUrlClick, cursor, modifier, settled = !growing)
+        is MdBlock.Paragraph -> InlineText(block.text, style, color, palette, onUrlClick, modifier, cursor, settled = !growing)
+        is MdBlock.Bullet -> BulletBlock(block, style, color, palette, onUrlClick, cursor, modifier = modifier, settled = !growing)
+        is MdBlock.Code -> CodeBlock(block, palette, cursor, modifier)
+        is MdBlock.Quote -> QuoteBlock(block, style, palette, onUrlClick, cursor, modifier, settled = !growing)
         // No padding of its own: the 12dp above and below comes from gapBetween, so a
         // caller spacing blocks by markdownGap() gets the same rhythm.
         MdBlock.Rule -> {
             HorizontalDivider(
+                modifier = modifier,
                 thickness = 1.dp,
                 color = MaterialTheme.colorScheme.outlineVariant,
             )
@@ -1437,7 +1446,7 @@ private fun MarkdownBlock(
                 InlineText("", style, color, palette, onUrlClick, cursor = true)
             }
         }
-        is MdBlock.Table -> TableBlock(block, style, color, palette, onUrlClick, cursor, growing)
+        is MdBlock.Table -> TableBlock(block, style, color, palette, onUrlClick, cursor, growing, modifier)
     }
 }
 
@@ -1467,19 +1476,39 @@ private fun InlineText(
      * `▍` 不会被当成语法的一部分，也不会打断行内代码/链接的配对。
      */
     cursor: Boolean = false,
+    settled: Boolean = !cursor,
 ) {
     // 路径回调从 CompositionLocal 就地读（叶子层），调用点与中间层零改动。URL 仍走 onUrlClick。
     val pathClick = LocalPathClick.current
-    val annotated = rememberInlineMarkdown(InlineMarkdownSource(
-        text = text,
-        codeBackground = palette.codeBackground,
-        codeColor = palette.codeColor,
-        linkColor = palette.linkColor,
-        onUrlClick = onUrlClick,
-        onPathClick = pathClick,
-        codeFontSize = palette.codeFontSize,
-        cursor = cursor,
-    ))
+    val retained = LocalRetainedLiveMarkdown.current
+    val annotated = if (settled && !cursor && retained == null && text.length < SettledBlocks.MIN_CHARS) {
+        if (literalInlineSource(text)) {
+            remember(text) { AnnotatedString(text) }
+        } else {
+            remember(text, palette, onUrlClick, pathClick) {
+                scanInlineMarkdown(
+                    text = text,
+                    codeBackground = palette.codeBackground,
+                    codeColor = palette.codeColor,
+                    linkColor = palette.linkColor,
+                    onUrlClick = onUrlClick,
+                    onPathClick = pathClick,
+                    codeFontSize = palette.codeFontSize,
+                )
+            }
+        }
+    } else {
+        rememberInlineMarkdown(InlineMarkdownSource(
+            text = text,
+            codeBackground = palette.codeBackground,
+            codeColor = palette.codeColor,
+            linkColor = palette.linkColor,
+            onUrlClick = onUrlClick,
+            onPathClick = pathClick,
+            codeFontSize = palette.codeFontSize,
+            cursor = cursor,
+        ))
+    }
     CaretText(annotated, style, color, palette.linkColor, modifier, cursor)
 }
 
@@ -1518,6 +1547,10 @@ internal class InlineMarkdownState(var source: InlineMarkdownSource) {
     val annotated = mutableStateOf(preparedInlineMarkdown(source), referentialEqualityPolicy())
 }
 
+private class InlineMarkdownWorkerStart(val preparedSource: InlineMarkdownSource?) {
+    var started = false
+}
+
 @Composable
 internal fun rememberInlineMarkdown(requestedSource: InlineMarkdownSource): AnnotatedString {
     val source = androidx.compose.runtime.rememberUpdatedState(requestedSource)
@@ -1527,26 +1560,38 @@ internal fun rememberInlineMarkdown(requestedSource: InlineMarkdownSource): Anno
         if (retained != null && readingKey != null) retained.inlineStateFor(readingKey, requestedSource)
         else InlineMarkdownState(requestedSource)
     }
-    val initial = remember(rendered) { rendered.source to rendered.annotated.value }
     val annotated = rendered.annotated
-    com.suixing.agent.ui.chat.InitialViewportContentReady(annotated.value != null)
+    val worker = remember(rendered) {
+        InlineMarkdownWorkerStart(rendered.source.takeIf { annotated.value != null })
+    }
+    val ready = annotated.value
+    com.suixing.agent.ui.chat.InitialViewportContentReady(ready != null)
+    val initial = worker.preparedSource
+    // Cached history paragraphs can be composed and scrolled away without ever needing a collector.
+    if (!worker.started && ready != null && initial != null &&
+        requestedSource.text == initial.text && requestedSource.samePresentation(initial)
+    ) return ready
+
     LaunchedEffect(annotated) {
+        worker.started = true
         val literalSource = InlineLiteralSource()
         val searchState = InlineSearchState("")
-        var preparedSource = initial.first.takeIf { initial.second != null }
-        preparedSource?.let {
-            withContext(Dispatchers.Default) {
-                literalSource.accepts(it.text)
-                searchState.update(it.text, appendOnly = false)
-            }
-        }
+        var preparedSource = initial
         snapshotFlow { source.value }.conflate().collect { requested ->
-            val alreadyPrepared = preparedSource?.let {
-                requested.text == it.text && requested.samePresentation(it)
-            } == true
+            val prepared = preparedSource
+            if (prepared != null && requested.text == prepared.text && requested.samePresentation(prepared)) {
+                return@collect
+            }
             preparedSource = null
-            if (alreadyPrepared) return@collect
-            val literal = withContext(Dispatchers.Default) { literalSource.accepts(requested.text) }
+            val literal = withContext(Dispatchers.Default) {
+                // Settled, cached text may leave the viewport without ever changing.
+                // Initialize the incremental scanner only when there is a new request.
+                if (prepared != null) {
+                    literalSource.accepts(prepared.text)
+                    searchState.update(prepared.text, appendOnly = false)
+                }
+                literalSource.accepts(requested.text)
+            }
             val appendOnly = literalSource.lastWasAppend
             if (!appendOnly && source.value === requested) annotated.value = null
             val completed = withContext(Dispatchers.Default) {
@@ -1688,6 +1733,8 @@ private fun HeadingBlock(
     palette: MarkdownPalette,
     onUrlClick: ((String) -> Unit)?,
     cursor: Boolean = false,
+    modifier: Modifier = Modifier,
+    settled: Boolean = !cursor,
 ) {
     // One ramp, scaled off titleLarge: 20 / 18 / 16, with 16 medium for anything deeper.
     // Leading scales with the size, so a heading keeps the 22/29 ratio it was drawn with
@@ -1705,7 +1752,9 @@ private fun HeadingBlock(
         color = color,
         palette = palette,
         onUrlClick = onUrlClick,
+        modifier = modifier,
         cursor = cursor,
+        settled = settled,
     )
 }
 
@@ -1729,6 +1778,8 @@ private fun BulletBlock(
     onUrlClick: ((String) -> Unit)?,
     cursor: Boolean = false,
     parentDepth: Int = 0,
+    modifier: Modifier = Modifier,
+    settled: Boolean = !cursor,
 ) {
     val readingKey = LocalReadingTextKey.current
     // The marker sits on the first line's centre, not on the row's top: a 4dp dot level
@@ -1737,7 +1788,7 @@ private fun BulletBlock(
         ((style.lineHeight.takeIf { it.isSp }?.toDp() ?: 20.dp) - BulletDot) / 2
     }
     Column(
-        Modifier
+        modifier
             .fillMaxWidth()
             // One indent per level, marker included: the dot has to move with its text or
             // a nested list reads as a second top-level one.
@@ -1783,6 +1834,7 @@ private fun BulletBlock(
                     onUrlClick = onUrlClick,
                     cursor = itemCursor && children.isEmpty(),
                     modifier = Modifier.weight(1f),
+                    settled = settled || index < block.items.lastIndex,
                 )
                 }
             }
@@ -1796,6 +1848,7 @@ private fun BulletBlock(
                     onUrlClick = onUrlClick,
                     cursor = itemCursor && childIndex == children.lastIndex,
                     parentDepth = block.depth,
+                    settled = settled || index < block.items.lastIndex || childIndex < children.lastIndex,
                 )
                 }
             }
@@ -1804,11 +1857,11 @@ private fun BulletBlock(
 }
 
 @Composable
-private fun CodeBlock(block: MdBlock.Code, palette: MarkdownPalette, cursor: Boolean = false) {
+private fun CodeBlock(block: MdBlock.Code, palette: MarkdownPalette, cursor: Boolean, modifier: Modifier) {
     val clipboard = LocalClipboardManager.current
     var copied by remember(block.code) { mutableStateOf(false) }
     Surface(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = modifier.fillMaxWidth(),
         shape = RoundedCornerShape(12.dp),
         color = MaterialTheme.colorScheme.surfaceContainerHighest,
     ) {
@@ -1883,36 +1936,37 @@ private fun CodeBlock(block: MdBlock.Code, palette: MarkdownPalette, cursor: Boo
 private fun QuoteBlock(
     block: MdBlock.Quote,
     style: TextStyle,
-    color: Color,
     palette: MarkdownPalette,
     onUrlClick: ((String) -> Unit)?,
     cursor: Boolean = false,
+    modifier: Modifier = Modifier,
+    settled: Boolean = !cursor,
 ) {
-    Row(
-        modifier = Modifier
+    val scheme = MaterialTheme.colorScheme
+    val lineColor = scheme.primary.copy(alpha = 0.4f)
+    val indent = with(LocalDensity.current) { (3.dp.roundToPx() + 12.dp.roundToPx()).toDp() }
+    InlineText(
+        text = block.text,
+        style = style,
+        color = scheme.onSurfaceVariant,
+        palette = palette,
+        onUrlClick = onUrlClick,
+        cursor = cursor,
+        settled = settled,
+        modifier = modifier
             .fillMaxWidth()
-            .height(IntrinsicSize.Min),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Box(
-            Modifier
-                .width(3.dp)
-                .fillMaxHeight()
-                .clip(RoundedCornerShape(2.dp))
-                .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.4f)),
-        )
-        InlineText(
-            text = block.text,
-            style = style,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            palette = palette,
-            onUrlClick = onUrlClick,
-            cursor = cursor,
-            modifier = Modifier
-                .weight(1f)
-                .padding(start = 12.dp),
-        )
-    }
+            .drawBehind {
+                val width = 3.dp.roundToPx().toFloat().coerceAtMost(size.width)
+                // Use the laid-out text height to draw the start-edge rule.
+                drawRoundRect(
+                    color = lineColor,
+                    topLeft = Offset(if (layoutDirection == LayoutDirection.Rtl) size.width - width else 0f, 0f),
+                    size = Size(width, size.height),
+                    cornerRadius = CornerRadius(minOf(2.dp.toPx(), width / 2f, size.height / 2f)),
+                )
+            }
+            .padding(start = indent),
+    )
 }
 
 @Composable
@@ -1924,6 +1978,7 @@ private fun TableBlock(
     onUrlClick: ((String) -> Unit)?,
     cursor: Boolean = false,
     growing: Boolean = false,
+    modifier: Modifier = Modifier,
 ) {
     val readingKey = LocalReadingTextKey.current
     // Keep one current row snapshot for this keyed table block. Live parsers may publish a new
@@ -1958,7 +2013,7 @@ private fun TableBlock(
         rows = tableRows,
         headerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
         dividerColor = MaterialTheme.colorScheme.outlineVariant,
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(10.dp))
             .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(10.dp)),
@@ -2061,6 +2116,7 @@ private fun TableCells(
                     onUrlClick = onUrlClick,
                     modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
                     cursor = caret,
+                    settled = cacheable && !caret,
                 )
             } else {
                 val annotated = remember(cell, caret, inlineCache, cacheable) {

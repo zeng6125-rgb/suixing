@@ -1,7 +1,11 @@
 //! Verified private inbox reads. The actor admits only the bytes hashed here.
 use crate::composer::{AttachmentRef, MAX_IMAGE_WIRE_BYTES};
 use sha2::{Digest, Sha256};
-use std::{fs::File, io::Read, path::Path};
+use std::{
+    fs::File,
+    io::Read,
+    path::{Path, PathBuf},
+};
 
 pub struct PreparedInput {
     pub text: String,
@@ -34,7 +38,8 @@ pub fn prepare(
         if total > crate::composer::MAX_ATTACHMENT_BYTES {
             return Err("附件总量超过256 MiB".into());
         }
-        let encoded = read_verified(workspace, reference, &cancelled)?;
+        let workspace = workspace_with_reference(workspace, reference);
+        let encoded = read_verified(&workspace, reference, &cancelled)?;
         if let Some(encoded) = encoded {
             images = images.checked_add(encoded.len()).ok_or("图片长度溢出")?;
             if images > MAX_IMAGE_WIRE_BYTES {
@@ -65,8 +70,18 @@ pub fn preview(
     if !reference.image {
         return Err("该附件没有图片预览".into());
     }
-    let encoded = read_verified(workspace, reference, || false)?.ok_or("附件不是图片")?;
+    reference.validate()?;
+    let workspace = workspace_with_reference(workspace, reference);
+    let encoded = read_verified(&workspace, reference, || false)?.ok_or("附件不是图片")?;
     crate::platform::attachments::decode_base64_preview(&encoded, 320).map(std::sync::Arc::new)
+}
+
+fn workspace_with_reference(workspace: &Path, reference: &AttachmentRef) -> PathBuf {
+    if workspace.join(&reference.relative_path).exists() {
+        workspace.to_owned()
+    } else {
+        crate::store::workspace::private_workspace_for(workspace)
+    }
 }
 
 fn read_verified(

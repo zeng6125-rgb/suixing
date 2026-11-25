@@ -1,3 +1,4 @@
+use super::controls;
 use crate::{
     performance::{Request, Snapshot, Update},
     platform::permissions::OperationKey,
@@ -90,144 +91,143 @@ impl PerformanceView {
                 requests.push(request);
             }
         }
-        if ui
-            .add_enabled(
-                ready && self.refresh.is_none(),
-                egui::Button::new("刷新性能记录"),
-            )
-            .clicked()
-        {
-            let operation = self.operation();
-            self.refresh = Some(operation.clone());
-            requests.push(Request::Refresh(operation));
-        }
         if let Some(notice) = &self.notice {
             ui.add(egui::Label::new(notice).wrap());
         }
         if let Some(snapshot) = &self.snapshot {
-            ui.strong(format!("最近 {} 轮", snapshot.summary.count));
-            egui::Grid::new("performance_summary").show(ui, |ui| {
-                for (label, value) in [
-                    (
-                        "首字延迟（均值）",
-                        snapshot.summary.avg_ttft_ms.map(|v| format!("{v:.0} ms")),
-                    ),
-                    (
-                        "整轮耗时（均值）",
-                        snapshot.summary.avg_total_ms.map(|v| format!("{v:.0} ms")),
-                    ),
-                    (
-                        "缓存命中（均值）",
-                        snapshot
-                            .summary
-                            .avg_cache_percent
-                            .map(|v| format!("{v:.2}%")),
-                    ),
-                    (
-                        "输出速度（均值）",
-                        snapshot
-                            .summary
-                            .avg_tokens_per_second
-                            .map(|v| format!("{v:.1} tokens/s")),
-                    ),
-                ] {
-                    ui.label(label);
-                    ui.label(value.unwrap_or_else(|| "—".into()));
-                    ui.end_row();
-                }
-            });
+            controls::first_section(ui, &format!("最近 {} 轮", snapshot.summary.count));
+            egui::Grid::new("performance_summary")
+                .min_col_width(145.0)
+                .min_row_height(22.0)
+                .spacing([12.0, 5.0])
+                .show(ui, |ui| {
+                    for (label, value) in [
+                        (
+                            "首字延迟（均值）",
+                            snapshot.summary.avg_ttft_ms.map(|v| format!("{v:.0} ms")),
+                        ),
+                        (
+                            "整轮耗时（均值）",
+                            snapshot.summary.avg_total_ms.map(|v| format!("{v:.0} ms")),
+                        ),
+                        (
+                            "缓存命中（均值）",
+                            snapshot
+                                .summary
+                                .avg_cache_percent
+                                .map(|v| format!("{v:.2}%")),
+                        ),
+                        (
+                            "输出速度（均值）",
+                            snapshot
+                                .summary
+                                .avg_tokens_per_second
+                                .map(|v| format!("{v:.1} tok/s")),
+                        ),
+                    ] {
+                        ui.label(RichText::new(label).weak());
+                        ui.monospace(value.unwrap_or_else(|| "—".into()));
+                        ui.end_row();
+                    }
+                });
         }
         let device = self.snapshot.as_ref().map(|snapshot| &snapshot.device);
-        ui.strong("设备实时");
-        egui::Grid::new("device_performance").show(ui, |ui| {
-            for (label, value) in [
-                (
-                    "CPU（本进程）",
-                    device
-                        .and_then(|v| v.process_cpu_percent)
-                        .map(|v| format!("{v:.1}%")),
-                ),
-                (
-                    "CPU（整机）",
-                    device
-                        .and_then(|v| v.system_cpu_percent)
-                        .map(|v| format!("{v:.1}%")),
-                ),
-                (
-                    "GPU利用率",
-                    device
-                        .and_then(|v| v.gpu_percent)
-                        .map(|v| format!("{v:.1}%")),
-                ),
-                (
-                    "GPU频率",
-                    device
-                        .and_then(|v| v.gpu_frequency_mhz)
-                        .map(|v| format!("{v:.0} MHz")),
-                ),
-                (
-                    "帧率",
-                    device.and_then(|v| v.fps).map(|v| format!("{v:.1} fps")),
-                ),
-                (
-                    "帧间隔p90",
-                    device
-                        .and_then(|v| v.p90_frame_ms)
-                        .map(|v| format!("{v:.2} ms")),
-                ),
-                (
-                    "内存PSS",
-                    device.and_then(|v| v.pss_mb).map(|v| {
-                        format!(
-                            "{v:.1} MB · {}秒一采",
-                            crate::performance::metrics::PSS_INTERVAL_SECONDS
-                        )
-                    }),
-                ),
-                (
-                    "Java堆",
-                    device
-                        .and_then(|v| v.java_heap_mb.zip(v.java_heap_max_mb))
-                        .map(|(used, total)| format!("{used:.1} / {total:.1} MB")),
-                ),
-                (
-                    "线程",
-                    device.and_then(|v| v.threads).map(|v| v.to_string()),
-                ),
-            ] {
-                ui.label(label);
-                ui.monospace(value.unwrap_or_else(|| "—".into()));
-                ui.end_row();
-            }
-        });
-        if let Some(snapshot) = &self.snapshot {
-            let health = &snapshot.health;
-            ui.separator();
-            ui.strong(format!("会话健康（最近 {} 轮）", health.runs));
-            egui::Grid::new("performance_health").show(ui, |ui| {
+        controls::section(ui, "设备实时");
+        egui::Grid::new("device_performance")
+            .min_col_width(145.0)
+            .min_row_height(22.0)
+            .spacing([12.0, 5.0])
+            .show(ui, |ui| {
                 for (label, value) in [
-                    ("首字延迟p50 / p90", pair(health.ttft_p50, health.ttft_p90)),
                     (
-                        "整轮耗时p50 / p90",
-                        pair(health.total_p50, health.total_p90),
+                        "CPU（本进程）",
+                        device
+                            .and_then(|v| v.process_cpu_percent)
+                            .map(|v| format!("{v:.1}%")),
                     ),
                     (
-                        "抖动（p90/p50）",
-                        health
-                            .jitter
-                            .map_or_else(|| "—".into(), |value| format!("{value:.2}×")),
+                        "CPU（整机）",
+                        device
+                            .and_then(|v| v.system_cpu_percent)
+                            .map(|v| format!("{v:.1}%")),
                     ),
-                    ("无usage回报", format!("{} 轮", health.no_usage_runs)),
-                    ("慢轮（>60秒）", format!("{} 轮", health.slow_runs)),
+                    (
+                        "GPU",
+                        device
+                            .and_then(|v| v.gpu_percent)
+                            .map(|v| format!("{v:.1}%")),
+                    ),
+                    (
+                        "GPU 频率",
+                        device
+                            .and_then(|v| v.gpu_frequency_mhz)
+                            .map(|v| format!("{v:.0} MHz")),
+                    ),
+                    (
+                        "帧率",
+                        device.and_then(|v| v.fps).map(|v| format!("{v:.1} fps")),
+                    ),
+                    (
+                        "帧间隔p90",
+                        device
+                            .and_then(|v| v.p90_frame_ms)
+                            .map(|v| format!("{v:.2} ms")),
+                    ),
+                    (
+                        "内存（PSS）",
+                        device.and_then(|v| v.pss_mb).map(|v| {
+                            format!(
+                                "{v:.1} MB · {}秒一采",
+                                crate::performance::metrics::PSS_INTERVAL_SECONDS
+                            )
+                        }),
+                    ),
+                    (
+                        "Java 堆",
+                        device
+                            .and_then(|v| v.java_heap_mb.zip(v.java_heap_max_mb))
+                            .map(|(used, total)| format!("{used:.1} / {total:.1} MB")),
+                    ),
+                    (
+                        "线程",
+                        device.and_then(|v| v.threads).map(|v| v.to_string()),
+                    ),
                 ] {
-                    ui.label(label);
-                    ui.label(value);
+                    ui.label(RichText::new(label).weak());
+                    ui.monospace(value.unwrap_or_else(|| "—".into()));
                     ui.end_row();
                 }
             });
+        if let Some(snapshot) = &self.snapshot {
+            let health = &snapshot.health;
+            controls::section(ui, &format!("会话健康（最近 {} 轮）", health.runs));
+            egui::Grid::new("performance_health")
+                .min_col_width(145.0)
+                .min_row_height(22.0)
+                .spacing([12.0, 5.0])
+                .show(ui, |ui| {
+                    for (label, value) in [
+                        ("首字延迟p50 / p90", pair(health.ttft_p50, health.ttft_p90)),
+                        (
+                            "整轮耗时p50 / p90",
+                            pair(health.total_p50, health.total_p90),
+                        ),
+                        (
+                            "抖动（p90/p50）",
+                            health
+                                .jitter
+                                .map_or_else(|| "—".into(), |value| format!("{value:.2}×")),
+                        ),
+                        ("无 usage 回报", format!("{} 轮", health.no_usage_runs)),
+                        ("慢轮（>60秒）", format!("{} 轮", health.slow_runs)),
+                    ] {
+                        ui.label(RichText::new(label).weak());
+                        ui.monospace(value);
+                        ui.end_row();
+                    }
+                });
         }
-        ui.separator();
-        ui.strong("请求记录");
+        controls::section(ui, "请求记录");
         if let Some(snapshot) = &self.snapshot {
             for record in &snapshot.records {
                 ui.push_id(&record.id, |ui| {
@@ -267,11 +267,18 @@ impl PerformanceView {
                 });
             }
         }
-        ui.label(
-            RichText::new("未提供的测量显示—；已测得的零值照常显示。")
-                .small()
-                .weak(),
-        );
+        ui.add_space(10.0);
+        if ui
+            .add_enabled(
+                ready && self.refresh.is_none(),
+                egui::Button::new("刷新性能记录"),
+            )
+            .clicked()
+        {
+            let operation = self.operation();
+            self.refresh = Some(operation.clone());
+            requests.push(Request::Refresh(operation));
+        }
         requests
     }
 }

@@ -5,7 +5,7 @@ use eframe::egui;
 use jni::{Env, JValue, jni_sig, jni_str, objects::JObject, refs::Global};
 use std::sync::{
     Arc, Mutex, Weak,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU32, Ordering},
 };
 use winit::platform::android::activity::{
     AndroidApp, ndk::configuration::UiModeNight, ndk::native_window::NativeWindow,
@@ -21,7 +21,7 @@ struct Slot {
     sample: Mutex<Option<Sample>>,
     bars: Mutex<SystemBars>,
     wallpaper: Mutex<WallpaperCache>,
-    motion_scale: Mutex<f32>,
+    motion_scale: AtomicU32,
     motion_dirty: AtomicBool,
 }
 
@@ -70,7 +70,7 @@ impl View {
             sample: Mutex::new(None),
             bars: Mutex::new(SystemBars::default()),
             wallpaper: Mutex::new(WallpaperCache::default()),
-            motion_scale: Mutex::new(1.0),
+            motion_scale: AtomicU32::new(1.0f32.to_bits()),
             motion_dirty: AtomicBool::new(true),
         });
         *VIEW.lock().unwrap_or_else(|error| error.into_inner()) = Arc::downgrade(&slot);
@@ -116,11 +116,7 @@ impl View {
     }
 
     pub(crate) fn motion_scale(&self) -> f32 {
-        *self
-            .slot
-            .motion_scale
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
+        f32::from_bits(self.slot.motion_scale.load(Ordering::Relaxed))
     }
 
     pub(crate) fn set_system_bars(&self, dark: bool) {
@@ -296,10 +292,7 @@ fn schedule(slot: &Arc<Slot>) {
             if slot.motion_dirty.swap(false, Ordering::AcqRel) {
                 match read_motion_scale(env, activity.as_ref()) {
                     Ok(scale) => {
-                        *slot
-                            .motion_scale
-                            .lock()
-                            .unwrap_or_else(|error| error.into_inner()) = scale;
+                        slot.motion_scale.store(scale.to_bits(), Ordering::Relaxed);
                         slot.context.request_repaint();
                     }
                     Err(_) if env.exception_check() => env.exception_clear(),

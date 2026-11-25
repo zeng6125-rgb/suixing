@@ -167,6 +167,7 @@ pub struct ComposerUi {
     pub immediately: bool,
     pub conversation_pending: bool,
     pub can_start_goal: bool,
+    pub can_compact: bool,
     pub image_input: bool,
     pub voice_input: bool,
     pub enter_key_sends: bool,
@@ -1152,33 +1153,14 @@ impl ComposerPlatform {
             ui.label("当前草稿尚未打开");
             return (intents, chrome);
         }
-        let editable = flags.loaded
-            && flags.connected
-            && !flags.conversation_pending
-            && !self
-                .submitted
-                .values()
-                .any(|submission| submission.operation.conversation_id == self.selected);
+        let submitting_current = self
+            .submitted
+            .values()
+            .any(|submission| submission.operation.conversation_id == self.selected);
+        let editable =
+            flags.loaded && flags.connected && !flags.conversation_pending && !submitting_current;
         let current = self.selected.clone();
-        let other_bytes = self
-            .drafts
-            .iter()
-            .filter(|(target, _)| **target != current)
-            .map(|(_, draft)| draft.bytes())
-            .sum::<usize>();
         let draft = self.drafts.get_mut(&current).unwrap();
-        let text_budget = MAX_TEXT_BYTES.min(
-            MAX_DRAFT_BYTES
-                .saturating_sub(other_bytes)
-                .saturating_sub(
-                    draft
-                        .attachments
-                        .iter()
-                        .map(AttachmentRef::metadata_bytes)
-                        .sum::<usize>(),
-                )
-                .saturating_sub(draft.transcript.as_ref().map_or(0, String::len)),
-        );
         let keyboard_send = editable
             && flags.enter_key_sends
             && ui
@@ -1218,6 +1200,25 @@ impl ComposerPlatform {
         };
         let response = ui.add_enabled(editable, field);
         if response.changed() {
+            let other_bytes = self
+                .drafts
+                .iter()
+                .filter(|(target, _)| **target != current)
+                .map(|(_, draft)| draft.bytes())
+                .sum::<usize>();
+            let draft = self.drafts.get_mut(&current).unwrap();
+            let text_budget = MAX_TEXT_BYTES.min(
+                MAX_DRAFT_BYTES
+                    .saturating_sub(other_bytes)
+                    .saturating_sub(
+                        draft
+                            .attachments
+                            .iter()
+                            .map(AttachmentRef::metadata_bytes)
+                            .sum::<usize>(),
+                    )
+                    .saturating_sub(draft.transcript.as_ref().map_or(0, String::len)),
+            );
             if draft.text.len() > text_budget {
                 let mut end = text_budget;
                 while !draft.text.is_char_boundary(end) {
@@ -1228,6 +1229,7 @@ impl ComposerPlatform {
             }
             draft.mutate_text();
         }
+        let draft = self.drafts.get(&current).unwrap();
         if draft.text.len() > MAX_TEXT_BYTES {
             ui.colored_label(ui.visuals().error_fg_color, "正文超过1 MiB，请缩短后提交");
         }
@@ -1318,7 +1320,7 @@ impl ComposerPlatform {
                 egui::pos2(row.left(), row.center().y - 18.0),
                 egui::Vec2::splat(36.0),
             );
-            let permissions = plus.translate(egui::vec2(36.0, 0.0));
+            let approval = plus.translate(egui::vec2(36.0, 0.0));
             let response = chrome.icons.button(
                 ui,
                 plus,
@@ -1328,46 +1330,86 @@ impl ComposerPlatform {
                 chrome.skin.ink,
                 editable && flags.visible && !picking,
             );
-            egui::Popup::menu(&response).show(|ui| {
-                for (kind, label) in [
-                    (AttachmentKind::Images, "图片"),
-                    (AttachmentKind::File, "文件"),
-                    (AttachmentKind::Camera, "拍照"),
+            super::mobile_chat::composer_popup(ui, &response, chrome.skin, 200.0).show(|ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                for (kind, icon, label) in [
+                    (AttachmentKind::Images, Icon::Image, "图片"),
+                    (AttachmentKind::Camera, Icon::Camera, "拍照"),
+                    (AttachmentKind::File, Icon::Document, "文件"),
                 ] {
-                    if ui
-                        .add_enabled(
-                            kind == AttachmentKind::File || flags.image_input,
-                            egui::Button::new(label),
-                        )
-                        .clicked()
+                    let enabled = kind == AttachmentKind::File || flags.image_input;
+                    if chrome
+                        .icons
+                        .popup_row(ui, chrome.skin, icon, label, enabled, false)
                     {
                         pick = Some(kind);
                         ui.close();
                     }
                 }
-                if !flags.running
-                    && flags.configured
-                    && flags.can_start_goal
-                    && !self.text().trim().is_empty()
-                    && self.text().len() <= 64 * 1024
-                    && ui.button("启动持续目标").clicked()
+                if chrome
+                    .icons
+                    .popup_row(ui, chrome.skin, Icon::Goal, "目标指令", editable, false)
                 {
                     goal_requested = true;
                     ui.close();
                 }
-            });
-            chrome.permissions = chrome
-                .icons
-                .button(
+                if chrome.icons.popup_row(
                     ui,
-                    permissions,
-                    Icon::Permissions,
-                    "权限设置",
-                    22.0,
-                    chrome.skin.ink,
-                    true,
-                )
-                .clicked();
+                    chrome.skin,
+                    Icon::Compact,
+                    "压缩上下文",
+                    flags.can_compact,
+                    false,
+                ) {
+                    chrome.compact = true;
+                    ui.close();
+                }
+            });
+            use crate::subagent_configuration::ApprovalMode;
+            let mode = chrome.approval_mode;
+            let ink = match mode {
+                ApprovalMode::Auto => chrome.skin.accent,
+                ApprovalMode::Ask => chrome.skin.ink,
+                ApprovalMode::Deny => ui.visuals().error_fg_color,
+            };
+            let response = chrome.icons.button(
+                ui,
+                approval,
+                Icon::approval(mode),
+                &format!("当前会话工具审批：{}", mode.label()),
+                20.0,
+                ink,
+                true,
+            );
+            super::mobile_chat::composer_popup(ui, &response, chrome.skin, 220.0).show(|ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                let editable = flags.loaded
+                    && flags.connected
+                    && !flags.conversation_pending
+                    && current.is_some();
+                for choice in [ApprovalMode::Auto, ApprovalMode::Ask, ApprovalMode::Deny] {
+                    if chrome.icons.popup_row(
+                        ui,
+                        chrome.skin,
+                        Icon::approval(choice),
+                        choice.label(),
+                        editable,
+                        choice == mode,
+                    ) {
+                        chrome.approval_choice = (choice != mode).then_some(choice);
+                        ui.close();
+                    }
+                }
+                ui.label(
+                    egui::RichText::new(if current.is_some() {
+                        "仅当前会话 · 下一次任务生效"
+                    } else {
+                        "发送第一条消息后可修改"
+                    })
+                    .small()
+                    .weak(),
+                );
+            });
             let submit = egui::Rect::from_min_size(
                 egui::pos2(row.right() - 40.0, row.center().y - 20.0),
                 egui::Vec2::splat(40.0),
@@ -1399,8 +1441,8 @@ impl ComposerPlatform {
                     .clicked();
             }
             chrome.model = Some(egui::Rect::from_min_max(
-                egui::pos2(permissions.right(), row.top()),
-                egui::pos2((ring.left() - 4.0).max(permissions.right()), row.bottom()),
+                egui::pos2(approval.right(), row.top()),
+                egui::pos2((ring.left() - 4.0).max(approval.right()), row.bottom()),
             ));
             chrome.context = Some(ring);
             submit
@@ -1516,17 +1558,27 @@ impl ComposerPlatform {
                 intents.push(intent);
             }
         }
+        if goal_requested {
+            let text = self.text().trim();
+            if !text.starts_with("/goal") {
+                self.fill_suggestion(&format!("/goal {text}"));
+            }
+            if let Some(mut edit) = egui::TextEdit::load_state(ui.ctx(), response.id) {
+                let caret = egui::text::CCursor::new(self.text().chars().count());
+                edit.cursor
+                    .set_char_range(Some(egui::text::CCursorRange::one(caret)));
+                edit.store(ui.ctx(), response.id);
+            }
+            response.request_focus();
+        }
         let can_send = editable
             && self.has_content()
             && self.drafts[&current].voice.is_none()
             && !self.pending.values().any(|pending| {
                 pending.kind == PendingKind::Picker && pending.operation.conversation_id == current
             })
-            && !self
-                .submitted
-                .values()
-                .any(|submission| submission.operation.conversation_id == current);
-        let mut send = if keyboard_send && can_send {
+            && !submitting_current;
+        let mut send = if keyboard_send && can_send && !goal_requested {
             if flags.running && flags.configured && current.is_some() && !flags.cancelling {
                 Some(if flags.immediately {
                     SubmitMode::Steer
@@ -1591,9 +1643,6 @@ impl ComposerPlatform {
                     send = Some(mode);
                 }
             }
-            if goal_requested && can_send {
-                send = Some(SubmitMode::Goal);
-            }
         } else {
             ui.horizontal_wrapped(|ui| {
                 if flags.running {
@@ -1645,11 +1694,7 @@ impl ComposerPlatform {
                         send = Some(SubmitMode::Goal);
                     }
                 }
-                if self
-                    .submitted
-                    .values()
-                    .any(|value| value.operation.conversation_id == current)
-                {
+                if submitting_current {
                     ui.spinner();
                     ui.label("等待接收确认");
                 }

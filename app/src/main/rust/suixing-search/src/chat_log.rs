@@ -25,10 +25,11 @@ fn window_start(
     mut read_at: impl FnMut(&mut [u8], u64) -> Result<(), i32>,
     mut checkpoint: impl FnMut() -> Result<(), i32>,
 ) -> Result<u64, i32> {
+    const INITIAL_WINDOW_BYTES: u64 = 256 * 1024;
     let cancelled = AtomicBool::new(false);
     let mut buffer = vec![0; 65536];
     let mut line = Vec::new();
-    let mut budget = 256 * 1024;
+    let mut budget = INITIAL_WINDOW_BYTES;
     let mut parsed_from = end;
     let mut known = 0;
     loop {
@@ -94,7 +95,13 @@ fn window_start(
         }
         known += count;
         parsed_from = from;
-        budget = (budget * 4).min(end);
+        // Try 512 KiB before 1 MiB when the original probe wouldn't reach the head.
+        let growth = if end > INITIAL_WINDOW_BYTES * 4 && budget < INITIAL_WINDOW_BYTES * 4 {
+            2
+        } else {
+            4
+        };
+        budget = (budget * growth).min(end);
     }
 }
 
@@ -119,6 +126,37 @@ mod window_tests {
             log.extend_from_slice(reply.as_bytes());
         }
         log
+    }
+
+    #[test]
+    fn a_twelve_turn_page_can_fit_before_the_megabyte_probe() {
+        let reply = "资料🙂 ".repeat(2048);
+        let mut log = Vec::new();
+        let mut expected = 0;
+        for turn in 0..64 {
+            if turn == 52 {
+                expected = log.len() as u64;
+            }
+            log.extend_from_slice(format!(
+                "{{\"id\":\"u{turn}\",\"role\":\"user\",\"timestamp\":{turn}}}\n\
+                 {{\"id\":\"a{turn}\",\"role\":\"assistant\",\"timestamp\":{turn},\"text\":\"{reply}\"}}\n"
+            ).as_bytes());
+        }
+        let mut bytes_read = 0;
+        let start = window_start(
+            log.len() as u64,
+            12,
+            |out, offset| {
+                let from = offset as usize;
+                out.copy_from_slice(&log[from..from + out.len()]);
+                bytes_read += out.len();
+                Ok(())
+            },
+            || Ok(()),
+        )
+        .unwrap();
+        assert_eq!(expected, start);
+        assert!(bytes_read <= 640 * 1024, "read {bytes_read} bytes");
     }
 
     #[test]
@@ -379,18 +417,16 @@ fn read_content(
         let size = (end - position).min(buffer.len() as u64) as usize;
         read_at(&mut buffer[..size], position)?;
         let mut from = 0;
-        for (i, &byte) in buffer[..size].iter().enumerate() {
-            if byte == b'\n' {
-                if line.is_empty() {
-                    emit(&buffer[from..i], offset)?;
-                } else {
-                    line.extend_from_slice(&buffer[from..i]);
-                    emit(&line, offset)?;
-                    line.clear();
-                }
-                from = i + 1;
-                offset = position + from as u64;
+        for i in memchr_iter(b'\n', &buffer[..size]) {
+            if line.is_empty() {
+                emit(&buffer[from..i], offset)?;
+            } else {
+                line.extend_from_slice(&buffer[from..i]);
+                emit(&line, offset)?;
+                line.clear();
             }
+            from = i + 1;
+            offset = position + from as u64;
         }
         line.extend_from_slice(&buffer[from..size]);
         position += size as u64;

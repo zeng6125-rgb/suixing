@@ -82,7 +82,7 @@ impl Bookmark {
         }
         Ok(())
     }
-    fn position(self) -> Result<ReadPosition, String> {
+    pub(crate) fn position(self) -> Result<ReadPosition, String> {
         self.validate()?;
         Ok(ReadPosition {
             source: ViewSource::Main {

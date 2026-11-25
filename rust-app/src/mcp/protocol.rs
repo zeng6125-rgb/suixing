@@ -137,8 +137,7 @@ pub fn normalize_configs(mut configs: Vec<ServerConfig>) -> Result<Vec<ServerCon
     for config in &mut configs {
         config.name = config.name.trim().to_owned();
         if config.id.is_empty() {
-            config.id =
-                format!("legacy-{:x}", Sha256::digest(config.name.as_bytes()))[..39].to_owned();
+            config.id = legacy_server_id(&config.name);
         }
         validate_config(config)?;
         if !ids.insert(config.id.clone()) || !names.insert(config.name.clone()) {
@@ -154,6 +153,10 @@ pub fn normalize_configs(mut configs: Vec<ServerConfig>) -> Result<Vec<ServerCon
         }
     }
     Ok(configs)
+}
+
+pub(crate) fn legacy_server_id(name: &str) -> String {
+    format!("legacy-{:x}", Sha256::digest(name.as_bytes()))[..39].to_owned()
 }
 
 pub fn validate_config(config: &ServerConfig) -> Result<(), String> {

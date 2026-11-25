@@ -79,7 +79,14 @@ class WireReadTest {
     }
 
     @Test
-    fun `a stalled wire read leaves the repository free to save another chat`() = runBlocking {
+    fun `a stalled wire read leaves the repository free to save another chat`() =
+        stalledReadReleasesWriter(readAll = false)
+
+    @Test
+    fun `a stalled full history read leaves the repository free to save another chat`() =
+        stalledReadReleasesWriter(readAll = true)
+
+    private fun stalledReadReleasesWriter(readAll: Boolean) = runBlocking {
         val repository = repository()
         val (chat, checkpoint) = chatWithCheckpoint("stalled-wire")
         store.append(store.newMeta(chat).copy(checkpoints = listOf(checkpoint)), chat.messages)
@@ -95,7 +102,9 @@ class WireReadTest {
                 check(resumeRead.await(15, TimeUnit.SECONDS))
                 callOriginal()
             }
-            val wire = async { repository.readWire(chat.id) }
+            val wire = async {
+                if (readAll) WireHistory(repository.readAll(chat.id)) else repository.readWire(chat.id)
+            }
             try {
                 withContext(Dispatchers.IO) {
                     check(reading.await(5, TimeUnit.SECONDS))
@@ -105,8 +114,9 @@ class WireReadTest {
             } finally {
                 resumeRead.countDown()
                 val history = wire.await()
-                assertEquals(checkpoint, history.checkpoint)
-                assertEquals(chat.messages.dropWhile { it.id != checkpoint.toMessageId }, history.messages)
+                assertEquals(if (readAll) null else checkpoint, history.checkpoint)
+                val expected = if (readAll) chat.messages else chat.messages.dropWhile { it.id != checkpoint.toMessageId }
+                assertEquals(expected, history.messages)
             }
         } finally {
             unmockkObject(NativeChatLog)

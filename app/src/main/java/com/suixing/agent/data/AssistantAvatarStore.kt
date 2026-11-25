@@ -176,6 +176,8 @@ object AssistantAvatarStore {
     private val pictures = object : android.util.LruCache<String, Bitmap>(16) {}
     private val decodeLock = Mutex()
 
+    internal fun cached(path: String): Bitmap? = pictures.get(path)
+
     /** Drops the cached decode of [path] (called when the file itself goes away). */
     private fun forget(path: String) {
         pictures.remove(path)

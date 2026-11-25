@@ -41,6 +41,10 @@ pub struct Goal {
 }
 
 impl Goal {
+    pub fn visible_in(&self, chat_id: Option<&str>) -> bool {
+        !self.text.is_empty() && (self.chat_id.is_empty() || chat_id == Some(self.chat_id.as_str()))
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         for (text, max) in [
             (&self.id, 128),
@@ -56,8 +60,11 @@ impl Goal {
         if self.updated_at < 0 || self.wake_at < 0 {
             return Err("目标时间字段无效".into());
         }
+        let unbound =
+            self.id.is_empty() && self.chat_id.is_empty() && self.status == Status::Paused;
         if !self.text.is_empty()
-            && (self.text.trim().is_empty() || self.id.is_empty() || self.chat_id.is_empty())
+            && (self.text.trim().is_empty()
+                || !unbound && (self.id.is_empty() || self.chat_id.is_empty()))
         {
             return Err("目标缺少内容或所属身份".into());
         }

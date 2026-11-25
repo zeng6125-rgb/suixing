@@ -1,5 +1,18 @@
 use super::*;
 use crate::conversation_preferences::{Document, Order, Snapshot, Stamp};
+
+const LIMIT: u64 = 4 * 1024 * 1024;
+
+pub(super) fn shared_order(files: &Path) -> Option<Order> {
+    ["drawer-order", "drawer-order.tmp"]
+        .into_iter()
+        .find_map(|name| {
+            optional_json(files, &files.join(name), LIMIT)
+                .ok()
+                .flatten()
+        })
+}
+
 impl Store {
     pub(crate) fn preference_identity(&self) -> (String, u64, bool) {
         (
@@ -39,13 +52,34 @@ impl Store {
     pub(crate) fn flush_preferences(&mut self) -> Result<(), String> {
         self.writable()?;
         self.conversation_preferences.validate()?;
+        let mut private = self.conversation_preferences.clone();
+        if let Some(files) = self.shared_files_root.as_deref() {
+            atomic_json(files, &files.join("drawer-order"), &private.order, LIMIT).map_err(
+                |error| {
+                    self.conversation_preferences_confirmed = false;
+                    error.message
+                },
+            )?;
+            private.order = Order::default();
+            let unread = crate::legacy_import::LegacyPreferenceValue::StringSet(
+                private.completed_unread.iter().cloned().collect(),
+            );
+            shared_preferences::save(
+                files,
+                shared_preferences::READS,
+                "completed_unread",
+                Some(&unread),
+            )
+            .inspect_err(|_| self.conversation_preferences_confirmed = false)?;
+            private.completed_unread.clear();
+        }
         // View preference failures never reinterpret a transcript commit or poison
         // its owner. The sole preference writer retains the latest exact snapshot.
         match atomic_json(
             &self.root,
             &self.root.join("conversation-preferences.json"),
-            &self.conversation_preferences,
-            4 * 1024 * 1024,
+            &private,
+            LIMIT,
         ) {
             Ok(()) => {
                 self.conversation_preferences_dirty = false;

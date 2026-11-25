@@ -153,11 +153,16 @@ private fun TranscriptMessageWithCheckpoints(
     revision: Long,
     messagePositions: Map<String, Int>,
 ) {
-    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    val message: @Composable () -> Unit = {
         ChatMessageRowHost(
             row, readingKey, settings, assistant, bubbleMaxWidth, contextWindow,
             runElapsedMs, providerOfModel, reasoningExpansion, rowDocuments, actions, onEdit,
         )
+    }
+    if (checkpoints.isEmpty()) {
+        message()
+    } else Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        message()
         // Keep the checkpoint directly under the last message it folded away.
         checkpoints.forEach { checkpoint ->
             CheckpointUnderRow(

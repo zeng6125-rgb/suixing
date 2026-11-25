@@ -1,10 +1,14 @@
 package com.suixing.agent.ui.drawer
 
+import androidx.compose.animation.core.TargetBasedAnimation
+import androidx.compose.animation.core.VectorConverter
 import androidx.compose.animation.core.tween
 import androidx.compose.material3.DrawerValue
 import androidx.compose.runtime.BroadcastFrameClock
 import androidx.compose.runtime.snapshots.Snapshot
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.pointer.HistoricalChange
 import androidx.compose.ui.input.pointer.PointerId
 import androidx.compose.ui.input.pointer.PointerInputChange
 import kotlinx.coroutines.CoroutineScope
@@ -31,6 +35,176 @@ private const val FRAME_NANOS = 16_000_000L
  * they never suspend inside Animatable or cancel a live pointer Job.
  */
 class DrawerGestureInteractionTest {
+
+    @Test
+    fun `programmatic opening and closing keep horizontal steps bounded at 120 hz`() {
+        for (opening in listOf(true, false)) {
+            val animation = TargetBasedAnimation(
+                animationSpec = if (opening) DRAWER_OPEN_SPEC else DRAWER_CLOSE_SPEC,
+                typeConverter = Float.VectorConverter,
+                initialValue = if (opening) 0f else 1f,
+                targetValue = if (opening) 1f else 0f,
+            )
+            val lastFrame = if (opening) 48 else 54
+            val positions = (0..lastFrame).map { animation.getValueFromNanos(it * 1_000_000_000L / 120) }
+            val largestStep = positions.zipWithNext { a, b -> kotlin.math.abs(b - a) }.max()
+            assertTrue("Largest per-frame step: $largestStep", largestStep <= 0.075f)
+            assertEquals(if (opening) 1f else 0f, positions.last(), 0.0001f)
+        }
+    }
+
+    @Test
+    fun `a missing touch tick still moves the visible drawer between two real samples`() = withHarness {
+        val session = state.beginGesture()
+        val displayTick = 8_333_333L
+        state.presentDragSample(session, 0.10f, 0L, scope)
+        assertEquals(0.10f, state.visualProgress.value, 0f)
+        pumpFrame(displayTick)
+
+        // The second pointer sample arrives 16 ms after the first, across two display ticks.
+        state.presentDragSample(session, 0.30f, 16L, scope)
+        pumpFrame(displayTick)
+        assertEquals(0.2041667f, state.visualProgress.value, 0.0001f)
+        pumpFrame(displayTick)
+        assertEquals(0.30f, state.visualProgress.value, 0f)
+        pumpFrame(displayTick)
+        assertEquals("No extrapolation while the finger is still", 0.30f, state.visualProgress.value, 0f)
+
+        state.presentDragSample(session, 0.45f, 34L, scope)
+        assertTrue(state.finishGesture(session))
+        val settle = scope.launch(start = CoroutineStart.UNDISPATCHED) {
+            state.settleGesture(session, DrawerValue.Open, DRAWER_OPEN_SPEC, initialVelocity = 1f)
+        }
+        assertEquals("The spring starts from the displayed position", 0.30f, state.visualProgress.value, 0f)
+        pumpFrames(48)
+        assertTrue(settle.isCompleted)
+        assertEquals(1f, state.visualProgress.value, 0f)
+    }
+
+    @Test
+    @OptIn(ExperimentalComposeUiApi::class)
+    fun `a batched move preserves a reversal even when the net delta is zero`() = withHarness {
+        val session = state.beginGesture()
+        val accumulator = DrawerDragAccumulator()
+        val generation = accumulator.begin(0f, 300f)
+        state.presentDragSample(session, accumulator.dragBy(generation, 90f), 0L, scope)
+        val displayTick = 8_333_333L
+        pumpFrame(displayTick)
+
+        val change = PointerInputChange(
+            id = PointerId(1),
+            uptimeMillis = 17L,
+            position = Offset(90f, 0f),
+            pressed = true,
+            previousUptimeMillis = 0L,
+            previousPosition = Offset(90f, 0f),
+            previousPressed = true,
+            isInitiallyConsumed = false,
+        ).copy(historical = listOf(HistoricalChange(8L, Offset(150f, 0f))))
+        state.presentDragChange(session, accumulator, generation, change, 0f, scope)
+
+        pumpFrame(displayTick)
+        assertEquals(0.49259f, state.visualProgress.value, 0.0001f)
+        pumpFrame(displayTick)
+        assertEquals(0.30741f, state.visualProgress.value, 0.0001f)
+        pumpFrame(displayTick)
+        assertEquals(0.3f, state.visualProgress.value, 0.0001f)
+        assertEquals(0.3f, accumulator.finish(generation)!!.progress, 0.0001f)
+    }
+
+    @Test
+    fun `closing snaps the chat less than one physical pixel on its last frame`() {
+        val homeLeftTravelPx = DRAWER_SHEET_WIDTH * 3f + 1080f * 0.025f
+        for ((start, velocity) in listOf(1f to 0f, 0.48f to -1.5f)) {
+            val animation = TargetBasedAnimation(
+                animationSpec = DRAWER_CLOSE_SPEC,
+                typeConverter = Float.VectorConverter,
+                initialValue = start,
+                targetValue = 0f,
+                initialVelocityVector = Float.VectorConverter.convertToVector(velocity),
+            )
+            for (refreshRate in listOf(60, 120)) {
+                val previousFrame = animation.durationNanos - 1_000_000_000L / refreshRate
+                val previousProgress = animation.getValueFromNanos(previousFrame)
+                val lastStepPx = previousProgress * homeLeftTravelPx
+                assertTrue("Close at $refreshRate Hz jumps $lastStepPx px from $start", lastStepPx < 1f)
+                assertTrue(drawerHomeCornerFraction(previousProgress) < 0.005f)
+                assertEquals(0f, animation.getValueFromNanos(animation.durationNanos), 0f)
+            }
+        }
+    }
+
+    @Test
+    fun `chat corners follow the last part of drawer travel in either direction`() {
+        val corners = listOf(0f, 0.01f, 0.05f, 0.09f, 0.10f, 1f).map(::drawerHomeCornerFraction)
+        assertEquals(0f, corners.first(), 0f)
+        assertEquals(0.5f, corners[2], 0.0001f)
+        assertEquals(listOf(1f, 1f), corners.takeLast(2))
+        assertTrue(corners.zipWithNext().all { (left, right) -> left <= right })
+    }
+
+    @Test
+    fun `chat stays frozen through drag and close but lets a conversation switch prepare`() = withHarness {
+        assertFalse(state.freezesChat(switchingConversation = false))
+        val drag = state.beginGesture()
+        assertTrue(state.freezesChat(switchingConversation = false))
+        state.applyGestureFrame(drag, 0.4f)
+        state.finishGesture(drag)
+        assertTrue(state.freezesChat(switchingConversation = false))
+        state.snapTo(DrawerValue.Open)
+        assertTrue(state.freezesChat(switchingConversation = false))
+        assertFalse(state.freezesChat(switchingConversation = true))
+
+        val close = scope.launch(start = CoroutineStart.UNDISPATCHED) {
+            state.animateTo(DrawerValue.Closed, DRAWER_CLOSE_SPEC)
+        }
+        assertTrue(state.freezesChat(switchingConversation = true))
+        pumpFrames(10)
+        assertTrue(state.freezesChat(switchingConversation = true))
+        pumpFrames(50)
+        assertTrue(close.isCompleted)
+        assertFalse(state.freezesChat(switchingConversation = true))
+        assertFalse(state.freezesChat(switchingConversation = false))
+    }
+
+    @Test
+    fun `closed drawer presents the cached chat before revealing live chat and resuming rows`() = withHarness {
+        state.snapTo(DrawerValue.Open)
+        var updatesAllowed = false
+        scope.launch(start = CoroutineStart.UNDISPATCHED) { state.observeContentUpdates { updatesAllowed = it } }
+        suspend fun flushChanges() {
+            Snapshot.sendApplyNotifications()
+            repeat(6) { yield() }
+        }
+        flushChanges()
+        assertTrue(updatesAllowed)
+
+        state.beginGesture()
+        flushChanges()
+        assertFalse(updatesAllowed)
+        state.snapTo(DrawerValue.Closed)
+        flushChanges()
+        assertFalse(state.homeShieldActive)
+        assertTrue(state.freezesChat(switchingConversation = false))
+        assertFalse(updatesAllowed)
+        pumpFrames(1)
+        assertFalse(state.freezesChat(switchingConversation = false))
+        assertFalse(updatesAllowed)
+        pumpFrames(1)
+        assertTrue(updatesAllowed)
+
+        state.beginGesture()
+        flushChanges()
+        state.snapTo(DrawerValue.Closed)
+        flushChanges()
+        state.beginGesture()
+        flushChanges()
+        pumpFrames(2)
+        assertFalse("A cancelled refresh cannot resume during the new drag", updatesAllowed)
+        state.snapTo(DrawerValue.Open)
+        flushChanges()
+        assertTrue("An open drawer resumes without waiting for a frame", updatesAllowed)
+    }
 
     @Test
     fun `a move updates visual progress before a cancelled animation releases its mutator`() = withHarness {

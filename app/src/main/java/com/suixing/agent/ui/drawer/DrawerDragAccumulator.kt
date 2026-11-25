@@ -1,8 +1,5 @@
 package com.suixing.agent.ui.drawer
 
-import com.suixing.agent.core.NativeCore
-import com.suixing.agent.core.NativeCoreJni
-import java.nio.ByteBuffer
 import kotlin.math.abs
 
 /** The final progress for one drag; a later begin invalidates this release. */
@@ -13,7 +10,6 @@ internal data class DrawerDragRelease(val generation: Long, val progress: Float,
  * The release animation never supplies the next pointer position.
  */
 internal class DrawerDragAccumulator {
-    private val nativeDrag = if (NativeCore.available) ByteBuffer.allocateDirect(7 * Float.SIZE_BYTES) else null
     private var generation = 0L
     private var active = false
     private var startProgress = 0f
@@ -30,10 +26,6 @@ internal class DrawerDragAccumulator {
         generation++
         active = true
         latestProgress = progress.coerceIn(0f, 1f)
-        if (nativeDrag != null) {
-            NativeCoreJni.nativeDrawerDragBegin(nativeDrag, latestProgress, widthPx)
-            return generation
-        }
         startProgress = latestProgress
         panelWidthPx = widthPx
         minOffsetPx = -startProgress * panelWidthPx
@@ -51,10 +43,6 @@ internal class DrawerDragAccumulator {
     fun dragBy(dragGeneration: Long, deltaPx: Float): Float {
         if (!active || generation != dragGeneration) return Float.NaN
         if (deltaPx == 0f) return latestProgress
-        if (nativeDrag != null) {
-            latestProgress = NativeCoreJni.nativeDrawerDragAdvance(nativeDrag, deltaPx)
-            return latestProgress
-        }
         accumulatedPx = (accumulatedPx + deltaPx).coerceIn(minOffsetPx, maxOffsetPx)
         if (accumulatedPx == minOffsetPx || accumulatedPx == maxOffsetPx) {
             strokeStartPx = accumulatedPx
@@ -84,12 +72,7 @@ internal class DrawerDragAccumulator {
         if (!active || generation != dragGeneration) return null
         active = false
         generation++
-        val openByDistance = if (nativeDrag != null) {
-            NativeCoreJni.nativeDrawerDragOpens(nativeDrag)
-        } else {
-            opensByDistance()
-        }
-        return DrawerDragRelease(generation, latestProgress, openByDistance)
+        return DrawerDragRelease(generation, latestProgress, opensByDistance())
     }
 
     private fun opensByDistance(): Boolean {

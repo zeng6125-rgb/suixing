@@ -249,6 +249,7 @@ fun FilesScreen(onBack: () -> Unit, onReference: (File) -> Unit) {
                 Box {
                     PageTopBarAction(
                         icon = ImageVector.vectorResource(R.drawable.ic_folder_open),
+                        glyphSize = 18.dp,
                         contentDescription = "切换目录根（当前：$rootLabel）",
                         onClick = { rootMenu = true },
                     )
@@ -311,6 +312,7 @@ fun FilesScreen(onBack: () -> Unit, onReference: (File) -> Unit) {
                     PageTopBarAction(
                         icon = ImageVector.vectorResource(R.drawable.ic_arrow_up),
                         contentDescription = "上一级",
+                        glyphSize = 22.dp,
                         onClick = {
                             current = parentDirectory ?: root
                         },

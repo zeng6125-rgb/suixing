@@ -119,10 +119,8 @@ import com.suixing.agent.ui.theme.Tone
 import com.suixing.agent.ui.theme.color
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.collect
@@ -162,7 +160,7 @@ internal fun ConversationManagerScreen(
         // **走仓库的 chatFile**：它知道日志在 `chats/store/<id>.<gen>.jsonl`。
         // 原来这里读旧的 `chats/<id>.json`，迁移之后那个文件不存在 ⇒ 对每个会话都显示
         // 「这个会话在磁盘上没有对应的文件」（用户实测）。
-        chatFileInfo = withContext(Dispatchers.IO) { Core.chats.chatFile(chat.id) }
+        chatFileInfo = Core.chats.chatFile(chat.id)
     }
     // 系统选择器（SAF）：不需要 FileProvider、不改 manifest，用户自己决定存到哪。
     val exporter = rememberLauncherForActivityResult(
@@ -172,18 +170,11 @@ internal fun ConversationManagerScreen(
         pendingExport = null
         if (uri == null || chat == null) return@rememberLauncherForActivityResult
         scope.launch {
-            val ok = withContext(Dispatchers.IO) {
-                runCatching {
-                    // **不能直接拷 `chats/<id>.json`**：迁移之后它不存在了（导出必然失败）。
-                    // 也不能拷 JSONL 日志 —— 用户打不开。这里序列化成整份 JSON。
-                    val text = Core.chats.exportJson(chat.id) ?: error("读不到会话内容")
-                    context.contentResolver.openOutputStream(uri)?.use { out ->
-                        out.write(text.toByteArray(Charsets.UTF_8))
-                    } ?: error("打不开目标文件")
-                }.onFailure {
-                    if (it is CancellationException) throw it
-                }.isSuccess
-            }
+            val ok = runCatching {
+                Core.chats.exportJson(chat.id) { context.contentResolver.openOutputStream(uri) }
+            }.onFailure {
+                if (it is CancellationException) throw it
+            }.getOrDefault(false)
             snackbar.showSnackbar(if (ok) "已导出「${chat.title}」" else "导出失败，换个位置再试")
         }
     }
@@ -198,17 +189,8 @@ internal fun ConversationManagerScreen(
         val archivedList = remember(conversations) {
             conversations.filter { it.archived }.sortedByDescending { it.updatedAt }
         }
-        // 活动会话的顺序（置顶区在前、普通区在后，与抽屉共用同一套排序）。
-        // **提到 LazyColumn 外面**：下面要把它们的字节数一次性批量取好，见 sizes。
+        // 活动会话的顺序与抽屉一致，置顶区在前。
         val active = remember(sections) { sections.pinned + sections.normal }
-        // **字节数一次批量取**（性能审计）：原来每行一个 LaunchedEffect 调 chatSize，
-        // 那是每行一次 `withContext(Dispatchers.IO)` + 一次 `ChatRepository.lock`（那把锁和
-        // 会话保存、流式写盘共用）；滚动一次就抢 N 次全局锁，而且 `remember` 在 item 作用域，
-        // 滚出去再滚回来又重读一遍。现在一次线程切换、一次锁、一次遍历。
-        var sizes by remember { mutableStateOf<Map<String, Long>>(emptyMap()) }
-        LaunchedEffect(active) {
-            sizes = Core.chats.chatSizes(active.map { it.id })
-        }
         LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
@@ -219,7 +201,6 @@ internal fun ConversationManagerScreen(
         ) {
             // 与抽屉共用同一套排序（drawerSections）：置顶在前、置顶区按手动顺序、普通区按
             // updatedAt。这一页原来是纯时间序、也不显示置顶 —— 同一枚置顶两个页面两个样子。
-            // `active` 已在 LazyColumn 外面算好（见 sizes 的批量取）。
             val archived = archivedList
             if (active.isEmpty() && archived.isEmpty()) {
                 item {
@@ -235,10 +216,7 @@ internal fun ConversationManagerScreen(
                     key = { it.id },
                     contentType = { "conversation-row" },
                 ) { conversation ->
-                    // **读 store 里的日志**（#40 之后磁盘上已无 `<id>.json`，旧路径恒返回 -1）
-                    // ⇒ 副标题里的"体积"一直不显示。`chatFile` 给的就是 meta 指向的那份日志。
-                    // 字节数已在页面级**批量取好**（sizes），这里只查表，不再每行做 IO。
-                    val bytes = sizes[conversation.id] ?: -1L
+                    val bytes = conversation.committedLogBytes
                     // 副标题是一次相对时间格式化（DateUtils）+ 一次字节数格式化。按真正影响输出
                     // 的三个字段记住它：别跟着每次重组重来。文案、分隔符与原来逐字相同。
                     val subtitle = remember(
@@ -249,7 +227,7 @@ internal fun ConversationManagerScreen(
                     ) {
                         "${lastUpdated(conversation.updatedAt)} · " +
                             "${conversation.messageCount} 条消息" +
-                            (if (bytes >= 0) " · ${humanBytes(bytes)}" else "")
+                            (bytes?.let { " · ${humanBytes(it)}" }).orEmpty()
                     }
                     ConversationRow(
                         title = conversation.title,

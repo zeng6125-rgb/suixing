@@ -466,6 +466,9 @@ fn action_conversation(action: &Action, store: &Store) -> Option<String> {
         | Action::SetConversationAssistant {
             conversation_id, ..
         }
+        | Action::SetConversationApproval {
+            conversation_id, ..
+        }
         | Action::QueueTurn {
             conversation_id, ..
         }
@@ -503,7 +506,12 @@ fn action_conversation(action: &Action, store: &Store) -> Option<String> {
         | Action::ReadGoal {
             conversation_id, ..
         } => conversation_id.clone(),
-        Action::ResumeGoal { .. } | Action::ClearGoal { .. } => Some(store.goal().chat_id.clone()),
+        Action::ResumeGoal { conversation_id, .. } if store.goal().chat_id.is_empty() => {
+            conversation_id.clone()
+        }
+        Action::ResumeGoal { .. } | Action::ClearGoal { .. } => {
+            (!store.goal().chat_id.is_empty()).then(|| store.goal().chat_id.clone())
+        }
         Action::CancelRun { key } => Some(key.conversation_id.clone()),
         _ => None,
     }
@@ -587,7 +595,13 @@ fn capabilities(terminal_ready: bool) -> Capabilities {
 
 fn run(data: PathBuf, actions: Receiver<Action>, publish: Publisher) {
     let mut store = match crate::migration::state_paths(&data).and_then(|paths| {
-        let mut store = Store::open(paths.state_root)?;
+        #[cfg(target_os = "android")]
+        let shared = crate::platform::android::paths()
+            .filter(|platform| platform.package_name == "com.suixing.agent")
+            .map(|_| paths.legacy_root.clone());
+        #[cfg(not(target_os = "android"))]
+        let shared = None;
+        let mut store = Store::open_with_shared_files(paths.state_root, shared)?;
         store.set_legacy_source_root(paths.legacy_root);
         Ok(store)
     }) {
@@ -601,7 +615,7 @@ fn run(data: PathBuf, actions: Receiver<Action>, publish: Publisher) {
         let _ = SHELL_ENVIRONMENT.set(environment);
     }
     #[cfg(target_os = "android")]
-    match artifacts::ScreenshotRepository::open(store.workspace()) {
+    match artifacts::ScreenshotRepository::open(store.private_workspace()) {
         Ok(repository) => {
             let _ = ARTIFACTS.set(Arc::new(repository));
         }
@@ -2216,11 +2230,6 @@ fn run(data: PathBuf, actions: Receiver<Action>, publish: Publisher) {
                     }
                 }
                 Action::Load => {
-                    if let Some(capability) = capability.as_ref() {
-                        for update in capability.replay() {
-                            publish.emit(Event::Capability(update));
-                        }
-                    }
                     if let Some(linux) = &linux {
                         publish.emit(Event::Linux(linux.snapshot()));
                     }
@@ -2270,6 +2279,12 @@ fn run(data: PathBuf, actions: Receiver<Action>, publish: Publisher) {
                     publish.emit(Event::Skills(store.skills().to_vec()));
                     publish.emit(Event::Goal(store.goal().clone()));
                     publish_plugins(&store, &publish);
+                    publish_tool_catalog(&store, mcp.as_ref(), &publish);
+                    if let Some(capability) = capability.as_ref() {
+                        for update in capability.replay() {
+                            publish.emit(Event::Capability(update));
+                        }
+                    }
                 }
                 Action::LoadPlugins => publish_plugins(&store, &publish),
                 Action::PreviewPlugin { manifest } => {
@@ -2408,6 +2423,15 @@ fn run(data: PathBuf, actions: Receiver<Action>, publish: Publisher) {
                         Err(error) => publish.emit(Event::Error(error)),
                     }
                 }
+                Action::SetConversationApproval {
+                    conversation_id,
+                    mode,
+                } => match store.set_conversation_approval(&conversation_id, mode) {
+                    Ok(()) => publish.emit(Event::Conversations(store.conversation_summaries())),
+                    Err(error) => {
+                        publish.emit(Event::Error(format!("会话审批设置未保存：{error}")))
+                    }
+                },
                 Action::DeleteConversation(id) => {
                     if active.as_ref().is_some_and(|run| run.conversation == id) {
                         publish.emit(Event::Error("执行中的会话不能删除，请先停止".into()));
@@ -2511,9 +2535,7 @@ fn run(data: PathBuf, actions: Receiver<Action>, publish: Publisher) {
                 Action::CompactConversation { conversation_id } => {
                     if let Some(run) = active.as_ref().filter(|run| run.worker_is_active(None)) {
                         run.steering.request_compaction();
-                        publish.emit(Event::Info(
-                            "Compression will start at the next request boundary".into(),
-                        ));
+                        publish.emit(Event::Info("已请求压缩，将在下一次请求前执行".into()));
                     } else if active.is_some() {
                         publish.emit(Event::Error("This conversation is stopping".into()));
                     } else if let Err(error) = start_run(
@@ -2720,7 +2742,7 @@ fn run(data: PathBuf, actions: Receiver<Action>, publish: Publisher) {
                         });
                     }
                 }
-                Action::ResumeGoal { goal_id } => {
+                Action::ResumeGoal { goal_id, .. } => {
                     if active.is_some() {
                         publish.emit(Event::Error("请先停止或等待当前运行结束".into()));
                         break 'dispatch;
@@ -2732,9 +2754,8 @@ fn run(data: PathBuf, actions: Receiver<Action>, publish: Publisher) {
                         });
                         break 'dispatch;
                     }
-                    let chat_id = store.goal().chat_id.clone();
                     if let Err(error) = start_run(
-                        Some(chat_id),
+                        action_conversation.clone(),
                         "继续完成已保存的目标".into(),
                         RunMode::ResumeGoal(goal_id),
                         &mut store,
@@ -2765,9 +2786,7 @@ fn run(data: PathBuf, actions: Receiver<Action>, publish: Publisher) {
                 Action::ReadGoal { conversation_id } => {
                     let goal = store.goal();
                     let mut message = "此会话没有目标".to_owned();
-                    if !goal.text.is_empty()
-                        && conversation_id.as_deref() == Some(goal.chat_id.as_str())
-                    {
+                    if goal.visible_in(conversation_id.as_deref()) {
                         message = format!("{} · {}", goal.status.label(), goal.text);
                         for detail in [&goal.progress, &goal.detail] {
                             if !detail.is_empty() {
@@ -3071,6 +3090,7 @@ fn start_run(
         }
         let goal = store.goal();
         if !goal.text.is_empty()
+            && !goal.chat_id.is_empty()
             && goal.status != crate::goal::Status::Completed
             && conversation.as_deref() != Some(goal.chat_id.as_str())
         {
@@ -3080,7 +3100,7 @@ fn start_run(
     if let Some(expected) = goal_resume {
         let goal = store.goal();
         if goal.id != expected
-            || conversation.as_deref() != Some(goal.chat_id.as_str())
+            || !goal.visible_in(conversation.as_deref())
             || !matches!(
                 goal.status,
                 crate::goal::Status::Paused | crate::goal::Status::Blocked

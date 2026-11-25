@@ -82,18 +82,20 @@ fn dispatch_receiver(request: android::ReceiverRequest) -> Result<(), String> {
 /// Use installed Android fonts; no font downloads or bundled third-party artwork are required.
 pub fn install_system_fonts(context: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
-    if let Some(bytes) = [
-        "/system/fonts/NotoSansCJK-Regular.ttc",
-        "/system/fonts/NotoSansSC-Regular.otf",
-        "/system/fonts/DroidSansFallback.ttf",
+    if let Some(data) = [
+        ("/system/fonts/NotoSansCJK-Regular.ttc", 2),
+        ("/system/fonts/NotoSansSC-Regular.otf", 0),
+        ("/system/fonts/DroidSansFallback.ttf", 0),
     ]
     .iter()
-    .find_map(|path| std::fs::read(path).ok())
-    {
-        fonts.font_data.insert(
-            "android-cjk".into(),
-            Arc::new(egui::FontData::from_owned(bytes)),
-        );
+    .find_map(|(path, index)| {
+        std::fs::read(path).ok().map(|bytes| {
+            let mut data = egui::FontData::from_owned(bytes);
+            data.index = *index;
+            data
+        })
+    }) {
+        fonts.font_data.insert("android-cjk".into(), Arc::new(data));
         fonts
             .families
             .entry(egui::FontFamily::Proportional)
@@ -104,6 +106,17 @@ pub fn install_system_fonts(context: &egui::Context) {
             .entry(egui::FontFamily::Monospace)
             .or_default()
             .push("android-cjk".into());
+    }
+    if let Ok(bytes) = std::fs::read("/system/fonts/Roboto-Regular.ttf") {
+        fonts.font_data.insert(
+            "android-sans".into(),
+            Arc::new(egui::FontData::from_owned(bytes)),
+        );
+        fonts
+            .families
+            .entry(egui::FontFamily::Proportional)
+            .or_default()
+            .insert(0, "android-sans".into());
     }
     let mut serif = Vec::new();
     for (name, paths) in [
@@ -122,10 +135,15 @@ pub fn install_system_fonts(context: &egui::Context) {
             ][..],
         ),
     ] {
-        if let Some(bytes) = paths.iter().find_map(|path| std::fs::read(path).ok()) {
-            fonts
-                .font_data
-                .insert(name.into(), Arc::new(egui::FontData::from_owned(bytes)));
+        if let Some((path, bytes)) = paths
+            .iter()
+            .find_map(|path| std::fs::read(path).ok().map(|bytes| (*path, bytes)))
+        {
+            let mut data = egui::FontData::from_owned(bytes);
+            if path.ends_with("NotoSerifCJK-Regular.ttc") {
+                data.index = 2;
+            }
+            fonts.font_data.insert(name.into(), Arc::new(data));
             serif.push(name.to_owned());
         }
     }

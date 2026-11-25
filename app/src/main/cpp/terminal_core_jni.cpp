@@ -45,35 +45,62 @@ jstring resultText(JNIEnv* env, SearchBuffer output) {
     sx_search_free(output.data, output.len);
     return result;
 }
-struct Callbacks { JNIEnv* env; jclass type; };
+struct Callbacks {
+    JNIEnv* env;
+    jclass type;
+    jmethodID unicodeTypesMethod = nullptr;
+    jmethodID termcapMethod = nullptr;
+    jclass characterType = nullptr;
+    jmethodID characterGetType = nullptr;
+
+    Callbacks(JNIEnv* envValue, jclass typeValue) : env(envValue), type(typeValue) {}
+    Callbacks(const Callbacks&) = delete;
+    Callbacks& operator=(const Callbacks&) = delete;
+    ~Callbacks() {
+        if (characterType != nullptr) env->DeleteLocalRef(characterType);
+    }
+};
 int unicodeTypes(void* context, const int* points, std::size_t count, std::uint8_t* output) {
     auto& callback = *static_cast<Callbacks*>(context);
     auto env = callback.env;
     auto input = env->NewIntArray(static_cast<jsize>(count));
     if (!input) return 1;
     env->SetIntArrayRegion(input, 0, static_cast<jsize>(count), reinterpret_cast<const jint*>(points));
-    auto method = env->GetStaticMethodID(callback.type, "unicodeTypes", "([I)[B");
-    auto result = method ? static_cast<jbyteArray>(env->CallStaticObjectMethod(callback.type, method, input)) : nullptr;
+    if (callback.unicodeTypesMethod == nullptr && !env->ExceptionCheck()) {
+        callback.unicodeTypesMethod = env->GetStaticMethodID(callback.type, "unicodeTypes", "([I)[B");
+    }
+    auto result = callback.unicodeTypesMethod && !env->ExceptionCheck()
+        ? static_cast<jbyteArray>(env->CallStaticObjectMethod(callback.type, callback.unicodeTypesMethod, input))
+        : nullptr;
     env->DeleteLocalRef(input);
     if (result && !env->ExceptionCheck()) env->GetByteArrayRegion(result, 0, static_cast<jsize>(count), reinterpret_cast<jbyte*>(output));
     if (result) env->DeleteLocalRef(result);
     return env->ExceptionCheck() ? 1 : 0;
 }
 int unicodeCategory(void* context, int cp) {
-    auto env = static_cast<Callbacks*>(context)->env;
-    auto type = env->FindClass("java/lang/Character");
-    auto method = type ? env->GetStaticMethodID(type, "getType", "(I)I") : nullptr;
-    const int result = method ? env->CallStaticIntMethod(type, method, cp) : 0;
-    if (type) env->DeleteLocalRef(type);
-    return result;
+    auto& callback = *static_cast<Callbacks*>(context);
+    auto env = callback.env;
+    if (env->ExceptionCheck()) return 0;
+    if (callback.characterType == nullptr) {
+        callback.characterType = env->FindClass("java/lang/Character");
+        if (callback.characterType == nullptr || env->ExceptionCheck()) return 0;
+        callback.characterGetType = env->GetStaticMethodID(callback.characterType, "getType", "(I)I");
+    }
+    return callback.characterGetType && !env->ExceptionCheck()
+        ? env->CallStaticIntMethod(callback.characterType, callback.characterGetType, cp)
+        : 0;
 }
 int termcap(void* context, const std::uint16_t* name, std::size_t count, bool cursor, bool keypad, TerminalText* output) {
     auto& callback = *static_cast<Callbacks*>(context);
     auto env = callback.env;
     auto input = env->NewString(reinterpret_cast<const jchar*>(name), static_cast<jsize>(count));
     if (!input) return 1;
-    auto method = env->GetStaticMethodID(callback.type, "termcap", "(Ljava/lang/String;ZZ)Ljava/lang/String;");
-    auto result = method ? static_cast<jstring>(env->CallStaticObjectMethod(callback.type, method, input, cursor, keypad)) : nullptr;
+    if (callback.termcapMethod == nullptr && !env->ExceptionCheck()) {
+        callback.termcapMethod = env->GetStaticMethodID(callback.type, "termcap", "(Ljava/lang/String;ZZ)Ljava/lang/String;");
+    }
+    auto result = callback.termcapMethod && !env->ExceptionCheck()
+        ? static_cast<jstring>(env->CallStaticObjectMethod(callback.type, callback.termcapMethod, input, cursor, keypad))
+        : nullptr;
     env->DeleteLocalRef(input);
     if (result && !env->ExceptionCheck()) {
         const auto length = env->GetStringLength(result);

@@ -5,6 +5,7 @@ mod about;
 mod appearance;
 mod audio;
 mod capability;
+pub(super) mod controls;
 mod conversation;
 mod data;
 mod model;
@@ -43,7 +44,7 @@ impl Section {
             Self::Appearance => "外观",
             Self::Network => "网络与语音",
             Self::Data => "数据",
-            Self::Capability => "权限",
+            Self::Capability => "能力",
             Self::Tools => "工具",
             Self::Profile => "用户画像",
             Self::Performance => "性能",
@@ -63,6 +64,8 @@ pub(super) struct SettingsView {
     profile: profile::ProfileView,
     performance: performance::PerformanceView,
     tool_query: String,
+    tool_tab: u8,
+    pub(super) subagent_choosing_model: bool,
     new_header_name: String,
     new_header_value: String,
     onboarding_step: usize,
@@ -88,9 +91,17 @@ impl SettingsView {
 }
 
 impl RustApplication {
-    pub(super) fn open_chat_permissions(&mut self) {
-        if self.state.page == Page::Settings && !self.onboarding_blocks_navigation() {
-            self.settings_view.section = Section::Capability;
+    pub(super) fn settings_autosaves(&self) -> bool {
+        !matches!(
+            self.settings_view.section,
+            Section::Root | Section::Model | Section::Onboarding
+        )
+    }
+    pub(super) fn settings_title(&self) -> &'static str {
+        if self.settings_view.legacy_upgrade.is_some() {
+            "迁移旧版数据"
+        } else {
+            self.settings_view.section.title()
         }
     }
 
@@ -133,25 +144,20 @@ impl RustApplication {
             && self.state.capabilities.settings
             && !self.state.settings_pending
             && self.model_choice_pending.is_none();
-        ui.horizontal(|ui| {
-            if self.settings_view.section != Section::Root && ui.button("返回设置").clicked() {
-                if self.settings_view.section == Section::Onboarding {
-                    self.settings_finish_onboarding();
-                } else {
-                    self.settings_request_root();
-                }
-            }
-            ui.heading(self.settings_view.section.title());
-        });
         if !self.state.capabilities.settings {
             unavailable(ui, "设置存储尚未就绪");
         }
         let section = self.settings_view.section;
+        ui.spacing_mut().item_spacing.y = 0.0;
         let clean = editable && self.settings_draft == self.state.settings;
         let mut clear_target = None;
         egui::ScrollArea::vertical()
             .id_salt(("settings_section", section as usize))
-            .max_height((ui.available_height() - 75.0).max(80.0))
+            .max_height(if section == Section::Model {
+                (ui.available_height() - 64.0).max(80.0)
+            } else {
+                ui.available_height()
+            })
             .show(ui, |ui| match section {
                 Section::Root => self.settings_root(ui),
                 Section::Model => {
@@ -166,7 +172,6 @@ impl RustApplication {
                 }
                 Section::Subagent => {
                     ui.add_enabled_ui(editable, |ui| {
-                        ui.checkbox(&mut self.settings_draft.subagents_enabled, "启用子智能体");
                         self.subagent_settings(ui);
                     });
                 }
@@ -199,8 +204,7 @@ impl RustApplication {
                 Section::Onboarding => self.settings_onboarding(ui, editable, clean),
                 Section::About => self.settings_about(ui),
             });
-        ui.separator();
-        if section != Section::Onboarding {
+        if section == Section::Model {
             self.settings_save_bar(ui, editable);
         } else if self.state.settings_pending {
             ui.spinner();
@@ -223,8 +227,29 @@ impl RustApplication {
             }
         }
         self.settings_legacy_confirmation(ui);
+        if !matches!(
+            section,
+            Section::Root | Section::Model | Section::Onboarding
+        ) && editable
+            && self.settings_draft != self.state.settings
+            && !ui.input(|input| input.pointer.any_down())
+            && self.settings_view.pending.is_none()
+        {
+            self.settings_save_draft();
+        }
     }
     fn settings_root(&mut self, ui: &mut egui::Ui) {
+        if let Some(request) = self
+            .settings_view
+            .capability
+            .initial_request(self.runtime.is_some())
+        {
+            let operation = capability::operation(&request).clone();
+            if !self.dispatch(Action::Capability(request)) {
+                self.settings_view.capability.dispatch_failed(&operation);
+            }
+        }
+        let skin = mobile_chat::Skin::from_app(self, ui);
         let provider = self
             .state
             .settings
@@ -240,59 +265,150 @@ impl RustApplication {
         let model = provider
             .map(|provider| provider.selected_model.as_str())
             .unwrap_or(&self.state.settings.model);
-        ui.label(format!(
-            "当前模型：{}",
-            if model.is_empty() {
-                "尚未选择"
-            } else {
-                model
-            }
-        ));
-        ui.label(format!(
-            "运行会话：{} · 审批：{}",
-            self.state.runs.len(),
-            self.state.settings.approval_mode.label()
-        ));
-        for (group, rows) in [
+        let (tier, checks) = self.settings_view.capability.summary();
+        controls::card(ui, 16).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            let start = ui.cursor().min;
+            let width = ui.available_width();
+            let mut child = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(egui::Rect::from_min_size(
+                        start + egui::vec2(50.0, 0.0),
+                        egui::vec2(width - 128.0, 1000.0),
+                    ))
+                    .layout(egui::Layout::top_down(egui::Align::Min)),
+            );
+            child.spacing_mut().item_spacing.y = 0.0;
+            controls::text(&mut child, "当前能力", 18.0, 25.0, skin.text);
+            controls::description(&mut child, &checks);
+            let (header, _) = ui.allocate_exact_size(
+                egui::vec2(width, child.min_rect().height().max(38.0)),
+                egui::Sense::hover(),
+            );
+            let icon = egui::Rect::from_center_size(
+                header.left_center() + egui::vec2(19.0, 0.0),
+                egui::vec2(38.0, 38.0),
+            );
+            ui.painter()
+                .rect_filled(icon, 12, skin.accent.gamma_multiply(0.14));
+            self.mobile_icons.draw(
+                ui,
+                icon.center(),
+                20.0,
+                mobile_chat::Icon::ApprovalAsk,
+                skin.accent,
+            );
+            let badge = egui::Rect::from_center_size(
+                header.right_center() - egui::vec2(35.0, 0.0),
+                egui::vec2(70.0, 26.0),
+            );
+            ui.painter()
+                .rect_filled(badge, 13, skin.ink.gamma_multiply(0.15));
+            ui.painter()
+                .circle_filled(badge.left_center() + egui::vec2(13.0, 0.0), 3.0, skin.ink);
+            mobile_chat::single_line(
+                ui,
+                &tier,
+                egui::Rect::from_min_max(badge.min + egui::vec2(20.0, 0.0), badge.max),
+                skin.font(11.0),
+                skin.ink,
+            );
+            ui.add_space(8.0);
+            controls::description(
+                ui,
+                &if model.is_empty() {
+                    "模型：还没配置接口与密钥".into()
+                } else {
+                    format!("模型：{model}")
+                },
+            );
+        });
+        for (title, rows) in [
             (
                 "模型与对话",
-                vec![
-                    (Section::Model, "接口、模型与采样"),
-                    (Section::Conversation, "输入、运行、重试与显示"),
-                    (Section::Subagent, "模板、助手、模型与工具"),
-                    (Section::Appearance, "主题、配色与排版"),
-                ],
+                &[
+                    (Section::Model, None, "模型与生成", "接口、模型与采样"),
+                    (
+                        Section::Conversation,
+                        None,
+                        "对话配置",
+                        "输入、运行、失败重试与显示",
+                    ),
+                    (
+                        Section::Subagent,
+                        None,
+                        "子任务（Subagent）",
+                        "模板、助手、模型、工具与任务委派",
+                    ),
+                    (Section::Appearance, None, "外观", "主题、配色与排版"),
+                ][..],
             ),
             (
                 "能力与连接",
-                vec![
-                    (Section::Capability, "无障碍、Shizuku、Root与悬浮窗"),
-                    (Section::Tools, "工具、Skill与MCP管理"),
-                    (Section::Network, "搜索与语音服务"),
-                ],
+                &[
+                    (
+                        Section::Root,
+                        Some(Page::Automations),
+                        "UI自动化",
+                        "虚拟屏、预览与边缘光",
+                    ),
+                    (
+                        Section::Capability,
+                        None,
+                        "权限",
+                        "无障碍、Shizuku、root 与悬浮窗",
+                    ),
+                    (Section::Tools, None, "工具", "工具、Skill 与 MCP 的管理"),
+                    (
+                        Section::Network,
+                        None,
+                        "网络与语音",
+                        "搜索走哪里、回复读不读出来",
+                    ),
+                ][..],
             ),
             (
-                "数据与应用",
-                vec![
-                    (Section::Data, "记忆、助手、会话与文件"),
-                    (Section::Performance, "请求耗时与设备状态"),
-                    (Section::Onboarding, "供应商、模型与权限引导"),
-                    (Section::About, "版本、隐私与开源许可"),
-                ],
+                "数据与关于",
+                &[
+                    (Section::Data, None, "数据", "记忆、助手与会话文件"),
+                    (
+                        Section::Root,
+                        Some(Page::Usage),
+                        "用量",
+                        "tokens · 30 日柱状 · 按模型",
+                    ),
+                    (
+                        Section::Performance,
+                        None,
+                        "性能",
+                        "首字延迟 · 整轮耗时 · 缓存命中 · 输出速度",
+                    ),
+                    (
+                        Section::Onboarding,
+                        None,
+                        "新手引导",
+                        "再走一遍：供应商 · 模型 · 权限",
+                    ),
+                    (Section::About, None, "关于", "版本、隐私与开源许可"),
+                ][..],
             ),
         ] {
-            ui.separator();
-            ui.strong(group);
-            for (section, description) in rows {
-                let available =
-                    section != Section::Onboarding || self.settings_draft == self.state.settings;
-                if full_button(
-                    ui,
-                    format!("{}  ›\n{description}", section.title()),
-                    available,
-                )
-                .clicked()
-                {
+            controls::group_header(ui, title);
+            let mut target = None;
+            controls::card(ui, 0).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                for &(section, page, label, summary) in rows {
+                    ui.push_id(label, |ui| {
+                        if controls::link(ui, label, summary) {
+                            target = Some((section, page));
+                        }
+                    });
+                }
+            });
+            if let Some((section, page)) = target {
+                if let Some(page) = page {
+                    self.navigate(Navigation::Page(page), false);
+                } else {
                     self.settings_view.section = section;
                     if section == Section::Onboarding {
                         self.settings_view.onboarding_step = 0;
@@ -302,27 +418,37 @@ impl RustApplication {
                 }
             }
         }
-        ui.separator();
-        for (page, description) in [
-            (Page::Automations, "UI自动化 · 虚拟屏、预览与边缘光"),
-            (Page::Usage, "用量 · tokens与模型统计"),
-        ] {
-            if full_button(ui, description, true).clicked() {
-                self.navigate(Navigation::Page(page), false);
-            }
-        }
+        ui.add_space(24.0);
     }
     fn settings_model(&mut self, ui: &mut egui::Ui, can_clear: bool) -> Option<Target> {
-        self.provider_settings(ui);
-        ui.heading("默认连接");
-        text_field(
-            ui,
-            "接口地址",
-            &mut self.settings_draft.endpoint,
-            "https://…",
-            false,
-        );
+        let selected = self
+            .settings_draft
+            .active_provider_id
+            .as_ref()
+            .and_then(|id| {
+                self.settings_draft
+                    .providers
+                    .iter()
+                    .find(|provider| &provider.id == id)
+            });
+        let selected_label = selected.map_or("默认连接", |provider| provider.name.as_str());
+        egui::ComboBox::from_id_salt("active_provider")
+            .width(ui.available_width())
+            .selected_text(selected_label)
+            .show_ui(ui, |ui| {
+                let settings = &mut self.settings_draft;
+                ui.selectable_value(&mut settings.active_provider_id, None, "默认连接");
+                for provider in &settings.providers {
+                    ui.selectable_value(
+                        &mut settings.active_provider_id,
+                        Some(provider.id.clone()),
+                        &provider.name,
+                    );
+                }
+            });
+        controls::section(ui, "接口配置");
         egui::ComboBox::from_id_salt("settings_default_protocol")
+            .width(ui.available_width())
             .selected_text(self.settings_draft.protocol.label())
             .show_ui(ui, |ui| {
                 for protocol in Protocol::ALL {
@@ -333,13 +459,31 @@ impl RustApplication {
                     );
                 }
             });
-        text_field(
+        ui.add_space(12.0);
+        controls::field(
+            ui,
+            "默认接口地址",
+            &mut self.settings_draft.endpoint,
+            "https://api.deepseek.com/v1",
+            false,
+        );
+        ui.add_space(8.0);
+        controls::description(ui, "例如 https://api.deepseek.com/v1");
+        row(
+            ui,
+            &mut self.settings_draft.behavior.allow_insecure_tls,
+            "允许自签名证书",
+            "本机和局域网的自建 HTTPS 接口可使用此选项。",
+        );
+        controls::field(
             ui,
             "API Key",
             &mut self.settings_draft.api_key,
             "留空保留已存凭据",
             true,
         );
+        ui.add_space(8.0);
+        controls::description(ui, "Key 由系统 Keystore 加密后保存在这台手机上。");
         let mut clear = None;
         if ui
             .add_enabled(can_clear, egui::Button::new("清除已保存的默认 Key"))
@@ -347,11 +491,7 @@ impl RustApplication {
         {
             clear = Some(Target::ApiKey);
         }
-        ui.label(
-            RichText::new("Key由本机Keystore加密保存；清除请使用清除按钮。")
-                .small()
-                .weak(),
-        );
+        self.provider_settings(ui);
         model::context_and_behavior(ui, &mut self.settings_draft);
         ui.collapsing("采样参数", |ui| {
             model::sampling(ui, &mut self.settings_draft)
@@ -437,29 +577,37 @@ impl RustApplication {
     }
     fn settings_save_bar(&mut self, ui: &mut egui::Ui, editable: bool) {
         let dirty = self.settings_draft != self.state.settings;
-        ui.horizontal_wrapped(|ui| {
-            if ui
-                .add_enabled(editable && dirty, egui::Button::new("保存配置"))
-                .clicked()
-            {
-                self.settings_save_draft();
-            }
-            if ui
-                .add_enabled(editable && dirty, egui::Button::new("放弃修改"))
-                .clicked()
-            {
-                self.settings_discard_draft();
-            }
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
             if self.state.settings_pending {
                 ui.spinner();
-                ui.label("等待存储确认");
-            } else {
-                ui.label(if dirty {
+            }
+            controls::description(
+                ui,
+                if dirty {
                     "有未保存的修改"
                 } else {
                     "已保存"
-                });
-            }
+                },
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let accent = ui.visuals().hyperlink_color;
+                let save = egui::Button::new(RichText::new("保存").color(Color32::WHITE))
+                    .fill(accent)
+                    .min_size(egui::vec2(70.0, 44.0));
+                if ui.add_enabled(editable && dirty, save).clicked() {
+                    self.settings_save_draft();
+                }
+                if dirty
+                    && ui
+                        .add_enabled(editable, egui::Button::new("放弃修改"))
+                        .clicked()
+                {
+                    self.settings_discard_draft();
+                }
+            });
         });
     }
     pub(super) fn settings_save_draft(&mut self) {
@@ -470,8 +618,11 @@ impl RustApplication {
         self.settings_view.draft_stamp = self.state.settings_stamp.clone();
         self.settings_view.notice = None;
     }
-    pub(super) fn settings_show_root(&mut self) {
-        self.settings_view.section = Section::Root;
+    pub(super) fn settings_show_parent(&mut self) {
+        self.settings_view.section = match self.settings_view.section {
+            Section::Profile => Section::Data,
+            _ => Section::Root,
+        };
     }
     pub(super) fn settings_save_error(&self) -> Option<&str> {
         self.settings_view.notice.as_deref()
@@ -481,19 +632,26 @@ impl RustApplication {
             return false;
         }
         if self.settings_view.legacy_upgrade.is_some() {
-            return true;
+            if self.legacy_pending {
+                return true;
+            }
+            self.settings_view.legacy_upgrade = None;
+            self.settings_view.section = Section::Root;
+            return false;
         }
         if self.settings_view.onboarding_active && self.settings_view.section == Section::Onboarding
         {
             if self.settings_view.onboarding_step > 0 {
                 self.settings_view.onboarding_step -= 1;
-            } else {
-                self.settings_finish_onboarding();
+            } else if !self.state.settings_pending {
+                self.settings_view.onboarding_active = false;
+                self.settings_view.onboarding.reset();
+                self.settings_show_parent();
             }
             return true;
         }
         if self.settings_view.section != Section::Root {
-            self.settings_request_root();
+            self.settings_request_parent();
             return true;
         }
         false
@@ -660,37 +818,62 @@ impl RustApplication {
         });
     }
     fn settings_tools(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal_wrapped(|ui| {
-            for page in [Page::Skills, Page::Mcp, Page::Plugins] {
-                if ui.button(page.label()).clicked() {
-                    self.navigate(Navigation::Page(page), false);
-                }
+        controls::choices(
+            ui,
+            &mut self.settings_view.tool_tab,
+            &[(0, "工具"), (1, "技能"), (2, "MCP"), (3, "插件")],
+        );
+        ui.add_space(16.0);
+        match self.settings_view.tool_tab {
+            1 => {
+                self.skills(ui);
+                return;
             }
-        });
-        text_field(
+            2 => {
+                self.mcp(ui);
+                return;
+            }
+            3 => {
+                self.plugins(ui);
+                return;
+            }
+            _ => {}
+        }
+        controls::field(
             ui,
             "搜索工具名",
             &mut self.settings_view.tool_query,
-            "工具名称",
+            "",
             false,
         );
+        ui.add_space(8.0);
+        controls::description(ui, &format!("共 {} 个工具", self.state.tool_catalog.len()));
+        controls::description(
+            ui,
+            "全局工具默认不可修改：这里只能看名称、用途和它需要的权限。要按助手关掉某些工具，去那个助手的编辑页。",
+        );
         let query = self.settings_view.tool_query.trim().to_ascii_lowercase();
-        ui.label(format!("共 {} 个工具", self.state.tool_catalog.len()));
         for tool in &self.state.tool_catalog {
             if !query.is_empty() && !tool.name.to_ascii_lowercase().contains(&query) {
                 continue;
             }
-            egui::CollapsingHeader::new(&tool.name).show(ui, |ui| {
-                ui.add(egui::Label::new(&tool.description).wrap());
-                if let Ok(parameters) = serde_json::to_string_pretty(&tool.parameters) {
-                    ui.add(
-                        egui::Label::new(RichText::new(parameters).monospace())
-                            .wrap()
-                            .selectable(true),
-                    );
-                }
+            ui.add_space(12.0);
+            controls::card(ui, 16).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                controls::text(ui, &tool.name, 18.0, 25.0, ui.visuals().text_color());
+                controls::description(ui, &text_preview(&tool.description, 96));
+                ui.collapsing("参数", |ui| {
+                    if let Ok(parameters) = serde_json::to_string_pretty(&tool.parameters) {
+                        ui.add(
+                            egui::Label::new(RichText::new(parameters).monospace())
+                                .wrap()
+                                .selectable(true),
+                        );
+                    }
+                });
             });
         }
+        ui.add_space(24.0);
     }
     fn settings_profile(&mut self, ui: &mut egui::Ui, editable: bool) {
         let mut requests = Vec::new();
@@ -839,18 +1022,13 @@ impl RustApplication {
         self.settings_view
             .onboarding
             .tick(visible, &self.state.settings, ctx);
-        if visible
-            && ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
-        {
-            if self.settings_view.onboarding_step > 0 {
-                self.settings_view.onboarding_step -= 1;
-            } else {
-                self.settings_finish_onboarding();
-            }
-        }
     }
     fn settings_about(&mut self, ui: &mut egui::Ui) {
-        self.settings_view.about.show(ui, &self.backend);
+        self.settings_view.about.show(
+            ui,
+            self.mobile_icons.brand_texture(),
+            &mut self.bundled_assets,
+        );
     }
     pub(super) fn settings_about_tick(&mut self, ctx: &egui::Context) {
         self.settings_view.about.tick(
@@ -861,8 +1039,7 @@ impl RustApplication {
 }
 
 fn row(ui: &mut egui::Ui, value: &mut bool, title: &str, description: &str) {
-    ui.checkbox(value, title);
-    ui.label(RichText::new(description).small().weak());
+    controls::row(ui, value, title, description);
 }
 fn choices<T: Copy + PartialEq>(
     ui: &mut egui::Ui,
@@ -870,12 +1047,7 @@ fn choices<T: Copy + PartialEq>(
     value: &mut T,
     choices: &[(T, &str)],
 ) {
-    ui.horizontal_wrapped(|ui| {
-        ui.label(label);
-        for (choice, text) in choices {
-            ui.selectable_value(value, *choice, *text);
-        }
-    });
+    controls::choice_row(ui, label, "", value, choices);
 }
 fn integer_choices(ui: &mut egui::Ui, label: &str, value: &mut i32, choices: &[(i32, &str)]) {
     self::choices(ui, label, value, choices);

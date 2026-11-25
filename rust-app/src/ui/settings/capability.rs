@@ -1,5 +1,6 @@
 //! Rendering consumes actor snapshots. Every user action carries an exact key;
 //! opening a system settings screen never changes a displayed grant.
+use super::controls;
 use crate::{
     controller::capability_runtime::{Request, Snapshot, Update},
     platform::{
@@ -27,7 +28,6 @@ struct Pending {
     kind: PendingKind,
 }
 pub(super) struct CapabilityView {
-    generation: u64,
     initialized: bool,
     snapshot: Option<Arc<Snapshot>>,
     root_progress: Option<RootStatus>,
@@ -38,7 +38,6 @@ pub(super) struct CapabilityView {
 impl Default for CapabilityView {
     fn default() -> Self {
         Self {
-            generation: 1,
             initialized: false,
             snapshot: None,
             root_progress: None,
@@ -49,18 +48,55 @@ impl Default for CapabilityView {
     }
 }
 impl CapabilityView {
+    pub(super) fn initial_request(&mut self, ready: bool) -> Option<Request> {
+        if ready && !self.initialized && !self.busy(PendingKind::Refresh) {
+            self.initialized = true;
+            Some(Request::Refresh(self.key(PendingKind::Refresh)))
+        } else {
+            None
+        }
+    }
+    pub(super) fn summary(&self) -> (String, String) {
+        let Some(snapshot) = &self.snapshot else {
+            return (
+                "标准档".into(),
+                "无障碍 未检测 · Shizuku 未检测 · Root 未检测".into(),
+            );
+        };
+        let access = snapshot.routing.accessibility.connected;
+        let shizuku = snapshot.routing.shizuku.connected && snapshot.routing.shizuku.granted;
+        let root = snapshot.routing.root.phase == Phase::Ready;
+        (
+            if root {
+                "Root 档"
+            } else if shizuku {
+                "Shizuku 档"
+            } else if access {
+                "无障碍档"
+            } else {
+                "标准档"
+            }
+            .into(),
+            format!(
+                "无障碍 {} · Shizuku {} · Root {}",
+                if access { "已开" } else { "未开" },
+                if shizuku { "已连" } else { "未连" },
+                if root { "已就绪" } else { "未检测" }
+            ),
+        )
+    }
     pub(super) fn disconnected(&mut self) {
         self.pending.clear();
         self.initialized = false;
         self.snapshot = None;
         self.root_progress = None;
-        self.generation = self.generation.saturating_add(1);
+        self.notice = None;
     }
     fn key(&mut self, kind: PendingKind) -> OperationKey {
         let operation = OperationKey {
             id: crate::controller::unique_id(),
             conversation_id: None,
-            generation: self.generation,
+            generation: 1,
         };
         self.pending.insert(
             operation.id.clone(),
@@ -118,6 +154,7 @@ impl CapabilityView {
                     self.initialized = true;
                     self.preference = snapshot.routing.preference;
                     self.snapshot = Some(snapshot);
+                    self.notice = None;
                 }
             }
             Update::RootStatus { operation, status } => {
@@ -223,65 +260,75 @@ impl CapabilityView {
         settings_clean: bool,
     ) -> Vec<Request> {
         let mut requests = Vec::new();
-        if ready && !self.initialized && !self.busy(PendingKind::Refresh) {
-            // Initial refresh is attempted once. Failure needs explicit retry.
-            self.initialized = true;
-            let key = self.key(PendingKind::Refresh);
-            requests.push(Request::Refresh(key));
+        if let Some(request) = self.initial_request(ready) {
+            requests.push(request);
         }
         let snapshot = self.snapshot.clone();
-        ui.heading("权限与执行方式");
+        let (tier, status) = self.summary();
+        let accent = ui.visuals().hyperlink_color;
+        let background = crate::ui::mobile_chat::mix(ui.visuals().window_fill, accent, 0.15);
+        controls::card(ui, 16).fill(background).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            controls::description(ui, "当前能力");
+            controls::text(ui, &tier, 24.0, 32.0, ui.visuals().text_color());
+            ui.add_space(8.0);
+            controls::description(ui, &status);
+        });
+        ui.add_space(12.0);
         if let Some(message) = &self.notice {
             ui.add(egui::Label::new(message).wrap());
         }
-        if ui
-            .add_enabled(
-                ready && !self.busy(PendingKind::Refresh),
-                egui::Button::new("刷新能力状态"),
-            )
-            .clicked()
-        {
-            requests.push(Request::Refresh(self.key(PendingKind::Refresh)));
-        }
-        let selectable = ready && settings_clean && !self.busy(PendingKind::Preference);
-        ui.add_enabled_ui(selectable, |ui| {
-            super::choices(
-                ui,
-                "执行方式",
-                &mut self.preference,
-                &[
-                    (Preference::Automatic, "自动"),
-                    (Preference::AppUid, "仅应用权限"),
-                    (Preference::Accessibility, "无障碍"),
-                    (Preference::Shizuku, "Shizuku"),
-                    (Preference::Root, "Root"),
-                ],
+        controls::card(ui, 16).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            if ui
+                .add_enabled(
+                    ready && !self.busy(PendingKind::Refresh),
+                    egui::Button::new("刷新能力状态"),
+                )
+                .clicked()
+            {
+                requests.push(Request::Refresh(self.key(PendingKind::Refresh)));
+            }
+            let selectable = ready && settings_clean && !self.busy(PendingKind::Preference);
+            ui.add_enabled_ui(selectable, |ui| {
+                super::choices(
+                    ui,
+                    "执行方式",
+                    &mut self.preference,
+                    &[
+                        (Preference::Automatic, "自动"),
+                        (Preference::AppUid, "仅应用权限"),
+                        (Preference::Accessibility, "无障碍"),
+                        (Preference::Shizuku, "Shizuku"),
+                        (Preference::Root, "Root"),
+                    ],
+                );
+            });
+            let saved = snapshot.as_ref().map_or(Preference::Automatic, |snapshot| {
+                snapshot.routing.preference
+            });
+            if ui
+                .add_enabled(
+                    selectable && self.preference != saved,
+                    egui::Button::new("保存执行方式"),
+                )
+                .clicked()
+            {
+                let operation = self.key(PendingKind::Preference);
+                requests.push(Request::SelectPreference {
+                    operation,
+                    preference: self.preference,
+                });
+            }
+            if !settings_clean {
+                ui.label("请先保存或放弃其它设置修改，再单独调整执行方式。");
+            }
+            ui.label(
+                RichText::new("执行方式限定可用权限；保存Root偏好不会触发检测或授权。")
+                    .small()
+                    .weak(),
             );
         });
-        let saved = snapshot.as_ref().map_or(Preference::Automatic, |snapshot| {
-            snapshot.routing.preference
-        });
-        if ui
-            .add_enabled(
-                selectable && self.preference != saved,
-                egui::Button::new("保存执行方式"),
-            )
-            .clicked()
-        {
-            let operation = self.key(PendingKind::Preference);
-            requests.push(Request::SelectPreference {
-                operation,
-                preference: self.preference,
-            });
-        }
-        if !settings_clean {
-            ui.label("请先保存或放弃其它设置修改，再单独调整执行方式。");
-        }
-        ui.label(
-            RichText::new("执行方式限定可用权限；保存Root偏好不会触发检测或授权。")
-                .small()
-                .weak(),
-        );
         let Some(snapshot) = snapshot else {
             ui.label("能力状态尚未读取");
             return requests;
@@ -294,9 +341,9 @@ impl CapabilityView {
                 Route::Root { .. } => "Root",
             }
         ));
-        ui.separator();
+        controls::section(ui, "执行权限");
         let android = ready && snapshot.routing.android;
-        ui.heading("无障碍");
+        controls::section(ui, "无障碍");
         ui.label(if snapshot.routing.accessibility.connected {
             "已连接"
         } else {
@@ -309,7 +356,7 @@ impl CapabilityView {
             Page::Accessibility,
             &mut requests,
         );
-        ui.heading("Shizuku（ADB级）");
+        controls::section(ui, "Shizuku（ADB级）");
         ui.label(
             if snapshot.routing.shizuku.connected && snapshot.routing.shizuku.granted {
                 "服务已连接且已授权"
@@ -331,7 +378,7 @@ impl CapabilityView {
         {
             requests.push(Request::ShizukuPermission(self.key(PendingKind::Shizuku)));
         }
-        ui.heading("Root");
+        controls::section(ui, "Root");
         let root = self
             .root_progress
             .as_ref()
@@ -374,15 +421,14 @@ impl CapabilityView {
                 requests.push(Request::Cancel(operation));
             }
         }
-        ui.separator();
-        ui.heading("悬浮窗控制台");
+        controls::section(ui, "悬浮窗控制台");
         ui.label(if snapshot.overlay_allowed {
             "系统已授权"
         } else {
             "系统未授权"
         });
         self.settings_button(ui, android, "打开悬浮窗设置", Page::Overlay, &mut requests);
-        ui.heading("后台运行");
+        controls::section(ui, "后台运行");
         ui.label(if snapshot.battery_optimization_exempt {
             "已豁免电池优化"
         } else {
@@ -395,7 +441,7 @@ impl CapabilityView {
             Page::BatteryOptimization,
             &mut requests,
         );
-        ui.heading("文件访问");
+        controls::section(ui, "文件访问");
         let sdk = snapshot.routing.accessibility.sdk_int;
         if sdk >= 30 {
             ui.label(if snapshot.all_files_access {
@@ -428,7 +474,7 @@ impl CapabilityView {
                 &mut requests,
             );
         }
-        ui.heading("通知、麦克风与局域网");
+        controls::section(ui, "通知、麦克风与局域网");
         for (kind, label) in [
             (PermissionKind::Notifications, "通知"),
             (PermissionKind::Microphone, "麦克风"),

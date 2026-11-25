@@ -178,28 +178,6 @@ internal fun GenerationSheet(
     onOpenSettings: () -> Unit,
     onDismiss: () -> Unit,
 ) {
-    val scheme = MaterialTheme.colorScheme
-    val assistant = assistantId?.let { settings.assistant(it) } ?: settings.activeAssistant()
-    // One chain for the whole screen — this conversation's pick, then the persona's pins,
-    // then the app-wide default — so the header, the tick and the request all agree.
-    val choice = settings.choiceFor(conversationProviderId, conversationModel)
-    // The endpoint the choice lands on; a conversation that never picked falls through to
-    // the base url the app is talking to, and a provider with anything enabled is the last
-    // witness. Null only when there is genuinely nothing configured.
-    val provider = settings.providers.firstOrNull { it.id == choice.providerId }
-        ?: settings.providers.firstOrNull {
-            it.baseUrl.trimEnd('/') == choice.baseUrl.trimEnd('/')
-        }
-        ?: settings.providers.firstOrNull { it.enabled.isNotEmpty() }
-    val wire = reasoningWire(settings, provider, conversationReasoningEffort)
-    val levelIndex = REASONING_LEVELS.indexOfFirst { it.first == wire }.coerceAtLeast(0)
-    // Every endpoint with ticked models can offer one: this picker is the only place to
-    // switch endpoints without a detour through settings, so it lists them all instead
-    // of only the endpoint the assistant happens to point at. Inside one endpoint the
-    // ids split by upstream vendor (an aggregating proxy prefixes them).
-    val offers = remember(IdentityKey(settings.providers), choice.model, choice.providerId) {
-        modelOffers(settings.providers, choice.model, provider)
-    }
     val density = LocalDensity.current
     val windowWidth = LocalConfiguration.current.screenWidthDp.dp
     // Which page the sheet is on: the light one — the model that will answer and how hard it
@@ -219,13 +197,8 @@ internal fun GenerationSheet(
             picking = false
         }
     }
-    // Providers whose list is folded away. The one answering this conversation starts open:
-    // the list is what the page is for, and folding everything would hide it.
-    val groupedOffers = remember(offers) { offers.associate { (owner, ids) -> owner.id to groupModels(ids) } }
+    // Folded state lives outside MenuCard so collapsing an endpoint survives closing the sheet.
     val folded = remember { mutableStateMapOf<String, Boolean>() }
-    val modelLabel = provider?.displayModel(choice.model)
-        ?.takeIf { it != choice.model }
-        ?: choice.model.substringAfter('/').ifBlank { "选模型" }
     // provider 提到组合外 remember（几何只依赖 density）。
     val modelCardProvider = remember(density) {
         object : PopupPositionProvider {
@@ -271,6 +244,62 @@ internal fun GenerationSheet(
             .widthIn(max = popupCap(if (picking) 340.dp else 300.dp, windowWidth)),
         compactMotion = true,
     ) {
+        GenerationSheetContent(
+            settings = settings,
+            conversationProviderId = conversationProviderId,
+            conversationModel = conversationModel,
+            conversationReasoningEffort = conversationReasoningEffort,
+            picking = picking,
+            onPickingChange = { picking = it },
+            folded = folded,
+            onChooseReasoning = onChooseReasoning,
+            onPickModel = onPickModel,
+            onOpenSettings = onOpenSettings,
+        )
+    }
+}
+
+@Composable
+private fun GenerationSheetContent(
+    settings: AppSettings,
+    conversationProviderId: String?,
+    conversationModel: String?,
+    conversationReasoningEffort: String?,
+    picking: Boolean,
+    onPickingChange: (Boolean) -> Unit,
+    folded: MutableMap<String, Boolean>,
+    onChooseReasoning: (String) -> Unit,
+    onPickModel: (ProviderConfig, String) -> Unit,
+    onOpenSettings: () -> Unit,
+) {
+    val scheme = MaterialTheme.colorScheme
+    // One chain for the whole screen — this conversation's pick, then the persona's pins,
+    // then the app-wide default — so the header, the tick and the request all agree.
+    val choice = settings.choiceFor(conversationProviderId, conversationModel)
+    // The endpoint the choice lands on; a conversation that never picked falls through to
+    // the base url the app is talking to, and a provider with anything enabled is the last
+    // witness. Null only when there is genuinely nothing configured.
+    val provider = settings.providers.firstOrNull { it.id == choice.providerId }
+        ?: settings.providers.firstOrNull {
+            it.baseUrl.trimEnd('/') == choice.baseUrl.trimEnd('/')
+        }
+        ?: settings.providers.firstOrNull { it.enabled.isNotEmpty() }
+    val wire = reasoningWire(settings, provider, conversationReasoningEffort)
+    val levelIndex = REASONING_LEVELS.indexOfFirst { it.first == wire }.coerceAtLeast(0)
+    // Every endpoint with ticked models can offer one: this picker is the only place to
+    // switch endpoints without a detour through settings, so it lists them all instead
+    // of only the endpoint the assistant happens to point at. Inside one endpoint the
+    // ids split by upstream vendor (an aggregating proxy prefixes them).
+    val offers = remember(IdentityKey(settings.providers), choice.model, choice.providerId) {
+        modelOffers(settings.providers, choice.model, provider)
+    }
+    // Providers whose list is folded away. The one answering this conversation starts open:
+    // the list is what the page is for, and folding everything would hide it.
+    val groupedOffers = remember(offers) { offers.associate { (owner, ids) -> owner.id to groupModels(ids) } }
+    val modelLabel = provider?.displayModel(choice.model)
+        ?.takeIf { it != choice.model }
+        ?: choice.model.substringAfter('/').ifBlank { "选模型" }
+
         if (!picking) {
             // Page one: one big name to tap, one slider to drag, nothing else.
             //
@@ -290,7 +319,7 @@ internal fun GenerationSheet(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clip(MaterialTheme.shapes.small)
-                    .menuRippleClickable { picking = true }
+                    .menuRippleClickable { onPickingChange(true) }
                     .padding(vertical = 2.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
@@ -337,7 +366,7 @@ internal fun GenerationSheet(
             // Page two: every endpoint's models, the one that answers this conversation first
             // and already open.
             Row(verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = { picking = false }, modifier = Modifier.size(28.dp)) {
+                IconButton(onClick = { onPickingChange(false) }, modifier = Modifier.size(28.dp)) {
                     Icon(
                         imageVector = ImageVector.vectorResource(R.drawable.ic_arrow_left),
                         contentDescription = "返回",
@@ -480,7 +509,6 @@ internal fun GenerationSheet(
                 }
             }
         }
-    }
 }
 
 /**

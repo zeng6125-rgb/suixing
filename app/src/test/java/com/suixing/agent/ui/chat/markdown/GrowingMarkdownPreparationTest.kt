@@ -44,6 +44,17 @@ class GrowingMarkdownPreparationTest {
         }
     }
 
+    @Test fun shortColdSettledTextParsesSynchronouslyOnFirstComposition() = runBlocking {
+        withTimeout(5_000) {
+            val text = "7. Short **reasoning** line `ok`"
+            val harness = Harness(this, text).apply { settled.value = true; retainParser.value = false }
+            try {
+                harness.start()
+                assertEquals(parseMarkdown(text), harness.output)
+            } finally { harness.close() }
+        }
+    }
+
     @Test fun coldSettledTextParsesAfterCompositionAndReusesTheCompletedResultOnRemount() = runBlocking {
         withTimeout(5_000) {
             val text = "cold settled heading\n\n```kt\n" + "val cold = 7\n".repeat(100) + "```\n\ncomplete"

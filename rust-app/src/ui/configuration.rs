@@ -283,28 +283,17 @@ impl RustApplication {
     }
 
     pub(super) fn provider_settings(&mut self, ui: &mut egui::Ui) {
-        ui.heading("供应商与模型");
+        super::settings::controls::section(ui, "模型列表");
         let can_fetch = self.model_fetch_id.is_none() && self.settings_draft == self.state.settings;
         let mut fetch = None;
         let settings = &mut self.settings_draft;
-        let selected = settings
-            .active_provider_id
-            .as_ref()
-            .and_then(|id| settings.providers.iter().find(|item| &item.id == id))
-            .map(|item| item.name.as_str())
-            .unwrap_or("默认连接");
-        egui::ComboBox::from_id_salt("active_provider")
-            .selected_text(selected)
-            .show_ui(ui, |ui| {
-                ui.selectable_value(&mut settings.active_provider_id, None, "默认连接");
-                for provider in &settings.providers {
-                    ui.selectable_value(
-                        &mut settings.active_provider_id,
-                        Some(provider.id.clone()),
-                        &provider.name,
-                    );
-                }
-            });
+        if ui
+            .add_enabled(can_fetch, egui::Button::new("获取默认连接模型列表"))
+            .clicked()
+        {
+            fetch = Some(None);
+        }
+        super::settings::controls::section(ui, "供应商");
         let mut delete = None;
         for (index, provider) in settings.providers.iter_mut().enumerate() {
             egui::CollapsingHeader::new(&provider.name)
@@ -557,8 +546,7 @@ impl RustApplication {
                 ..Default::default()
             });
         }
-        ui.separator();
-        ui.label("默认连接模型列表");
+        super::settings::controls::section(ui, "默认连接模型");
         let draft_id = egui::Id::unique("default_new_model");
         let mut candidate = ui
             .ctx()
@@ -634,12 +622,6 @@ impl RustApplication {
                     }
                 }
             }
-        }
-        if ui
-            .add_enabled(can_fetch, egui::Button::new("获取默认连接模型列表"))
-            .clicked()
-        {
-            fetch = Some(None);
         }
         ui.label(
             RichText::new("供应商、模型及选择在本页底部保存。API Key 由本机 Keystore 加密持久化。")

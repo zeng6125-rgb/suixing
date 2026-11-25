@@ -8,6 +8,17 @@ import org.junit.Test
 /** issue #73：先横后竖仍须停跟，且两个 one-shot 标记每次手势各最多触发一次。 */
 class DragGestureStateTest {
 
+    @Test
+    fun `diagonal drag that scrolls the transcript cancels follow on release`() {
+        val state = DragGestureState()
+        val intent = dragIntent(-690f, 510f)
+        assertTrue(state.markMoved(intent, pressed = true))
+        assertFalse(state.markFollowCancelled(intent, pressed = true))
+        assertFalse(state.markFollowCancelled(intent, pressed = false, transcriptMoved = false))
+        assertTrue(state.markFollowCancelled(intent, pressed = false, transcriptMoved = true))
+        assertFalse(state.markFollowCancelled(intent, pressed = false, transcriptMoved = true))
+    }
+
     private class Gesture {
         val state = DragGestureState()
         var movedEffects = 0

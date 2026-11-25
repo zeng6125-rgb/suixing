@@ -210,6 +210,7 @@ fun ToolsScreen(onBack: () -> Unit) {
                             PageTopBarAction(
                                 icon = ImageVector.vectorResource(if (tab == 1) R.drawable.ic_download else R.drawable.ic_plus),
                                 contentDescription = if (tab == 1) "导入技能" else "添加服务器",
+                                glyphSize = if (tab == 1) 20.dp else 22.dp,
                                 onClick = {
                                     if (tab == 1) {
                                         skillImportMenu = true

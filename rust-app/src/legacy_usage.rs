@@ -126,18 +126,8 @@ fn from_documents(
                 }
             }
             LegacyDocumentKind::DeletedUsage => {
-                let value = object(&document.value)?;
-                let id = value
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .ok_or("旧删除用量缺少id")?;
-                let mut chat = chat(id, value.get("usage").ok_or("旧删除用量缺少usage")?, true)?;
-                chat.zone_id = value
-                    .get("zoneId")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .into();
-                if deleted.insert(id.to_owned(), chat).is_some() {
+                let chat = deleted_chat(&document.value)?;
+                if deleted.insert(chat.id.clone(), chat).is_some() {
                     return Err("旧删除用量来源重复".into());
                 }
             }
@@ -161,7 +151,22 @@ fn from_documents(
     validate(&result)?;
     Ok(result)
 }
-fn chat(id: &str, value: &Value, deleted: bool) -> Result<LegacyChat, String> {
+pub(crate) fn deleted_chat(value: &Value) -> Result<LegacyChat, String> {
+    let fields = object(value)?;
+    let id = fields
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or("删除用量缺少 ID")?;
+    let mut entry = chat(id, fields.get("usage").ok_or("删除用量缺少统计")?, true)?;
+    entry.zone_id = fields
+        .get("zoneId")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .into();
+    Ok(entry)
+}
+
+pub(crate) fn chat(id: &str, value: &Value, deleted: bool) -> Result<LegacyChat, String> {
     if id.is_empty() || id.len() > 512 || id.contains('\0') {
         return Err("旧用量chat身份无效".into());
     }
@@ -364,6 +369,7 @@ pub struct Filter {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Report {
     pub source_fingerprint: String,
+    pub shared_sources: bool,
     pub legacy_zone_id: String,
     pub request_zone_id: String,
     pub legacy_window: Totals,
@@ -417,6 +423,7 @@ pub fn report(
     }
     let mut result = Report {
         source_fingerprint: legacy.source_fingerprint.clone(),
+        shared_sources: legacy.source_fingerprint.is_empty() && legacy.schema_version == 3,
         legacy_zone_id: legacy.zone_id.clone(),
         request_zone_id: request_zone.into(),
         legacy_window: Totals::default(),
@@ -581,7 +588,7 @@ pub fn report(
         if legacy_ids.contains(&record.conversation_id) {
             result
                 .warnings
-                .push("同一来源存在旧汇总及真实请求，跨表是否重叠未证明；两组总计独立展示".into());
+                .push("会话汇总与请求账本可能记录同一次请求，两组总计分别展示。".into());
         }
     }
     result.warnings.sort();
@@ -616,7 +623,7 @@ pub fn report(
 }
 pub fn validate(document: &LegacyDocument) -> Result<(), String> {
     if document.version != 1
-        || !(document.source_fingerprint.is_empty() && document.chats.is_empty()
+        || !(document.source_fingerprint.is_empty()
             || document.source_fingerprint.len() == 64
                 && document
                     .source_fingerprint
@@ -762,7 +769,7 @@ pub fn rebuild_live(
     *document = next;
     Ok(())
 }
-fn rebuild_source(
+pub(crate) fn rebuild_source(
     document: &mut LegacyDocument,
     id: &str,
     messages: &[Value],

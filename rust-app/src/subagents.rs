@@ -579,7 +579,10 @@ impl Pool {
                 complete: true,
                 tool_calls: Vec::new(),
                 tool_call_id: None,
-                metadata: Default::default(),
+                metadata: crate::chat::MessageMetadata {
+                    timestamp: crate::controller::now_millis(),
+                    ..Default::default()
+                },
             }],
             detail: String::new(),
             usage: Vec::new(),

@@ -2,8 +2,12 @@ package com.suixing.agent.data
 
 import java.io.File
 import java.io.RandomAccessFile
+import java.nio.file.Files
+import java.nio.file.attribute.FileTime
+import java.time.Instant
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assume.assumeTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
@@ -76,5 +80,25 @@ class ChatStoreSnapshotTest {
         assertNull(store.committedRead("chat"))
         assertEquals(next, store.readMeta("chat"))
         store.committedRead("chat")!!.use { assertEquals(next, it.meta) }
+    }
+
+    @Test fun `same size rewrite in the same millisecond invalidates both metadata caches`() {
+        val before = seed(2)
+        val path = File(folder.root, "$STORE_DIR/chat$META_SUFFIX").toPath()
+        Files.setLastModifiedTime(path, FileTime.from(Instant.ofEpochSecond(1_700_000_000, 100_000)))
+        val originalSize = Files.size(path)
+        val observedTime = Files.getLastModifiedTime(path)
+        assertEquals(before, store.readMeta("chat"))
+
+        val replacement = before.copy(title = "next")
+        ChatStore(folder.root).writeMeta(replacement)
+        Files.setLastModifiedTime(path, FileTime.from(Instant.ofEpochSecond(1_700_000_000, 500_000)))
+        val changedTime = Files.getLastModifiedTime(path)
+        assumeTrue("Filesystem stores sub-millisecond times", changedTime != observedTime)
+        assertEquals(observedTime.toMillis(), changedTime.toMillis())
+        assertEquals(originalSize, Files.size(path))
+        assertNull(store.committedRead("chat"))
+        assertEquals(replacement, store.readMeta("chat"))
+        store.committedRead("chat")!!.use { assertEquals(replacement, it.meta) }
     }
 }

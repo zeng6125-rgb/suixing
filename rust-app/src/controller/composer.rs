@@ -994,7 +994,7 @@ fn admit_submission(
             crate::goal::Slash::Read => {
                 if conversation
                     .as_deref()
-                    .is_none_or(|id| store.goal().chat_id == id)
+                    .is_none_or(|id| store.goal().chat_id.is_empty() || store.goal().chat_id == id)
                 {
                     publish.emit(Event::Goal(store.goal().clone()));
                 } else {
@@ -1012,7 +1012,7 @@ fn admit_submission(
             crate::goal::Slash::Clear => {
                 if conversation
                     .as_deref()
-                    .is_some_and(|id| store.goal().chat_id != id)
+                    .is_some_and(|id| !store.goal().chat_id.is_empty() && store.goal().chat_id != id)
                 {
                     return Err("目标属于其它会话".into());
                 }
@@ -1032,7 +1032,7 @@ fn admit_submission(
                 return Ok(());
             }
             crate::goal::Slash::Resume => {
-                if conversation.as_deref() != Some(store.goal().chat_id.as_str()) {
+                if !store.goal().visible_in(conversation.as_deref()) {
                     return Err("继续目标需要原会话".into());
                 }
                 input.text = "继续完成已保存的目标".into();

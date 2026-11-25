@@ -488,6 +488,7 @@ mod device {
         control: &Arc<Control>,
     ) -> Result<Vec<AttachmentDraft>, String> {
         let workspace = workspace_root(workspace)?;
+        let stamp = crate::controller::unique_id();
         if kind == AttachmentKind::Camera {
             let bitmap = android::invoke(|env| {
                 let key = env.new_string("data")?;
@@ -510,7 +511,7 @@ mod device {
             })?;
             let (base64, preview, bytes) = image_from_bitmap(&bitmap)?;
             check(control)?;
-            let path = PathBuf::from(format!("inbox/{code}-camera.jpg"));
+            let path = PathBuf::from(format!("inbox/{stamp}-{code}-camera.jpg"));
             publish_bytes(&workspace, &path, &bytes)?;
             return Ok(vec![draft(
                 code,
@@ -601,9 +602,9 @@ mod device {
             })?;
             let (name, mime) = uri_metadata(uri, control)?;
             let path = if matches!(kind, AttachmentKind::Images | AttachmentKind::Avatar) {
-                PathBuf::from(format!("inbox/.source-{code}-{index}"))
+                PathBuf::from(format!("inbox/.source-{stamp}-{code}-{index}"))
             } else {
-                PathBuf::from(format!("inbox/{code}-{index}-{}", safe_name(&name)))
+                PathBuf::from(format!("inbox/{stamp}-{code}-{index}-{}", safe_name(&name)))
             };
             let maximum = if matches!(kind, AttachmentKind::Images | AttachmentKind::Avatar) {
                 MAX_IMAGE_SOURCE
@@ -641,9 +642,9 @@ mod device {
                 let _ = fs::remove_file(workspace.join(&path));
                 let (base64, preview, jpeg) = decoded?;
                 let image_path = PathBuf::from(if kind == AttachmentKind::Avatar {
-                    format!("inbox/{code}-{index}-avatar.png")
+                    format!("inbox/{stamp}-{code}-{index}-avatar.png")
                 } else {
-                    format!("inbox/{code}-{index}-image.jpg")
+                    format!("inbox/{stamp}-{code}-{index}-image.jpg")
                 });
                 check(control)?;
                 publish_bytes(&workspace, &image_path, &jpeg)?;
@@ -920,12 +921,7 @@ mod device {
         *control.signal.lock().unwrap_or_else(|e| e.into_inner()) = None;
         result?;
         check(control)?;
-        fs::hard_link(&temporary, workspace.join(path))
-            .map_err(|_| "附件目标已存在或无法发布，未覆盖已有文件")?;
-        fs::remove_file(&temporary).map_err(|_| "附件已发布但临时文件清理失败")?;
-        fs::File::open(workspace.join("inbox"))
-            .and_then(|directory| directory.sync_all())
-            .map_err(|_| "附件已发布但目录同步未确认")?;
+        publish(workspace, path, &temporary)?;
         Ok((length, format!("{:x}", digest.finalize())))
     }
     fn workspace_root(workspace: &Path) -> Result<PathBuf, String> {
@@ -961,11 +957,19 @@ mod device {
         file.write_all(bytes)
             .and_then(|_| file.sync_all())
             .map_err(|_| "图片同步失败")?;
-        fs::hard_link(&temporary, root.join(path)).map_err(|_| "图片目标已存在，未覆盖")?;
-        fs::remove_file(temporary).map_err(|_| "图片已发布但暂存清理失败")?;
+        publish(root, path, &temporary)
+    }
+    fn publish(root: &Path, path: &Path, temporary: &Path) -> Result<(), String> {
+        let target = root.join(path);
+        // Each import has a fresh name. A same-directory rename also works on
+        // emulated Android storage, which does not support hard links.
+        if fs::symlink_metadata(&target).is_ok() {
+            return Err("附件目标已存在，未覆盖".into());
+        }
+        fs::rename(temporary, target).map_err(|_| "附件无法发布")?;
         fs::File::open(root.join("inbox"))
             .and_then(|d| d.sync_all())
-            .map_err(|_| "图片目录同步未确认".to_string())
+            .map_err(|_| "附件目录同步未确认".to_string())
     }
     fn check(control: &Control) -> Result<(), String> {
         if control.cancelled.load(Ordering::Acquire) {

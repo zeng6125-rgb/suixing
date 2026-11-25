@@ -38,6 +38,22 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 
 class InlineTextPreparationTest {
+    @Test fun shortSettledLinesRenderSynchronouslyOnFirstComposition() = runBlocking {
+        withTimeout(15_000) {
+            for (source in listOf(
+                "Plain thinking line with no markup",
+                "Short **formatted** reasoning with `code` and /sdcard/a.txt",
+            )) {
+                val harness = Harness(this, source, observeScanner = false)
+                try {
+                    harness.start()
+                    assertEquals(harness.reference(source).text, harness.output?.text)
+                    assertEquals(harness.reference(source).spanStyles, harness.output?.spanStyles)
+                } finally { harness.close() }
+            }
+        }
+    }
+
     @Test fun aColdFormattedParagraphDoesNotScanOnTheCompositionThread() = runBlocking {
         withTimeout(15_000) {
             val source = "cold **formatted paragraph** " + "read [docs](https://example.test) ".repeat(80)

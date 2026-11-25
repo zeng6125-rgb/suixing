@@ -47,6 +47,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.MotionDurationScale
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
@@ -193,7 +196,7 @@ internal data class ScrubberTickStyle(
     val color: Color,
 )
 
-/** Independent reads keep colour animation from invalidating the tick's transform. */
+/** Tick values are read by drawing, so they do not invalidate layout or composition. */
 internal class ScrubberTickAnimation(
     val width: State<Float>,
     val height: State<Float>,
@@ -219,16 +222,11 @@ internal fun scrubberTickStyle(
             target.height, spring(dampingRatio = 0.9f, stiffness = 900f), label = "turn_height")
         val animatedColor = animateColorAsState(
             target.color, tween(120, easing = SCRUBBER_EASING), label = "turn_color")
-        // Read only dimensions in graphicsLayer and colour in drawBehind. Avoid a
-        // combined derived value that allocates and invalidates both on every frame.
         remember(animatedWidth, animatedHeight, animatedColor) {
             ScrubberTickAnimation(animatedWidth, animatedHeight, animatedColor)
         }
     }
 }
-
-/** 滚动条刻度（列表里每行一个，原来每次重组都 new）。 */
-private val ScrubTickShape = RoundedCornerShape(1.dp)
 
 /** 滚动条标签卡圆角。 */
 private val ScrubLabelShape = RoundedCornerShape(8.dp)
@@ -250,7 +248,7 @@ private class ScrubberScales(private val scope: CoroutineScope) {
      */
     private val scratch = ArrayList<Int>(16)
 
-    /** Called from graphicsLayer: neither map changes nor frames subscribe composition. */
+    /** Read from drawing so selection and animation frames do not invalidate composition. */
     fun value(turn: Int): Float = entries[turn]?.animation?.value ?: 1f
 
     fun update(visible: IntRange, chosen: Int?, pressed: Int?) {
@@ -670,25 +668,19 @@ internal fun TurnScrubber(
                 val targetStyle = ScrubberTickStyle(targetWidth, targetHeight, targetColor)
                 val tickStyle = scrubberTickStyle(conversationId, targetStyle, settling)
                 Box(
-                    modifier = Modifier.width(SCRUBBER_RAIL).height(SCRUBBER_ROW),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Box(
-                        Modifier
-                            // A centred fixed drawing surface keeps both ends balanced while
-                            // visual widths animate, without changing the rail's hit geometry.
-                            .width(20.dp)
-                            .height(3.dp)
-                            .graphicsLayer {
-                                val scale = rowScales.value(turn)
-                                scaleX = minOf(tickStyle.width.value * scale, SCRUBBER_RAIL.value) / 20f
-                                scaleY = tickStyle.height.value / 3f * scale
-                                transformOrigin = TransformOrigin.Center
-                            }
-                            .clip(ScrubTickShape)
-                            .drawBehind { drawRect(tickStyle.color.value) },
-                    )
-                }
+                    Modifier.width(SCRUBBER_RAIL).height(SCRUBBER_ROW).drawBehind {
+                        val scale = rowScales.value(turn)
+                        val width = (tickStyle.width.value * scale).dp.toPx().coerceIn(0f, size.width)
+                        val height = (tickStyle.height.value * scale).dp.toPx().coerceAtLeast(0f)
+                        // Keep the centred slot and the proportions of the previous scaled corners.
+                        drawRoundRect(
+                            color = tickStyle.color.value,
+                            topLeft = Offset((size.width - width) / 2f, (size.height - height) / 2f),
+                            size = Size(width, height),
+                            cornerRadius = CornerRadius(width / 20f, height / 3f),
+                        )
+                    },
+                )
             }
         }
         AnimatedVisibility(

@@ -47,6 +47,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
+import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableStateOf
@@ -83,11 +84,10 @@ import com.suixing.agent.ui.components.SuixingMark
 import com.suixing.agent.ui.theme.LocalDrawerSurfaceColor
 import com.suixing.agent.ui.components.menuRippleClickable
 import com.suixing.agent.ui.drawer.drawerSections
-import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 /**
@@ -114,20 +114,18 @@ internal val DRAWER_SHEET_WIDTH = 300
  *    同一个抽屉就有两套手感。
  *  ⇒ 现在**所有入口**都走这一条 spring，`Animatable.animateTo` 会自然吃进初速度。
  *
- * 临界阻尼、850 刚度（ω≈29.15/s）约 228ms 到 99%；所有入口继续保留初速度。
- * `visibilityThreshold = 0.003f` 时约 274ms 收尾；原 `0.001f` 约 317ms。裁掉的尾段
- * 是 300dp 面板不足 1dp 的移动，此时主页遮罩仍保持启用。
+ * 临界阻尼下用较低刚度减小每帧的主页位移；离手时继续保留初速度。
  */
-internal val DRAWER_SPEC: androidx.compose.animation.core.FiniteAnimationSpec<Float> =
-    androidx.compose.animation.core.spring(
-        dampingRatio = 1f,
-        stiffness = 850f,
-        visibilityThreshold = 0.003f,
-    )
+private fun drawerSpring(visibilityThreshold: Float) = spring(
+    dampingRatio = 1f,
+    stiffness = 500f,
+    visibilityThreshold = visibilityThreshold,
+)
 
-/** Programmatic closing uses the shared critically damped spring; it has no fixed duration. */
-internal val DRAWER_CLOSE_SPEC: androidx.compose.animation.core.FiniteAnimationSpec<Float> =
-    DRAWER_SPEC
+internal val DRAWER_SPEC = drawerSpring(0.003f)
+
+/** Close uses the same spring, with a subpixel tail before snapping to the anchor. */
+internal val DRAWER_CLOSE_SPEC = drawerSpring(0.0005f)
 
 /** Opening shares the same spring; gestures additionally carry their release velocity. */
 internal val DRAWER_OPEN_SPEC: androidx.compose.animation.core.FiniteAnimationSpec<Float> =
@@ -169,6 +167,7 @@ internal fun Drawer(
     /** Settled state used only to clear drawer interaction modes after closing. */
     open: () -> Boolean,
     route: String,
+    dataLifecycle: LifecycleOwner,
     conversations: List<Conversation>,
     activeId: String,
     runningId: Set<String>,
@@ -184,7 +183,7 @@ internal fun Drawer(
     onAssistants: () -> Unit,
     runningAnimationActive: () -> Boolean = { true },
 ) {
-    val unreadCompleted by Core.conversationReads.unread.collectAsStateWithLifecycle()
+    val unreadCompleted by Core.conversationReads.unread.collectAsStateWithLifecycle(lifecycleOwner = dataLifecycle)
     // 左上角的标识跟着**当前助手**走：设置过头像就画头像，没头像仍画「JAgent」标。
     //
     // **只订阅"当前助手"这一个值**（原来订阅整份 settings 流）：抽屉里只有左上角那枚标识
@@ -193,7 +192,7 @@ internal fun Drawer(
     // 而抽屉里其实只画了 5 行会话。
     val drawerAssistant by remember {
         Core.settings.flow.map { settings -> settings.activeAssistant() }
-    }.collectAsStateWithLifecycle(initialValue = null)
+    }.collectAsStateWithLifecycle(initialValue = null, lifecycleOwner = dataLifecycle)
     val scheme = MaterialTheme.colorScheme
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -252,16 +251,11 @@ internal fun Drawer(
         pendingExport = null
         if (uri == null || chat == null) return@rememberLauncherForActivityResult
         scope.launch {
-            val ok = withContext(Dispatchers.IO) {
-                runCatching {
-                    // **从 store 导出**（#40 之后磁盘上已经没有 `<id>.json`）：原来这里直接读旧文件，
-                    // 旧格式删掉后它必然不存在 ⇒ 每次导出都失败。`exportJson` 会拼出完整 JSON。
-                    val text = Core.chats.exportJson(chat.id) ?: error("读不到会话内容")
-                    context.contentResolver.openOutputStream(uri)?.use { out ->
-                        out.write(text.toByteArray())
-                    } ?: error("打不开目标文件")
-                }.isSuccess
-            }
+            val ok = runCatching {
+                Core.chats.exportJson(chat.id) { context.contentResolver.openOutputStream(uri) }
+            }.onFailure {
+                if (it is CancellationException) throw it
+            }.getOrDefault(false)
             // 抽屉里没有 SnackbarHost（它是一块面板，不是一个 Scaffold），所以这里用 Toast：
             // 「复制/导出到底成没成」必须当场看见，否则用户只能靠猜。
             Toast.makeText(
@@ -298,20 +292,32 @@ internal fun Drawer(
     // 会话列表一变就做两件事：剔除已删除的 id（残留 id 会在列表里占位，看着像排序没生效），
     // 以及把「updatedAt 变大」的那几行从普通表里摘掉。
     LaunchedEffect(conversations) {
-        val known = conversations.map { it.id }.toHashSet()
+        if (conversations.isEmpty()) {
+            lastSeen.clear()
+            return@LaunchedEffect
+        }
+        val known = HashSet<String>(conversations.size)
+        var bumped: HashSet<String>? = null
+        for (chat in conversations) {
+            known.add(chat.id)
+            val previous = lastSeen.put(chat.id, chat.updatedAt)
+            if (previous != null && chat.updatedAt > previous) {
+                (bumped ?: HashSet<String>().also { bumped = it }).add(chat.id)
+            }
+        }
         lastSeen.keys.retainAll(known)
-        if (conversations.isEmpty()) return@LaunchedEffect
         val current = orderState.value
-        var next = current.prunedTo(known)
-        val bumped = conversations
-            .filter { chat -> lastSeen[chat.id]?.let { chat.updatedAt > it } == true }
-            .map { it.id }
-        conversations.forEach { lastSeen[it.id] = it.updatedAt }
-        val normalIds = next.normal.toHashSet()
-        val dropped = bumped.filterTo(HashSet()) { it in normalIds }
-        if (dropped.isNotEmpty()) next = next.copy(normal = next.normal.filterNot { it in dropped })
+        val needsPrune = (current.pinned.isNotEmpty() || current.normal.isNotEmpty()) &&
+            (current.pinned.any { it !in known } || current.normal.any { it !in known })
+        var next = if (needsPrune) current.prunedTo(known) else current
+        var droppedAny = false
+        val bumpedIds = bumped
+        if (bumpedIds != null && next.normal.any { it in bumpedIds }) {
+            next = next.copy(normal = next.normal.filterNot { it in bumpedIds })
+            droppedAny = true
+        }
         if (next != current) orderState.value = next
-        if (dropped.isNotEmpty()) orderDirty = true
+        if (droppedAny) orderDirty = true
     }
 
     // 「新消息回顶」攒 1.5s 落一次盘：应用被杀最多丢这一次位置修正；用户拖出来的顺序是
@@ -400,20 +406,18 @@ internal fun Drawer(
                 ) {
                     DrawerGripIcon(
                         tint = if (sortMode) scheme.primary else scheme.onSurfaceVariant,
-                        modifier = Modifier.size(18.dp),
+                        modifier = Modifier.size(20.dp),
                     )
                 }
                 IconButton(onClick = onNew, modifier = Modifier.size(38.dp)) {
-                    // The same glyph the chat header's compose button draws, at the same
-                    // 22dp: the drawer and the bar are two doors to one action, and they
-                    // read as two until the drawing is shared.
+                    // Match the chat header's new conversation action.
                     Icon(
-                        painter = painterResource(R.drawable.ic_compose),
+                        painter = painterResource(R.drawable.ic_square_pen),
                         contentDescription = "新对话",
                         // **与排序按钮同色**（用户：「新对话的颜色改为和排序一样颜色」）：
                         // 排序键常态就是 `onSurfaceVariant`，两个并列的图标按钮不该一深一亮。
                         tint = scheme.onSurfaceVariant,
-                        modifier = Modifier.size(22.dp),
+                        modifier = Modifier.size(18.dp),
                     )
                 }
             }
@@ -452,6 +456,9 @@ internal fun Drawer(
             val activeIdNow = rememberUpdatedState(activeId)
             val runningIdNow = rememberUpdatedState(runningId)
             val runningAnimationNow = rememberUpdatedState(runningAnimationActive)
+            val rowAnimationActive: () -> Boolean = remember(runningAnimationNow) {
+                { runningAnimationNow.value() }
+            }
             val drawerRow: @Composable (Conversation, Modifier) -> Unit = remember(
                 context, exporter, exitSortMode,
             ) { { conversation, anim ->
@@ -527,7 +534,7 @@ internal fun Drawer(
                         conversation = conversation,
                         selected = conversation.id == activeIdNow.value,
                         running = rowRunning,
-                        runningAnimationActive = rowRunning && runningAnimationNow.value(),
+                        runningAnimationActive = rowAnimationActive,
                         completedUnread = conversation.id in unreadCompleted,
                         menuOpen = menuFor == conversation.id,
                         sortMode = sortMode,
@@ -937,15 +944,14 @@ internal fun DrawerMoreIcon(tint: Color, modifier: Modifier = Modifier.size(18.d
 }
 
 /**
- * 拖拽把手：三根短线。仓库里没有 grip 图标，按既有约定（抽屉的置顶标记也是复用 ic_star）
- * 不新造 drawable，用一个 16dp 的 Canvas 画出来。
+ * 拖拽把手：三根圆头短线，笔画和行距随字形尺寸缩放。
  */
 @Composable
 internal fun DrawerGripIcon(tint: Color, modifier: Modifier = Modifier.size(16.dp)) {
     Canvas(modifier) {
-        val stroke = 1.5.dp.toPx()
-        val start = size.width * 0.16f
-        val end = size.width * 0.84f
+        val stroke = size.minDimension * (1.65f / 20f)
+        val start = size.width * 0.145f
+        val end = size.width - start
         DrawerGripFractions.forEach { fraction ->
             val y = size.height * fraction
             drawLine(
@@ -959,4 +965,4 @@ internal fun DrawerGripIcon(tint: Color, modifier: Modifier = Modifier.size(16.d
     }
 }
 
-private val DrawerGripFractions = floatArrayOf(0.3f, 0.5f, 0.7f)
+private val DrawerGripFractions = floatArrayOf(0.23f, 0.5f, 0.77f)

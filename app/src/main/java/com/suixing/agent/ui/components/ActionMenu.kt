@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.BorderStroke
@@ -98,7 +99,7 @@ internal fun ActionMenuItem(
         .background(if (selected) colors.onSurface.copy(alpha = 0.06f) else Color.Transparent)
     val selectionModifier = if (selected) rowModifier.semantics { this.selected = true } else rowModifier
     val check: (@Composable () -> Unit)? = trailingIcon ?: if (selected) {
-        { Icon(ImageVector.vectorResource(R.drawable.ic_check), "已选中") }
+        { Icon(ImageVector.vectorResource(R.drawable.ic_check), "已选中", Modifier.size(16.dp)) }
     } else null
     CompositionLocalProvider(LocalRippleConfiguration provides configuration) {
         DropdownMenuItem(

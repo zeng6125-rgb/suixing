@@ -54,8 +54,16 @@ jstring pathString(JNIEnv* env, const std::uint8_t* bytes, std::size_t length) {
         throwIo(env, "Native file find supplied an invalid predicate path.");
         return nullptr;
     }
-    std::vector<jchar> utf16;
-    utf16.reserve(length);
+    // Valid UTF-8 never expands past `length` UTF-16 code units, so common paths stay on stack.
+    constexpr std::size_t kStackPathUnits = 512;
+    jchar stackUtf16[kStackPathUnits];
+    std::vector<jchar> heapUtf16;
+    jchar* utf16 = stackUtf16;
+    if (length > kStackPathUnits) {
+        heapUtf16.resize(length);
+        utf16 = heapUtf16.data();
+    }
+    std::size_t utf16Len = 0;
     std::size_t at = 0;
     while (at < length) {
         const std::uint8_t first = bytes[at++];
@@ -100,14 +108,14 @@ jstring pathString(JNIEnv* env, const std::uint8_t* bytes, std::size_t length) {
             return nullptr;
         }
         if (codepoint <= 0xffff) {
-            utf16.push_back(static_cast<jchar>(codepoint));
+            utf16[utf16Len++] = static_cast<jchar>(codepoint);
         } else {
             codepoint -= 0x10000;
-            utf16.push_back(static_cast<jchar>(0xd800 + (codepoint >> 10)));
-            utf16.push_back(static_cast<jchar>(0xdc00 + (codepoint & 0x3ff)));
+            utf16[utf16Len++] = static_cast<jchar>(0xd800 + (codepoint >> 10));
+            utf16[utf16Len++] = static_cast<jchar>(0xdc00 + (codepoint & 0x3ff));
         }
     }
-    return env->NewString(utf16.data(), static_cast<jsize>(utf16.size()));
+    return env->NewString(utf16, static_cast<jsize>(utf16Len));
 }
 
 struct PredicateContext {
@@ -182,13 +190,21 @@ Java_com_suixing_agent_tools_NativeFileFindJni_nativeScan(
         const jmethodID matches = env->GetMethodID(type, "matches", "(Ljava/lang/String;I)Z");
         env->DeleteLocalRef(type);
         if (matches == nullptr || env->ExceptionCheck()) return nullptr;
-        std::vector<std::uint8_t> input(static_cast<std::size_t>(length));
-        env->GetByteArrayRegion(request, 0, length, reinterpret_cast<jbyte*>(input.data()));
+        constexpr std::size_t kStackRequestBytes = 1024;
+        std::uint8_t stackInput[kStackRequestBytes];
+        std::vector<std::uint8_t> heapInput;
+        std::uint8_t* inputData = stackInput;
+        const auto inputSize = static_cast<std::size_t>(length);
+        if (inputSize > kStackRequestBytes) {
+            heapInput.resize(inputSize);
+            inputData = heapInput.data();
+        }
+        env->GetByteArrayRegion(request, 0, length, reinterpret_cast<jbyte*>(inputData));
         if (env->ExceptionCheck()) return nullptr;
         PredicateContext context{env, predicate, matches};
         RustResponse response;
-        const int status = sx_find_scan(static_cast<std::uint64_t>(handle), input.data(),
-                                        input.size(), matchPredicate, &context, &response.value);
+        const int status = sx_find_scan(static_cast<std::uint64_t>(handle), inputData,
+                                        inputSize, matchPredicate, &context, &response.value);
         if (env->ExceptionCheck()) return nullptr;
         // Invalid OS filename encodings and oversized results retain the existing Kotlin walker.
         if (status == 5) return nullptr;

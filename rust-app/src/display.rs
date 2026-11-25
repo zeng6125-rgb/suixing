@@ -18,6 +18,7 @@ pub const MAX_WINDOW_ROWS: usize = 96;
 pub const MAX_WINDOW_BYTES: usize = 1024 * 1024;
 pub const PREVIEW_BYTES: usize = 2048;
 pub const MAX_BODY_PAGE_BYTES: usize = 64 * 1024;
+pub const MAX_BODY_TEXT_BYTES: usize = 20 * 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ViewSource {
@@ -283,8 +284,12 @@ pub struct MessageHeader {
     pub prompt_tokens: Option<i64>,
     #[serde(default, alias = "completionTokens")]
     pub completion_tokens: Option<i64>,
+    #[serde(default, alias = "cachedTokens")]
+    pub cached_tokens: Option<i64>,
     #[serde(default, alias = "elapsedMs")]
     pub elapsed_ms: i64,
+    #[serde(default, alias = "runElapsedMs")]
+    pub run_elapsed_ms: Option<i64>,
     #[serde(default, alias = "firstTokenMs")]
     pub first_token_ms: i64,
     #[serde(default)]
@@ -333,7 +338,13 @@ impl MessageHeader {
             model: message.metadata.model.clone(),
             prompt_tokens: message.metadata.prompt_tokens,
             completion_tokens: message.metadata.completion_tokens,
+            cached_tokens: message.metadata.cached_tokens,
             elapsed_ms: message.metadata.elapsed_ms,
+            run_elapsed_ms: message
+                .metadata
+                .extra
+                .get("runElapsedMs")
+                .and_then(serde_json::Value::as_i64),
             first_token_ms: message.metadata.first_token_ms,
             edited: message.metadata.edited,
             timestamp: message.metadata.timestamp,
@@ -385,6 +396,7 @@ pub struct DisplayInfo {
     pub model: Option<String>,
     pub prompt_tokens: Option<i64>,
     pub completion_tokens: Option<i64>,
+    pub cached_tokens: Option<i64>,
     pub elapsed_ms: i64,
     pub first_token_ms: i64,
     pub edited: bool,
@@ -392,6 +404,21 @@ pub struct DisplayInfo {
     pub failed_model_attempt: bool,
     pub timestamp_label: Option<String>,
     pub trace_note: Option<BodyRef>,
+    pub reply: ReplyDetails,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ReplySummary {
+    pub elapsed_ms: i64,
+    pub thinking: usize,
+    pub tools: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ReplyDetails {
+    pub summary: Option<ReplySummary>,
+    pub footer: bool,
+    pub run_elapsed_ms: i64,
 }
 impl DisplayRow {
     pub fn estimated_bytes(&self) -> usize {
@@ -518,8 +545,8 @@ pub trait HistorySource {
     fn source(&self) -> &ViewSource;
     fn stamp(&self) -> &SourceStamp;
     fn headers(&self) -> &[MessageHeader];
-    /// Validate the owning header fingerprint before invoking `read`. Segmented
-    /// sources hash the exact committed JSON line; memory sources hash canonical JSON.
+    /// Read from the snapshot that produced the owning header. A committed segment
+    /// is verified before caching; its row fingerprint identifies the exact JSON line.
     /// Only the storage/actor owns the message. Never return it as a UI event.
     fn with_message<R>(
         &self,
@@ -575,6 +602,7 @@ pub struct ProjectionIndex {
     candidates: Vec<CandidateNavigation>,
     ids: HashMap<String, usize>,
     turn_index: turn_navigation::TurnIndex,
+    reply_details: HashMap<usize, ReplyDetails>,
 }
 impl ProjectionIndex {
     pub fn new(
@@ -628,7 +656,7 @@ impl ProjectionIndex {
                 }
             })
             .collect();
-        let turns = projection
+        let turns: Vec<_> = projection
             .turn_of
             .iter()
             .map(|turn| turn.map(str::to_owned))
@@ -681,6 +709,60 @@ impl ProjectionIndex {
             *tail = true;
         }
         let turn_index = turn_navigation::TurnIndex::new(headers, &selected, &cancelled)?;
+        let mut reply_details = HashMap::<usize, ReplyDetails>::new();
+        // Summarize the selected turn before slicing display windows. A tool batch and
+        // the final reply can appear on different pages.
+        for turn in selected.chunk_by(|&left, &right| {
+            turns[left] == turns[right]
+                && (turns[left].is_some() || headers[left].run_id == headers[right].run_id)
+        }) {
+            let mut first = None;
+            let mut last_reply = None;
+            let mut summary = ReplySummary::default();
+            let mut run_elapsed_ms = None;
+            for &index in turn {
+                check(&cancelled)?;
+                let header = &headers[index];
+                if header.role != "assistant" {
+                    continue;
+                }
+                summary.thinking += usize::from(header.thinking.bytes > 0);
+                summary.tools += header.tool_calls.len();
+                summary.elapsed_ms = summary.elapsed_ms.saturating_add(header.elapsed_ms.max(0));
+                if let Some(elapsed) = header.run_elapsed_ms.filter(|elapsed| *elapsed > 0) {
+                    run_elapsed_ms = Some(elapsed);
+                }
+                if first.is_none()
+                    && (header.text.bytes > 0
+                        || header.thinking.bytes > 0
+                        || header.trace_note.bytes > 0
+                        || !header.tool_calls.is_empty()
+                        || header.prompt_tokens.unwrap_or(0) > 0
+                        || header.completion_tokens.unwrap_or(0) > 0
+                        || !header.complete)
+                {
+                    first = Some(index);
+                }
+                if header.complete && header.tool_calls.is_empty() {
+                    last_reply = Some(index);
+                }
+            }
+            if let Some(first) = first {
+                summary.elapsed_ms = run_elapsed_ms.unwrap_or(summary.elapsed_ms);
+                reply_details.entry(first).or_default().summary = Some(summary);
+            }
+            if let Some(last_reply) = last_reply {
+                let details = reply_details.entry(last_reply).or_default();
+                details.footer = true;
+                if headers[last_reply]
+                    .run_id
+                    .as_deref()
+                    .is_some_and(|run| !run.is_empty())
+                {
+                    details.run_elapsed_ms = summary.elapsed_ms;
+                }
+            }
+        }
         Ok(Self {
             selected,
             turns,
@@ -689,10 +771,14 @@ impl ProjectionIndex {
             candidates,
             ids,
             turn_index,
+            reply_details,
         })
     }
     pub fn selected_indices(&self) -> &[usize] {
         &self.selected
+    }
+    pub fn source_index(&self, id: &str) -> Option<usize> {
+        self.ids.get(id).copied()
     }
     pub fn turn_page(
         &self,
@@ -727,9 +813,8 @@ impl ProjectionIndex {
         let reply = *self.ids.get(message_id).ok_or(DisplayError::Missing)?;
         let position = self
             .selected
-            .iter()
-            .position(|&index| index == reply)
-            .ok_or(DisplayError::Missing)?;
+            .binary_search(&reply)
+            .map_err(|_| DisplayError::Missing)?;
         let header = source.headers().get(reply).ok_or(DisplayError::Stale)?;
         if header.message_hash != hash {
             return Err(DisplayError::Stale);
@@ -865,7 +950,7 @@ impl ProjectionIndex {
         let locate = |id: &str| {
             self.ids
                 .get(id)
-                .and_then(|index| self.selected.iter().position(|selected| selected == index))
+                .and_then(|index| self.selected.binary_search(index).ok())
         };
         let mut anchor_found = true;
         let (mut start, mut end) = match &request.at {
@@ -1058,6 +1143,7 @@ impl ProjectionIndex {
                     model: header.model.clone(),
                     prompt_tokens: header.prompt_tokens,
                     completion_tokens: header.completion_tokens,
+                    cached_tokens: header.cached_tokens,
                     elapsed_ms: header.elapsed_ms,
                     first_token_ms: header.first_token_ms,
                     edited: header.edited,
@@ -1066,6 +1152,7 @@ impl ProjectionIndex {
                     timestamp_label: None,
                     trace_note: (header.trace_note.bytes > 0)
                         .then(|| body(BodyKind::TraceNote, header.trace_note.bytes)),
+                    reply: self.reply_details.get(&index).copied().unwrap_or_default(),
                 },
             };
             rows.push(row);
@@ -1157,6 +1244,7 @@ impl ProjectionIndex {
                     continue;
                 }
                 let page = read_body_page(
+                    self,
                     source,
                     &BodyPageRequest {
                         request_id: request.request_id.clone(),
@@ -1193,6 +1281,7 @@ pub fn message_fingerprint(message: &Message) -> Result<String, DisplayError> {
     Ok(format!("{:x}", sink.0.finalize()))
 }
 fn with_verified_message<R>(
+    projection: &ProjectionIndex,
     source: &impl HistorySource,
     stamp: &SourceStamp,
     id: &str,
@@ -1204,13 +1293,9 @@ fn with_verified_message<R>(
     if source.stamp() != stamp {
         return Err(DisplayError::Stale);
     }
-    let index = source
-        .headers()
-        .iter()
-        .position(|header| header.id == id)
-        .ok_or(DisplayError::Missing)?;
-    let header = &source.headers()[index];
-    if header.message_hash != hash {
+    let index = projection.source_index(id).ok_or(DisplayError::Missing)?;
+    let header = source.headers().get(index).ok_or(DisplayError::Stale)?;
+    if header.id != id || header.message_hash != hash {
         return Err(DisplayError::Stale);
     }
     source.with_message(index, cancelled, |message| {
@@ -1221,22 +1306,25 @@ fn with_verified_message<R>(
         read(message)
     })
 }
-pub fn read_body_page(
+fn with_body_text<R>(
+    projection: &ProjectionIndex,
     source: &impl HistorySource,
-    request: &BodyPageRequest,
-    cancelled: impl Fn() -> bool,
-) -> Result<BodyPage, DisplayError> {
-    if source.source() != &request.body.source {
+    body: &BodyRef,
+    cancelled: &impl Fn() -> bool,
+    read: impl FnOnce(&str) -> Result<R, DisplayError>,
+) -> Result<R, DisplayError> {
+    if source.source() != &body.source {
         return Err(DisplayError::Invalid("正文页归属不匹配".into()));
     }
     with_verified_message(
+        projection,
         source,
-        &request.body.stamp,
-        &request.body.message_id,
-        &request.body.message_hash,
-        &cancelled,
+        &body.stamp,
+        &body.message_id,
+        &body.message_hash,
+        cancelled,
         |message| {
-            let text = match request.body.kind {
+            let text = match body.kind {
                 BodyKind::Text => message.text.as_str(),
                 BodyKind::Thinking => message.thinking.as_str(),
                 BodyKind::ToolOutput => message.metadata.tool_output.as_deref().unwrap_or(""),
@@ -1259,38 +1347,65 @@ pub fn read_body_page(
                 BodyKind::TraceNote => message.metadata.trace_note.as_deref().unwrap_or(""),
                 BodyKind::RowHeader | BodyKind::FooterHeader | BodyKind::ImageBlock(_) => "",
             };
-            if text.len() as u64 != request.body.bytes {
+            if text.len() as u64 != body.bytes {
                 return Err(DisplayError::Stale);
             }
-            let from = usize::try_from(request.from_byte)
-                .map_err(|_| DisplayError::Invalid("正文偏移无效".into()))?;
-            if from > text.len() || !text.is_char_boundary(from) {
-                return Err(DisplayError::Invalid("正文偏移不是UTF-8边界".into()));
-            }
-            let bytes = request.max_bytes.clamp(4, MAX_BODY_PAGE_BYTES);
-            let mut to = from.saturating_add(bytes).min(text.len());
-            while !text.is_char_boundary(to) {
-                to -= 1;
-            }
-            let mut previous = from.saturating_sub(bytes);
-            while !text.is_char_boundary(previous) {
-                previous += 1;
-            }
-            check(&cancelled)?;
-            Ok(BodyPage {
-                request_id: request.request_id.clone(),
-                body: request.body.clone(),
-                from_byte: from as u64,
-                to_byte: to as u64,
-                text: text[from..to].to_owned(),
-                previous_byte: (from > 0).then_some(previous as u64),
-                next_byte: (to < text.len()).then_some(to as u64),
-            })
+            read(text)
         },
     )
 }
+
+pub fn read_body_page(
+    projection: &ProjectionIndex,
+    source: &impl HistorySource,
+    request: &BodyPageRequest,
+    cancelled: impl Fn() -> bool,
+) -> Result<BodyPage, DisplayError> {
+    with_body_text(projection, source, &request.body, &cancelled, |text| {
+        let from = usize::try_from(request.from_byte)
+            .map_err(|_| DisplayError::Invalid("正文偏移无效".into()))?;
+        if from > text.len() || !text.is_char_boundary(from) {
+            return Err(DisplayError::Invalid("正文偏移不是UTF-8边界".into()));
+        }
+        let bytes = request.max_bytes.clamp(4, MAX_BODY_PAGE_BYTES);
+        let mut to = from.saturating_add(bytes).min(text.len());
+        while !text.is_char_boundary(to) {
+            to -= 1;
+        }
+        let mut previous = from.saturating_sub(bytes);
+        while !text.is_char_boundary(previous) {
+            previous += 1;
+        }
+        check(&cancelled)?;
+        Ok(BodyPage {
+            request_id: request.request_id.clone(),
+            body: request.body.clone(),
+            from_byte: from as u64,
+            to_byte: to as u64,
+            text: text[from..to].to_owned(),
+            previous_byte: (from > 0).then_some(previous as u64),
+            next_byte: (to < text.len()).then_some(to as u64),
+        })
+    })
+}
+
+pub fn read_body_text(
+    projection: &ProjectionIndex,
+    source: &impl HistorySource,
+    body: &BodyRef,
+) -> Result<String, DisplayError> {
+    with_body_text(projection, source, body, &|| false, |text| {
+        if text.len() > MAX_BODY_TEXT_BYTES {
+            return Err(DisplayError::Invalid(
+                "完整正文超过20MiB预算，请使用分页复制".into(),
+            ));
+        }
+        Ok(text.to_owned())
+    })
+}
 /// Return only to the decode worker; never send this owned base64 through a UI mailbox.
 pub fn read_image(
+    projection: &ProjectionIndex,
     source: &impl HistorySource,
     image: &ImageRef,
     cancelled: impl Fn() -> bool,
@@ -1299,6 +1414,7 @@ pub fn read_image(
         return Err(DisplayError::Invalid("图像归属不匹配".into()));
     }
     with_verified_message(
+        projection,
         source,
         &image.stamp,
         &image.message_id,
@@ -1365,6 +1481,7 @@ pub struct ConversationSummary {
     pub assistant_id: Option<String>,
     pub provider_id: Option<String>,
     pub model: Option<String>,
+    pub approval_mode: Option<crate::subagent_configuration::ApprovalMode>,
     pub pinned: bool,
     pub archived: bool,
     pub checkpoint_count: usize,
@@ -1378,6 +1495,7 @@ impl From<&Conversation> for ConversationSummary {
             assistant_id: conversation.assistant_id.clone(),
             provider_id: conversation.provider_id.clone(),
             model: conversation.model.clone(),
+            approval_mode: conversation.metadata.approval_mode,
             pinned: conversation.metadata.pinned,
             archived: conversation.metadata.archived,
             checkpoint_count: conversation.metadata.checkpoints.len(),
@@ -1617,6 +1735,7 @@ fn display_activity(
     })
 }
 pub fn read_footer(
+    projection: &ProjectionIndex,
     source: &impl HistorySource,
     stamp: &SourceStamp,
     message_id: &str,
@@ -1624,7 +1743,7 @@ pub fn read_footer(
     from: usize,
     cancelled: impl Fn() -> bool,
 ) -> Result<FooterPage, DisplayError> {
-    with_verified_message(source, stamp, message_id, hash, &cancelled, |message| {
+    with_verified_message(projection, source, stamp, message_id, hash, &cancelled, |message| {
         let total = message.metadata.file_activities.len();
         if from > total {
             return Err(DisplayError::Invalid("文件活动页偏移无效".into()));
@@ -1672,4 +1791,182 @@ fn failed_attempt_flag<'de, D: serde::Deserializer<'de>>(
 ) -> Result<bool, D::Error> {
     let value = serde_json::Value::deserialize(deserializer)?;
     Ok(value.as_bool().unwrap_or(!value.is_null()))
+}
+
+#[cfg(test)]
+mod reply_summary_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn summary_uses_the_selected_run_and_survives_history_pagination() {
+        let rows = json!([
+            {"id":"u1","role":"user","text":"question"},
+            {"id":"old","role":"assistant","text":"unselected","runId":"r0","elapsedMs":99000},
+            {"id":"a1","role":"assistant","thinking":"plan","runId":"r1","elapsedMs":1000,
+             "tool_calls":[{"id":"t1","name":"clock","arguments":"{}"}]},
+            {"id":"t1","role":"tool","tool_call_id":"t1","text":"time","runId":"r1"},
+            {"id":"a2","role":"assistant","text":"answer","runId":"r1","elapsedMs":2500,
+             "runElapsedMs":7000,"completionTokens":50},
+            {"id":"u2","role":"user","text":"older format"},
+            {"id":"a3","role":"assistant","text":"legacy answer","elapsedMs":2800}
+        ]);
+        let messages: Vec<Message> = rows
+            .as_array()
+            .unwrap()
+            .iter()
+            .cloned()
+            .map(|mut row| {
+                row["text"] = row.get("text").cloned().unwrap_or(json!(""));
+                row["thinking"] = row.get("thinking").cloned().unwrap_or(json!(""));
+                row["complete"] = json!(true);
+                serde_json::from_value(row).unwrap()
+            })
+            .collect();
+        let headers: Vec<_> = messages
+            .iter()
+            .map(|message| {
+                MessageHeader::from_message(message, message_fingerprint(message).unwrap())
+            })
+            .collect();
+        let source = MemoryHistory {
+            source: ViewSource::Main {
+                conversation_id: "c1".into(),
+            },
+            stamp: SourceStamp {
+                generation: "g1".into(),
+                revision: 1,
+                projection_revision: 1,
+            },
+            messages: &messages,
+            headers: &headers,
+        };
+        let choices = BTreeMap::from([("u1".into(), "r1".into())]);
+        let projection = ProjectionIndex::new(&headers, &choices, None, || false).unwrap();
+        let mut request = WindowRequest {
+            request_id: "test".into(),
+            source: source.source.clone(),
+            at: WindowAt::Tail,
+            max_rows: 96,
+            previews: true,
+        };
+        let page = projection.window(&source, &request, || false).unwrap();
+        assert!(page.rows.iter().all(|row| row.id != "old"));
+        let row = |id: &str| page.rows.iter().find(|row| row.id == id).unwrap();
+        assert_eq!(row("a2").preview.as_ref().unwrap().text, "answer");
+        assert_eq!(
+            row("a1").info.reply.summary,
+            Some(ReplySummary {
+                elapsed_ms: 7000,
+                thinking: 1,
+                tools: 1,
+            })
+        );
+        assert_eq!(row("a2").info.reply.summary, None);
+        assert!(row("a2").info.reply.footer);
+        assert_eq!(row("a2").info.reply.run_elapsed_ms, 7000);
+        assert_eq!(row("a3").info.reply.summary.unwrap().elapsed_ms, 2800);
+        assert_eq!(row("a3").info.reply.run_elapsed_ms, 0);
+
+        request.at = WindowAt::Before(WindowCursor {
+            stamp: source.stamp.clone(),
+            boundary_id: "u2".into(),
+        });
+        request.max_rows = 1;
+        let page = projection.window(&source, &request, || false).unwrap();
+        assert_eq!(page.rows.len(), 1);
+        assert_eq!(page.rows[0].id, "a2");
+        assert_eq!(page.rows[0].info.reply.run_elapsed_ms, 7000);
+
+        request.at = WindowAt::Around {
+            message_id: "old".into(),
+        };
+        let page = projection.window(&source, &request, || false).unwrap();
+        assert!(!page.anchor_found);
+        assert_eq!(page.rows[0].id, "a3");
+
+        use crate::ui::history::HistoryViews;
+        let key = &source.source;
+        let mut views = HistoryViews::default();
+        views.open(key.clone(), None);
+        let apply_page = |views: &mut HistoryViews, at| {
+            let mut request = views.begin_window(key, at).unwrap();
+            request.max_rows = 1;
+            let page = projection.window(&source, &request, || false).unwrap();
+            views.apply_window(page).unwrap();
+        };
+        apply_page(
+            &mut views,
+            WindowAt::Around {
+                message_id: "a2".into(),
+            },
+        );
+        let before = views.view(key).unwrap().before.clone().unwrap();
+        apply_page(&mut views, WindowAt::Before(before));
+        let after = views.view(key).unwrap().after.clone().unwrap();
+        apply_page(&mut views, WindowAt::After(after));
+        let ids: Vec<_> = views
+            .view(key)
+            .unwrap()
+            .rows
+            .iter()
+            .map(|row| row.id.as_str())
+            .collect();
+        assert_eq!(ids, ["a1", "t1", "a2", "u2"]);
+    }
+
+    #[test]
+    fn full_body_matches_adjacent_utf8_pages_and_rejects_stale_references() {
+        let text = format!("{}🙂尾", "x".repeat(MAX_BODY_PAGE_BYTES - 1));
+        let message: Message = serde_json::from_value(json!({
+            "id": "a1", "role": "assistant", "text": text, "thinking": "", "complete": true
+        }))
+        .unwrap();
+        let hash = message_fingerprint(&message).unwrap();
+        let header = MessageHeader::from_message(&message, hash.clone());
+        let source = MemoryHistory {
+            source: ViewSource::Main {
+                conversation_id: "c1".into(),
+            },
+            stamp: SourceStamp {
+                generation: "g1".into(),
+                revision: 1,
+                projection_revision: 1,
+            },
+            messages: std::slice::from_ref(&message),
+            headers: std::slice::from_ref(&header),
+        };
+        let projection =
+            ProjectionIndex::new(source.headers, &BTreeMap::new(), None, || false).unwrap();
+        let mut request = BodyPageRequest {
+            request_id: "read".into(),
+            body: BodyRef {
+                source: source.source.clone(),
+                stamp: source.stamp.clone(),
+                message_id: message.id.clone(),
+                message_hash: hash,
+                kind: BodyKind::Text,
+                bytes: message.text.len() as u64,
+            },
+            from_byte: 0,
+            max_bytes: MAX_BODY_PAGE_BYTES,
+        };
+        let mut first = read_body_page(&projection, &source, &request, || false).unwrap();
+        request.from_byte = first.next_byte.unwrap();
+        assert_eq!(request.from_byte, (MAX_BODY_PAGE_BYTES - 1) as u64);
+        let second = read_body_page(&projection, &source, &request, || false).unwrap();
+        assert_eq!(second.text, "🙂尾");
+        assert_eq!(second.next_byte, None);
+        first.text.push_str(&second.text);
+        assert_eq!(
+            read_body_text(&projection, &source, &request.body).unwrap(),
+            first.text
+        );
+
+        request.body.stamp.revision += 1;
+        assert!(matches!(
+            read_body_text(&projection, &source, &request.body),
+            Err(DisplayError::Stale)
+        ));
+    }
 }

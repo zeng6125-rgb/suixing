@@ -368,6 +368,50 @@ struct Document {
 }
 fn inspect(target: &Target, cancel: &CancelToken) -> Result<Info, String> {
     let deadline = Instant::now() + Duration::from_secs(30);
+    if target.manifest.extension().is_some_and(|ext| ext == "meta") {
+        let (bytes, metadata) = read(
+            &target.root,
+            &target.manifest,
+            INDEX_BYTES,
+            cancel,
+            deadline,
+        )?;
+        let value: serde_json::Value =
+            serde_json::from_slice(&bytes).map_err(|_| "会话元数据无法解析")?;
+        let (path, from, log) = crate::store::shared_chat::log_tail(
+            &target.root,
+            &target.conversation.id,
+            LOG_BYTES as u64,
+        )?;
+        let (after, _) = read(
+            &target.root,
+            &target.manifest,
+            INDEX_BYTES,
+            cancel,
+            deadline,
+        )?;
+        if bytes != after {
+            return Err("读取期间会话已提交新内容，请重新读取详情".into());
+        }
+        let start = log
+            .iter()
+            .position(|byte| byte & 0b1100_0000 != 0b1000_0000)
+            .unwrap_or(log.len());
+        let text = std::str::from_utf8(&log[start..])
+            .map_err(|_| "会话日志不是有效UTF-8")?
+            .to_owned();
+        return Ok(Info {
+            conversation_id: target.conversation.id.clone(),
+            message_count: value["messageCount"].as_u64().unwrap_or(0),
+            total_bytes: metadata.len() + value["logBytes"].as_u64().unwrap_or(0),
+            segmented: false,
+            index: file_info(&target.manifest, &metadata),
+            segment_count: 1,
+            log_path: path.display().to_string(),
+            log_from: from + start as u64,
+            log: text,
+        });
+    }
     let segmented = match fs::symlink_metadata(&target.manifest) {
         Ok(_) => true,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,

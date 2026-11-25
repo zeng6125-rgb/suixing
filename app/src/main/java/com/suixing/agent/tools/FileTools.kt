@@ -579,8 +579,6 @@ class FileTools(private val context: Context) : ToolGroup() {
             fun full(): Boolean = hits.size >= limit || hitFiles.size >= limit || scanned >= maxFiles
             fun scanKotlin(file: File) {
                 searchContext.ensureActive()
-                // A queued candidate may have been replaced since Kotlin's traversal or native read.
-                if (!file.isFile) return
                 try {
                     file.inputStream().buffered().use { input ->
                         input.mark(2048)
@@ -641,7 +639,8 @@ class FileTools(private val context: Context) : ToolGroup() {
                         for (file in suffix) {
                             if (full()) break
                             scanned++
-                            scanKotlin(file)
+                            // A queued candidate may have been replaced since traversal.
+                            if (file.isFile) scanKotlin(file)
                         }
                         return
                     }
@@ -653,7 +652,10 @@ class FileTools(private val context: Context) : ToolGroup() {
                     }
                     // Rust has not emitted rows for this candidate. Invalid UTF-8 or a raced
                     // read falls back to the existing reader, before continuing the suffix.
-                    result.compatibilityIndex?.let { scanKotlin(suffix[it]) }
+                    result.compatibilityIndex?.let { index ->
+                        val file = suffix[index]
+                        if (file.isFile) scanKotlin(file)
+                    }
                     offset += result.processedCount
                 }
             }
@@ -834,23 +836,29 @@ internal fun scanTextWindow(reader: Reader, offset: Int, limit: Int): TextWindow
 }
 
 /** Same CR/LF/CRLF and trailing-empty-line semantics as String.lines(), with bounded live storage. */
-internal fun forEachLogicalLine(reader: Reader, onChar: (Char) -> Unit = {}, line: (String) -> Boolean) {
+internal fun forEachLogicalLine(reader: Reader, onChar: ((Char) -> Unit)? = null, line: (String) -> Boolean) {
     val chars = CharArray(8192)
     val current = StringBuilder()
     var previousCr = false
     while (true) {
         val count = reader.read(chars)
         if (count < 0) break
+        if (count == 0) continue
+        var from = 0
         for (index in 0 until count) {
             val ch = chars[index]
-            onChar(ch)
-            if (ch == '\n' && previousCr) { previousCr = false; continue }
-            previousCr = ch == '\r'
-            if (ch == '\n' || ch == '\r') {
+            onChar?.invoke(ch)
+            if (ch != '\n' && ch != '\r') continue
+            val followsCr = if (index == 0) previousCr else chars[index - 1] == '\r'
+            if (ch != '\n' || !followsCr) {
+                current.append(chars, from, index - from)
                 if (!line(current.toString())) return
                 current.setLength(0)
-            } else current.append(ch)
+            }
+            from = index + 1
         }
+        current.append(chars, from, count - from)
+        previousCr = chars[count - 1] == '\r'
     }
     line(current.toString())
 }

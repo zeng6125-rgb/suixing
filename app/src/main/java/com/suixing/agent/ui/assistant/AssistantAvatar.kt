@@ -28,8 +28,6 @@ import androidx.compose.ui.unit.sp
 import com.suixing.agent.data.Assistant
 import com.suixing.agent.data.AssistantAvatarStore
 import com.suixing.agent.ui.components.RoundBrandIcon
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 
 /**
  * An assistant's face, drawn in one place: the picture the user uploaded, else the persona's
@@ -111,13 +109,12 @@ fun AssistantAvatar(
 /** The stored picture, or null while there is none to draw. */
 @Composable
 private fun rememberAssistantPicture(path: String): ImageBitmap? {
+    if (path.isBlank()) return null
     val context = LocalContext.current
-    var picture by remember(path) { mutableStateOf<ImageBitmap?>(null) }
-    LaunchedEffect(path) {
-        picture = if (path.isBlank()) {
-            null
-        } else {
-            withContext(Dispatchers.IO) { AssistantAvatarStore.load(context, path) }?.asImageBitmap()
+    var picture by remember(path) { mutableStateOf(AssistantAvatarStore.cached(path)?.asImageBitmap()) }
+    if (picture == null) {
+        LaunchedEffect(context, path) {
+            picture = AssistantAvatarStore.load(context, path)?.asImageBitmap()
         }
     }
     return picture

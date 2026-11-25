@@ -4,10 +4,27 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class FoldHandoverTest {
+    @Test fun `folded reasoning keeps the first nonblank line without splitting its remaining text`() {
+        val inputs = listOf("", " \t\r\n\u2003", "\r\n \t正文🙂 \r\n余下内容",
+            "第一行\r仍在同一行\n后续", "\n预览\n" + "后续内容\n".repeat(10_000))
+        for (text in inputs) {
+            assertEquals(text.split('\n').firstOrNull { it.isNotBlank() }?.trim().orEmpty(),
+                reasoningPreview(text))
+        }
+    }
+
+    @Test fun `visiting folded history keeps existing reasoning reveal state`() {
+        val state = ReasoningExpansion("chat", mutableMapOf())
+        val existing = state.viewport("already-opened").prose
+        repeat(32) { assertNull(state.retainedProse("folded-$it")) }
+        assertSame(existing, state.retainedProse("already-opened"))
+    }
+
     @Test fun `single pass fold identities preserve raw run ordinals and cumulative calls`() {
         val firstCall = ToolLine("run-shell", "{}", false, true, 0)
         val source = listOf(

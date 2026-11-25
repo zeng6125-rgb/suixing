@@ -212,7 +212,8 @@ private fun FloatConsoleService.actionIcon(
     setImageResource(drawable)
     imageTintList = ColorStateList.valueOf(if (accent) palette.accent else palette.muted)
     scaleType = ImageView.ScaleType.FIT_CENTER
-    setPadding(dp(11), dp(11), dp(11), dp(11))
+    val inset = dp(if (drawable == R.drawable.ic_stop_filled) 11 else 9)
+    setPadding(inset, inset, inset, inset)
     contentDescription = description
     tooltipText = description
     background = RippleDrawable(

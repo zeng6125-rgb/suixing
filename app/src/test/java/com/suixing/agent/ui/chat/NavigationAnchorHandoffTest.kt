@@ -128,6 +128,14 @@ class NavigationAnchorHandoffTest {
         verify(exactly = 1) { list.requestScrollToItem(2, 120) }
     }
 
+    @Test fun `active scrolling places the viewport without observing lazy list geometry`() {
+        reading = false
+        owner.viewportPlaced(viewport)
+        owner.contentPlaced()
+
+        verify(exactly = 0) { list.layoutInfo }
+    }
+
     @Test fun `drawer layer translation and scale do not repair an unchanged reading position`() {
         homeY = 180f
         homeScale = .95f

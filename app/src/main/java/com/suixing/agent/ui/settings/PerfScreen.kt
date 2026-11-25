@@ -63,16 +63,14 @@ import kotlin.coroutines.resume
 internal fun PerfScreen(onBack: () -> Unit) {
     // 进页面读一次，退出再进就是最新数据 —— 但**读盘与算分位数都不在主线程**：那是几十 KB 的
     // JSON 加一次排序，放在主线程会让刚进页面的那一帧掉帧，而这页恰恰是拿来量掉帧的。
-    var summary by remember { mutableStateOf(PerfSummary()) }
-    var records by remember { mutableStateOf<List<PerfRecord>>(emptyList()) }
+    var snapshot by remember { mutableStateOf(PerfScreenSnapshot()) }
     LaunchedEffect(Unit) {
-        val loaded = withContext(Dispatchers.IO) {
-            Core.perf.summary(limit = 20) to Core.perf.recent(limit = 20)
+        snapshot = withContext(Dispatchers.IO) {
+            val records = Core.perf.recent(limit = 20)
+            PerfScreenSnapshot(records, PerfSummary.fromRecent(records), PerfHealth.of(records))
         }
-        summary = loaded.first
-        records = loaded.second
     }
-    val health = remember(records) { PerfHealth.of(records) }
+    val (records, summary, health) = snapshot
 
 
     Scaffold(
@@ -135,6 +133,12 @@ internal fun PerfScreen(onBack: () -> Unit) {
         }
     }
 }
+
+private data class PerfScreenSnapshot(
+    val records: List<PerfRecord> = emptyList(),
+    val summary: PerfSummary = PerfSummary(),
+    val health: PerfHealth = PerfHealth(),
+)
 
 /** Sampling invalidates only this visible item; scrolling record rows does not sample the device. */
 @Composable

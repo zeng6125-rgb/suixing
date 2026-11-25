@@ -5,6 +5,8 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.suixing.agent.agent.NativeWireText
 import com.suixing.agent.agent.renderForCompaction
 import com.suixing.agent.core.NativeCore
+import com.suixing.agent.core.NativeCoreJni
+import com.suixing.agent.data.ChatLogCheckpoint
 import com.suixing.agent.data.NativeChatLog
 import com.suixing.agent.data.Roles
 import com.suixing.agent.data.StoredMessage
@@ -21,6 +23,7 @@ import com.suixing.agent.ui.chat.markdown.splitImageSegments
 import java.io.File
 import java.io.ByteArrayOutputStream
 import java.io.RandomAccessFile
+import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.json.Json
 import org.junit.Assert.*
 import org.junit.Test
@@ -28,6 +31,13 @@ import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class NativeMigrationDeviceTest {
+    @Test fun historyBudgetReadsOnlyTheUsedPrefixOfTheReusedBatch() {
+        assertTrue(NativeCore.available)
+        val costs = intArrayOf(3, 4, 5, 900)
+        val users = byteArrayOf(0, 1, 1, 1)
+        assertArrayEquals(intArrayOf(13, 3, 0, 2), NativeCoreJni.nativeTrimChunk(costs, users, 3, 100, 1, 8))
+    }
+
     @Test fun streamingBlocksMatchTheExistingParser() {
         assertTrue(NativeCore.available)
         val sources = listOf(
@@ -156,6 +166,66 @@ class NativeMigrationDeviceTest {
         } finally { file.delete() }
     }
 
+    @Test fun nativeHistoryReadAllowsCancellationOnTheSameOpenDescriptor() {
+        val json = Json { encodeDefaults = true; ignoreUnknownKeys = true }
+        val messages = List(32) { index ->
+            val role = if (index % 2 == 0) Roles.USER else Roles.ASSISTANT
+            StoredMessage("m$index", role, "test".repeat(20_000), timestamp = index.toLong())
+        }
+        val encoded = messages.joinToString("\n", postfix = "\n") {
+            json.encodeToString(StoredMessage.serializer(), it)
+        }.toByteArray()
+        val file = File.createTempFile("native-log-cancel", ".jsonl", InstrumentationRegistry.getInstrumentation().targetContext.cacheDir)
+        try {
+            file.writeBytes(encoded)
+            RandomAccessFile(file, "r").use { input ->
+                input.seek(4)
+                val end = encoded.size.toLong()
+                val cancelled = CancellationException("new conversation selected")
+                var checks = 0
+                val checkpoint = ChatLogCheckpoint { if (++checks == 2) throw cancelled }
+                val lookupError = runCatching { NativeChatLog.windowStart(input, end, 12, checkpoint) }.exceptionOrNull()
+                assertSame(cancelled, lookupError)
+                assertEquals(2, checks)
+
+                val start = requireNotNull(NativeChatLog.windowStart(input, end, 12))
+                checks = 0
+                val decodeError = runCatching {
+                    NativeChatLog.read(input, file.name, start, end, json, checkpoint)
+                }.exceptionOrNull()
+                assertSame(cancelled, decodeError)
+                assertEquals(2, checks)
+                val page = requireNotNull(NativeChatLog.read(input, file.name, start, end, json))
+                assertEquals(messages.takeLast(24), page.map { it.message })
+                assertEquals(4L, input.filePointer)
+            }
+        } finally {
+            file.delete()
+        }
+    }
+
+    @Test fun nativeTerminalViewportKeepsOverlappingRowsDuringScroll() {
+        val output = object : TerminalOutput() {
+            override fun write(data: ByteArray, offset: Int, count: Int) {}
+            override fun titleChanged(oldTitle: String?, newTitle: String?) {}
+            override fun onCopyTextToClipboard(text: String?) {}
+            override fun onPasteTextFromClipboard() {}
+            override fun onBell() {}
+            override fun onColorsChanged() {}
+        }
+        TerminalEmulator(output, 80, 24, 1, 1, 2000, null).use { emulator ->
+            val input = (0 until 80).joinToString("") { "entry $it\r\n" }.toByteArray()
+            emulator.append(input, input.size)
+            emulator.prepareRows(0)
+            val screen = emulator.screen
+            val row = screen.mLines[screen.externalToInternalRow(0)]
+            for (top in listOf(-1, -2, -1, 0)) {
+                emulator.prepareRows(top)
+                assertSame(row, screen.mLines[screen.externalToInternalRow(0)])
+            }
+        }
+    }
+
     @Test fun nativeTerminalRunsOnAndroidAndReleasesItsBuffers() {
         val replies = ByteArrayOutputStream()
         val output = object : TerminalOutput() {
@@ -180,6 +250,17 @@ class NativeMigrationDeviceTest {
             val query = "\u001b]10;?\u0007\u001b]11;?\u0007\u001b]12;?\u0007".toByteArray()
             emulator.append(query, query.size)
             assertEquals("\u001b]10;rgb:1212/3434/5656\u0007\u001b]11;rgb:2323/4545/6767\u0007\u001b]12;rgb:3434/5656/7878\u0007", replies.toString(Charsets.UTF_8.name()))
+            val originalRed = colors[1]
+            val setRed = "\u001b]4;1;#112233\u0007".toByteArray()
+            emulator.append(setRed, setRed.size)
+            assertEquals(0xff112233.toInt(), colors[1])
+            val plain = "plain".toByteArray()
+            emulator.append(plain, plain.size)
+            assertEquals(0xff112233.toInt(), colors[1])
+            assertEquals(0xff123456.toInt(), colors[TextStyle.COLOR_INDEX_FOREGROUND])
+            val resetRed = "\u001b]104;1\u0007".toByteArray()
+            emulator.append(resetRed, resetRed.size)
+            assertEquals(originalRed, colors[1])
             emulator.clearScreenAndHistory()
             assertEquals("", emulator.screen.transcriptText)
             emulator.close()

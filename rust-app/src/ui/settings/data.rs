@@ -1,33 +1,64 @@
 use super::*;
 impl RustApplication {
     pub(super) fn settings_data(&mut self, ui: &mut egui::Ui) {
-        for (page, label) in [
-            (Page::Memory, "用户记忆"),
-            (Page::Assistants, "助手设置"),
-            (Page::Files, "工作区文件"),
+        for (title, rows) in [
+            (
+                "记忆",
+                &[
+                    (Some(Page::Memory), "用户记忆", "模型自己写下的长期备忘"),
+                    (
+                        None,
+                        "用户画像",
+                        "模型自己维护的长期自述：称呼、偏好与习惯，也可手改",
+                    ),
+                ][..],
+            ),
+            (
+                "助手与文件",
+                &[
+                    (
+                        Some(Page::Assistants),
+                        "助手设置",
+                        "每个助手的名字、提示词、模型与工具",
+                    ),
+                    (
+                        Some(Page::Conversations),
+                        "会话管理",
+                        "打开、导出或删除聊天记录（不是工作区文件）",
+                    ),
+                    (
+                        Some(Page::Files),
+                        "工作区文件",
+                        "agent 在会话里读写的工作区文件，与聊天记录无关",
+                    ),
+                ][..],
+            ),
         ] {
-            if full_button(ui, label, true).clicked() {
-                self.navigate(Navigation::Page(page), false);
+            controls::group_header(ui, title);
+            let mut selected = None;
+            controls::card(ui, 0).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                for &(page, label, description) in rows {
+                    ui.push_id(label, |ui| {
+                        if controls::link(ui, label, description) {
+                            selected = Some(page);
+                        }
+                    });
+                }
+            });
+            if let Some(page) = selected {
+                if let Some(page) = page {
+                    self.navigate(Navigation::Page(page), false);
+                } else {
+                    self.settings_view.section = Section::Profile;
+                }
             }
         }
-        if full_button(ui, "用户画像", true).clicked() {
-            self.settings_view.section = Section::Profile;
+        if self.settings_view.legacy_upgrade.is_some() || self.legacy_preview.is_some() {
+            ui.add_space(12.0);
+            ui.collapsing("旧版资料", |ui| self.settings_legacy_migration(ui));
         }
-        if full_button(ui, "会话管理", self.state.loaded).clicked() {
-            self.navigate(Navigation::Page(Page::Conversations), false);
-        }
-        ui.separator();
-        ui.label(
-            RichText::new(format!("图形后端：{}", self.backend))
-                .small()
-                .weak(),
-        );
-        ui.label(
-            RichText::new("导入前可查看旧版资料的迁移清单，原始资料会保留。")
-                .small()
-                .weak(),
-        );
-        self.settings_legacy_migration(ui);
+        ui.add_space(24.0);
     }
 
     pub(super) fn settings_legacy_upgrade(&mut self, ui: &mut egui::Ui) {
@@ -38,7 +69,6 @@ impl RustApplication {
         egui::ScrollArea::vertical()
             .id_salt("first_run_legacy")
             .show(ui, |ui| {
-                ui.heading("迁移旧版数据");
                 match &self.settings_view.legacy_upgrade {
                     Some(Err(error)) => {
                         ui.label(format!("暂时无法检查旧版数据：{error}"));

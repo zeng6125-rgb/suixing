@@ -35,7 +35,7 @@ enum Bodies {
 pub struct CommittedHistory {
     source: ViewSource,
     stamp: SourceStamp,
-    headers: Vec<MessageHeader>,
+    headers: Arc<Vec<MessageHeader>>,
     root: PathBuf,
     bodies: Bodies,
     cache: Mutex<Option<(usize, Arc<Vec<u8>>)>>,
@@ -43,6 +43,10 @@ pub struct CommittedHistory {
     pub queued_turns: Vec<QueuedTurn>,
 }
 impl CommittedHistory {
+    pub(crate) fn shared_headers(&self) -> Arc<Vec<MessageHeader>> {
+        Arc::clone(&self.headers)
+    }
+
     pub(crate) fn set_owner_stamp(&mut self, stamp: SourceStamp) {
         self.stamp = stamp;
     }
@@ -130,6 +134,7 @@ pub(crate) struct ConsoleTailRequest {
     root: PathBuf,
     directory: PathBuf,
     id: String,
+    shared_files: Option<PathBuf>,
 }
 struct ConsoleText {
     text: String,
@@ -214,6 +219,30 @@ impl ConsoleTailRequest {
         const TAIL_IO: u64 = 64 * 1024 * 1024;
         const TAIL_ROWS: usize = 512;
         const TAIL_SEGMENTS: usize = 8;
+        if let Some(files) = self.shared_files.as_deref() {
+            let (_, from, bytes) =
+                super::shared_chat::log_tail(files, &self.id, 128 * 1024).map_err(failure)?;
+            let mut recent = VecDeque::new();
+            for (index, line) in bytes.split(|&byte| byte == b'\n').enumerate() {
+                cancelled(&check)?;
+                if line.is_empty() || (from > 0 && index == 0) {
+                    continue;
+                }
+                let message: ConsoleMessage = serde_json::from_slice(line).map_err(failure)?;
+                message.valid()?;
+                if !message.text.blank {
+                    recent.push_back(message);
+                }
+                if recent.len() > 6 {
+                    recent.pop_front();
+                }
+            }
+            let mut text = String::new();
+            for message in recent {
+                message.render(&mut text);
+            }
+            return Ok(text);
+        }
         let manifest = self.directory.join(format!("{}.segments.json", self.id));
         let present = match fs::symlink_metadata(&manifest) {
             Ok(_) => true,
@@ -316,7 +345,7 @@ impl ConsoleTailRequest {
             // Pin the exact index throughout the tail read, independently of
             // the actor's owning revision check when receiving the result.
             let after = read_file(&self.root, &manifest, INDEX_BYTES, &check)?;
-            if crate::legacy_migration::digest(&index) != crate::legacy_migration::digest(&after) {
+            if index != after {
                 return Err(DisplayError::Stale);
             }
         } else {
@@ -386,6 +415,17 @@ impl ConsoleTailRequest {
     }
 }
 impl Store {
+    fn child_history_path(&self, parent: &str, child: &str) -> (&Path, PathBuf) {
+        let filename = format!("{child}.json");
+        if let Some(files) = self.shared_files_root.as_deref() {
+            let path = super::shared_children::directory(files, parent).join(&filename);
+            if path.exists() {
+                return (files, path);
+            }
+        }
+        (&self.root, self.child_directory.join(parent).join(filename))
+    }
+
     pub(crate) fn console_tail_request(
         &self,
         id: &str,
@@ -396,6 +436,7 @@ impl Store {
             root: self.root.clone(),
             directory: self.chat_directory.clone(),
             id: id.into(),
+            shared_files: self.shared_files_root.clone(),
         })
     }
     pub(crate) fn latest_console_conversation(&self) -> Option<&Conversation> {
@@ -417,23 +458,13 @@ impl Store {
     ) -> Result<ViewSource, DisplayError> {
         validate_id(conversation_id).map_err(failure)?;
         validate_id(child_id).map_err(failure)?;
-        let path = self
-            .child_directory
-            .join(conversation_id)
-            .join(format!("{child_id}.json"));
-        let bytes = read_file(&self.root, &path, MAX_CHILD_BYTES as usize, &|| false)?;
-        #[derive(Deserialize)]
-        struct RecordId {
-            id: String,
-        }
-        #[derive(Deserialize)]
-        struct Document {
-            version: u32,
-            parent_chat: String,
-            parent_run: String,
-            record: RecordId,
-        }
-        let document: Document = serde_json::from_slice(&bytes).map_err(failure)?;
+        let (root, path) = self.child_history_path(conversation_id, child_id);
+        let bytes = read_file(root, &path, MAX_CHILD_BYTES as usize, &|| false)?;
+        let document: super::ChildDocument = if root == self.root {
+            serde_json::from_slice(&bytes).map_err(failure)?
+        } else {
+            super::shared_children::decode(&bytes).map_err(failure)?
+        };
         if document.version != 1
             || document.parent_chat != conversation_id
             || document.record.id != child_id
@@ -464,6 +495,23 @@ impl Store {
             .clone();
         match &source {
             ViewSource::Main { conversation_id } => {
+                if let Some(files) = self.shared_files_root.as_deref() {
+                    let document =
+                        super::shared_chat::read(files, conversation_id).map_err(failure)?;
+                    return Self::memory_history(
+                        source,
+                        SourceStamp {
+                            generation: self.history_generation_token(),
+                            revision,
+                            projection_revision,
+                        },
+                        document.conversation,
+                        document.messages,
+                        document.queued_turns,
+                        files.to_owned(),
+                        &check,
+                    );
+                }
                 let manifest = self
                     .chat_directory
                     .join(format!("{conversation_id}.segments.json"));
@@ -571,7 +619,7 @@ impl Store {
                             revision,
                             projection_revision,
                         },
-                        headers,
+                        headers: Arc::new(headers),
                         root: self.root.clone(),
                         bodies: Bodies::Segments {
                             segments: archive.segments,
@@ -618,19 +666,13 @@ impl Store {
             } => {
                 validate_id(parent_run_id).map_err(failure)?;
                 validate_id(child_id).map_err(failure)?;
-                let path = self
-                    .child_directory
-                    .join(conversation_id)
-                    .join(format!("{child_id}.json"));
-                let bytes = read_file(&self.root, &path, MAX_CHILD_BYTES as usize, &check)?;
-                #[derive(Deserialize)]
-                struct Document {
-                    version: u32,
-                    parent_chat: String,
-                    parent_run: String,
-                    record: crate::subagents::Record,
-                }
-                let document: Document = serde_json::from_slice(&bytes).map_err(failure)?;
+                let (root, path) = self.child_history_path(conversation_id, child_id);
+                let bytes = read_file(root, &path, MAX_CHILD_BYTES as usize, &check)?;
+                let document: super::ChildDocument = if root == self.root {
+                    serde_json::from_slice(&bytes).map_err(failure)?
+                } else {
+                    super::shared_children::decode(&bytes).map_err(failure)?
+                };
                 if document.version != 1
                     || document.parent_chat != *conversation_id
                     || document.parent_run != *parent_run_id
@@ -648,7 +690,7 @@ impl Store {
                     conversation,
                     document.record.messages,
                     Vec::new(),
-                    self.root.clone(),
+                    root.to_owned(),
                     &check,
                 )
             }
@@ -683,7 +725,7 @@ impl Store {
         Ok(CommittedHistory {
             source,
             stamp,
-            headers,
+            headers: Arc::new(headers),
             root,
             bodies: Bodies::Memory(bodies),
             cache: Mutex::new(None),
@@ -712,16 +754,7 @@ impl HistorySource for CommittedHistory {
         match &self.bodies {
             Bodies::Memory(messages) => {
                 let message = messages.get(index).ok_or(DisplayError::Missing)?;
-                if message_fingerprint(message)?
-                    != self
-                        .headers
-                        .get(index)
-                        .ok_or(DisplayError::Stale)?
-                        .message_hash
-                {
-                    return Err(DisplayError::Stale);
-                }
-                cancelled(check)?;
+                // The message and its header were built and pinned together by memory_history.
                 read(message)
             }
             Bodies::Segments {
@@ -762,9 +795,7 @@ impl HistorySource for CommittedHistory {
                 let line = bytes
                     .get(location.from..location.to)
                     .ok_or(DisplayError::Stale)?;
-                if crate::legacy_migration::digest(line) != self.headers[index].message_hash {
-                    return Err(DisplayError::Stale);
-                }
+                // Both the locations and the cached bytes come from the verified segment.
                 let message: Message = serde_json::from_slice(line).map_err(failure)?;
                 if message.id != self.headers[index].id {
                     return Err(DisplayError::Stale);
@@ -773,5 +804,44 @@ impl HistorySource for CommittedHistory {
                 read(&message)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pinned_segment_stays_stable_and_cache_miss_rejects_changed_bytes() {
+        let root = std::env::temp_dir().join(format!(
+            "jagent-history-{}",
+            crate::controller::unique_id()
+        ));
+        let mut store = Store::open(root.clone()).unwrap();
+        let conversation = store.new_conversation("History").unwrap();
+        let message: Message = serde_json::from_value(serde_json::json!({
+            "id": "a1", "role": "assistant", "text": "original", "thinking": "", "complete": true
+        }))
+        .unwrap();
+        store
+            .save_messages(&conversation.id, vec![message])
+            .unwrap();
+        let source = ViewSource::Main {
+            conversation_id: conversation.id,
+        };
+        let history = store.open_history(source, 1, 1, || false).unwrap();
+        let Bodies::Segments { segments, .. } = &history.bodies else {
+            panic!("expected a committed segment");
+        };
+        let path = history.root.join(&segments[0].path);
+        let data = fs::read_to_string(&path).unwrap();
+        fs::write(&path, data.replacen("original", "modified", 1)).unwrap();
+
+        let read = || history.with_message(0, &|| false, |message| Ok(message.text.clone()));
+        assert_eq!(read().unwrap(), "original");
+        history.cache.lock().unwrap().take();
+        assert_eq!(read(), Err(DisplayError::Stale));
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
     }
 }

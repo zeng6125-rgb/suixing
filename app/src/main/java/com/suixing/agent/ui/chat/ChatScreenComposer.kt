@@ -25,14 +25,17 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.offset
 import androidx.compose.ui.zIndex
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.suixing.agent.R
 import com.suixing.agent.data.AppSettings
+import com.suixing.agent.ui.components.LocalComposerImeReservePx
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.first
@@ -66,6 +69,7 @@ internal fun BoxScope.ChatComposerPanel(
     val reading = contextReadout.reading
     val draft = state.draft
     val attachments = inputBindings.controller.attachments
+    val imeReserve = LocalComposerImeReservePx.current
     var todoSheetOpen by dialogs.todoSheetOpenState
     fun currentInput(): String = inputBindings.controller.currentInput()
     fun setDraft(
@@ -84,11 +88,12 @@ internal fun BoxScope.ChatComposerPanel(
     Box(
         modifier = Modifier
             .align(Alignment.BottomCenter)
-            // IME 在**放置阶段**读取（offset 的 lambda 属于布局/放置，不属于组合），
-            // 键盘高度每帧变化只移动输入框的位置：不改约束、不重测 Scaffold、
-            // 不重组那个 60 参数的 Composer。输入框自己内部还有一段
-            // `(navbar − ime)` 的让位（ChatComposer.kt:941），两处不重复扣。
-            .offset { IntOffset(0, -imePxState.value) },
+            .offset { IntOffset(0, -imePxState.value) }
+            .layout { measurable, constraints ->
+                // Size for the taller keyboard endpoint. Placement still follows each live inset.
+                val child = measurable.measure(constraints.offset(vertical = -imeReserve.value))
+                layout(child.width, child.height) { child.placeRelative(0, 0) }
+            },
     ) {
         ComposerDraftText(actions, state.conversationId) { input ->
         val goal by actions.goal.collectAsStateWithLifecycle()

@@ -268,7 +268,8 @@ internal object UiOperationOverlay {
             setImageResource(resource)
             imageTintList = ColorStateList.valueOf(color)
             scaleType = ImageView.ScaleType.CENTER_INSIDE
-            setPadding(dp(context, 13), dp(context, 13), dp(context, 13), dp(context, 13))
+            val inset = dp(context, if (resource == R.drawable.ic_stop_filled) 13 else 11)
+            setPadding(inset, inset, inset, inset)
             contentDescription = description
             tooltipText = description
             background = null

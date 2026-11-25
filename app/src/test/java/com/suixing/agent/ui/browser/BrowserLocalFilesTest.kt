@@ -99,6 +99,9 @@ class BrowserLocalFilesTest {
         assertNull(files.fileForUrl("https://example.com/index.html"))
         assertNull(files.fileForUrl(url.replace("https://", "http://")))
         assertNull(files.response("https://example.com/index.html"))
+        val remoteWithLocalUrl = "https://example.com/index.html?link=$url"
+        assertNull(files.response(remoteWithLocalUrl))
+        assertEquals(remoteWithLocalUrl, files.displayUrl(remoteWithLocalUrl))
     }
 
     @Test fun `a missing HTML file fails without creating a local site`() {

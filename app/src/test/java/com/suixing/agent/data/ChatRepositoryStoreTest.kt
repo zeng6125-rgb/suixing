@@ -12,6 +12,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
+import java.io.ByteArrayOutputStream
 import java.io.File
 
 /**
@@ -137,6 +138,37 @@ class ChatRepositoryStoreTest {
         val files = chatsDir.listFiles { f -> f.extension == "json" && !f.name.endsWith(LIVE_SUFFIX) }
         assertEquals("no plain transcript any more", 0, files?.size)
         assertEquals("exactly one chat in the store", 1, storeMetaIds().size)
+    }
+
+    @Test
+    fun `the list and export use the committed history boundary`() = runBlocking {
+        val chat = conversation("export", messages = listOf(
+            StoredMessage(id = "u", role = Roles.USER, text = "换行\n资料🙂".repeat(8_000)),
+        ))
+        putInStoreOnly(chat)
+        val meta = store.readMeta(chat.id)!!
+        val log = store.logFileOf(meta)!!
+        log.appendText("uncommitted tail")
+
+        val repository = repository().apply { load() }
+        assertTrue(log.length() > meta.logBytes)
+        val summary = repository.conversations.value.single()
+        assertEquals(meta.logBytes, summary.committedLogBytes)
+        assertTrue(summary.messages.isEmpty())
+
+        val output = ByteArrayOutputStream()
+        assertTrue(repository.exportJson(chat.id) { output })
+        val serialized = output.toString(Charsets.UTF_8.name())
+        val exported = json.decodeFromString(Conversation.serializer(), serialized)
+        assertEquals(chat.messages, exported.messages)
+        assertEquals(chat.title, exported.title)
+        assertEquals(meta.messageCount, exported.messageCount)
+        assertFalse(serialized.contains("committedLogBytes"))
+    }
+
+    @Test
+    fun `a missing conversation does not open or truncate the export destination`() = runBlocking {
+        assertFalse(repository().exportJson("missing") { error("The destination should stay unopened") })
     }
 
     @Test

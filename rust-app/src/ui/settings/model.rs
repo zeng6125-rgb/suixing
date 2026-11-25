@@ -83,12 +83,6 @@ pub(super) fn context_and_behavior(ui: &mut egui::Ui, settings: &mut Settings) {
         "图片输入",
         "允许把图片发送给视觉模型。",
     );
-    row(
-        ui,
-        &mut settings.behavior.allow_insecure_tls,
-        "允许自签名证书",
-        "仅对本机和局域网接口放宽证书校验，供你自己的代理接口使用。",
-    );
     let model = settings
         .active_provider_id
         .as_ref()
