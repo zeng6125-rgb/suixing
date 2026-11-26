@@ -112,8 +112,7 @@ internal fun MenuCard(
      *
      * 菜单使用原内容留白；满宽涟漪仍由外层独立绘制。
      */
-    contentPadding: androidx.compose.foundation.layout.PaddingValues =
-        androidx.compose.foundation.layout.PaddingValues(horizontal = 18.dp, vertical = 14.dp),
+    contentPadding: androidx.compose.foundation.layout.PaddingValues = PopupCardPadding,
     /** Small action menus settle promptly; informational cards retain their existing motion. */
     compactMotion: Boolean = false,
     content: @Composable ColumnScope.() -> Unit,

@@ -225,10 +225,7 @@ object PluginRuntime {
                     continue
                 }
                 val missing = mutableListOf<String>()
-                val text = TEMPLATE_VAR.replace(context.content) { match ->
-                    val key = match.groupValues[1]
-                    vars[key] ?: run { missing += key; match.value }
-                }
+                val text = renderMode(context.content, vars, missing, NativePluginOps.MODE_RAW)
                 if (missing.isNotEmpty()) {
                     PluginLog.skip("${spec.id} context", "变量没有值：${missing.joinToString("、")}")
                     continue
@@ -361,12 +358,12 @@ object PluginRuntime {
         // OkHttp 遇到 CR/LF 会抛 IllegalArgumentException（issue #34 的补充）。
         // 模型给的参数里带换行是很可能的，所以这里把换行压成空格而不是让它炸在 header()。
         val headers = exec.headers.entries.associate { (name, value) ->
-            render(name, vars, missing) to
-                render(value, vars, missing, transform = ::headerSafe)
+            renderMode(name, vars, missing, NativePluginOps.MODE_RAW) to
+                renderMode(value, vars, missing, NativePluginOps.MODE_HEADER_SAFE, transform = ::headerSafe)
         }
         // body 按**位置**处理（issue #34）：字符串里转义、数字位置原样。
         val body = exec.body?.let {
-            render(it, vars, missing, jsonAware = ::jsonEscapeIfInString)
+            renderMode(it, vars, missing, NativePluginOps.MODE_JSON_AWARE, jsonAware = ::jsonEscapeIfInString)
         }
         if (missing.isNotEmpty()) return missingFailure(spec, decl, missing)
 
@@ -374,7 +371,7 @@ object PluginRuntime {
         val builder = Request.Builder().url(url)
         headers.forEach { (name, value) -> builder.header(name, value) }
         // OkHttp 不允许 GET/HEAD 带 body；其余方法必须带（空的也带，很多接口要求 Content-Length）。
-        val permitsBody = method in setOf("POST", "PUT", "PATCH", "DELETE")
+        val permitsBody = method in METHODS_WITH_BODY
         if (permitsBody) {
             val declaredType = headers.keys.any { it.equals("Content-Type", ignoreCase = true) }
             val mediaType = if (declaredType) null else JSON_MEDIA_TYPE
@@ -418,9 +415,10 @@ object PluginRuntime {
         // shell 里的替换值一律单引号包住（与 ShellTools 的 quote 同一套）：模型给的字符串不该
         // 变成第二条命令。代价是「一个参数里塞多个 flag」的模板不管用了 —— 那种插件得把固定
         // 部分写在 command 里。
-        val command = render(exec.command, vars, missing, ::shellQuote)
-        val cwd = exec.cwd?.takeIf { it.isNotBlank() }?.let { render(it, vars, missing, ::shellQuote) }
-            ?: shellQuote(dir.absolutePath)
+        val command = renderMode(exec.command, vars, missing, NativePluginOps.MODE_SHELL_QUOTE, ::shellQuote)
+        val cwd = exec.cwd?.takeIf { it.isNotBlank() }?.let {
+            renderMode(it, vars, missing, NativePluginOps.MODE_SHELL_QUOTE, ::shellQuote)
+        } ?: shellQuote(dir.absolutePath)
         if (missing.isNotEmpty()) return missingFailure(spec, decl, missing)
 
         val label = if (exec.needsRoot) "root" else "local(app)"
@@ -498,17 +496,32 @@ object PluginRuntime {
      */
     internal fun pickPath(root: JsonElement, path: String): JsonElement? {
         var node: JsonElement? = root
-        for (step in path.split('.')) {
-            val key = step.trim()
-            if (key.isEmpty()) continue
-            node = when (val current = node) {
-                is JsonObject -> current[key]
-                is JsonArray -> key.toIntOrNull()?.let { current.getOrNull(it) }
-                else -> null
+        var start = 0
+        val len = path.length
+        while (start <= len) {
+            val dot = path.indexOf('.', start)
+            val end = if (dot < 0) len else dot
+            val key = trimSubrange(path, start, end)
+            if (key.isNotEmpty()) {
+                node = when (val current = node) {
+                    is JsonObject -> current[key]
+                    is JsonArray -> key.toIntOrNull()?.let { current.getOrNull(it) }
+                    else -> null
+                }
+                if (node == null) return null
             }
-            if (node == null) return null
+            if (dot < 0) break
+            start = dot + 1
         }
         return node
+    }
+
+    private fun trimSubrange(text: String, start: Int, end: Int): String {
+        var s = start
+        var e = end
+        while (s < e && text[s].isWhitespace()) s++
+        while (e > s && text[e - 1].isWhitespace()) e--
+        return if (s >= e) "" else text.substring(s, e)
     }
 
     /**
@@ -516,14 +529,33 @@ object PluginRuntime {
      * header / body 原样。缺值时**保留字面量**并把键收进 [missing]，由调用方一次性报错 ——
      * 与 [contextsFor] 同一个纪律：宁可不发，也不把 `{{env.TOKEN}}` 这种字面量发出去。
      */
+    private val identityTransform: (String) -> String = { it }
+
+    private fun renderMode(
+        template: String,
+        vars: Map<String, String>,
+        missing: MutableList<String>,
+        mode: Int,
+        transform: (String) -> String = identityTransform,
+        jsonAware: ((value: String, inString: Boolean) -> String)? = null,
+    ): String {
+        if (!template.contains("{{")) return template
+        NativePluginOps.renderTemplate(template, vars, missing, mode)?.let { return it }
+        return render(template, vars, missing, transform, jsonAware)
+    }
+
     internal fun render(
         template: String,
         vars: Map<String, String>,
         missing: MutableList<String>,
-        transform: (String) -> String = { it },
+        transform: (String) -> String = identityTransform,
         /** body 专用：在 JSON 字符串内才转义，数字位置原样（见 [jsonEscapeIfInString]）。 */
         jsonAware: ((value: String, inString: Boolean) -> String)? = null,
     ): String {
+        if (!template.contains("{{")) return template
+        if (jsonAware == null && transform === identityTransform) {
+            NativePluginOps.renderTemplate(template, vars, missing, NativePluginOps.MODE_RAW)?.let { return it }
+        }
         var cursor = 0
         var inString = false
         fun stringAt(index: Int): Boolean {
@@ -667,6 +699,7 @@ private val TEMPLATE_VAR by lazy { Regex("""\{\{\s*([A-Za-z_][A-Za-z0-9_.]*)\s*\
 private val HOOK_REGEX by lazy { ConcurrentHashMap<String, Regex>() }
 
 private const val HOOK_EVENT = "tools/pre-execute"
+private val METHODS_WITH_BODY = setOf("POST", "PUT", "PATCH", "DELETE")
 
 private const val DEFAULT_MAX_CHARS = 8000
 

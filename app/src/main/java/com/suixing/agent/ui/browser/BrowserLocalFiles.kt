@@ -5,8 +5,8 @@ import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.IOException
 import java.net.URI
+import com.suixing.agent.core.NativeCore
 import java.net.URLConnection
-import java.security.MessageDigest
 import java.util.Locale
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.ConcurrentHashMap
@@ -81,7 +81,7 @@ internal class BrowserLocalFiles(restoredRoots: List<String> = emptyList()) {
 
 /** Stable directory origins preserve web storage without a separate persisted ID registry. */
 private fun localHost(directory: File): String {
-    val digest = MessageDigest.getInstance("SHA-256").digest(directory.path.toByteArray(Charsets.UTF_8))
+    val digest = NativeCore.sha256Digest(directory.path.toByteArray(Charsets.UTF_8))
     val hex = buildString(64) {
         for (byte in digest) {
             val value = byte.toInt() and 0xff

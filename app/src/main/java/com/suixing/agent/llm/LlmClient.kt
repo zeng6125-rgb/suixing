@@ -553,6 +553,10 @@ class LlmClient(http: OkHttpClient? = null) {
                                     if (event.text != null) {
                                         stream.acceptDelta(event.text, event.reasoning, deliverText, deliverReasoning)
                                     }
+                                    event.turnEvent?.let { turnEvent ->
+                                        stream.acceptTurnEvent(turnEvent, deliverText, deliverReasoning)
+                                        if (stream.hasToolCalls()) received = true
+                                    }
                                     event.chunk?.let(::acceptChunk)
                                     event.compatibilityPayload?.let(::acceptPayload)
                                     offset += event.consumed
@@ -769,6 +773,27 @@ class LlmClient(http: OkHttpClient? = null) {
         fun acceptDelta(text: String, reasoning: String?, onDelta: (String) -> Unit, onReasoning: (String) -> Unit) {
             emitThinking(reasoning, onReasoning)
             emitText(text, onDelta)
+        }
+
+        fun acceptTurnEvent(event: NativeTurnEvent, onDelta: (String) -> Unit, onReasoning: (String) -> Unit) {
+            emitThinking(event.reasoning, onReasoning)
+            emitText(event.text, onDelta)
+            for (call in event.calls) {
+                when (call.mode) {
+                    0 -> appendCall(call.index, call.id, call.name, call.arguments)
+                    1 -> {
+                        val itemId = call.itemId ?: continue
+                        val idx = callsByItem.getOrPut(itemId) { calls.size }
+                        appendCall(idx, call.id ?: itemId, call.name, call.arguments)
+                    }
+                    2 -> {
+                        val itemId = call.itemId ?: continue
+                        val idx = callsByItem.getOrPut(itemId) { calls.size }
+                        appendCall(idx, null, null, call.arguments)
+                    }
+                }
+            }
+            if (event.stopIfNull && finishReason == null) finishReason = "stop"
         }
 
         // ---- the accumulator every protocol writes into (one copy, three readers) ----
@@ -1341,18 +1366,22 @@ class LlmClient(http: OkHttpClient? = null) {
     }
 
     /** `{name, description, input_schema}` — Anthropic's tool shape, schema not wrapped. */
-    private fun encodeAnthropicTool(spec: ToolSpec): JsonObject = buildJsonObject {
-        put("name", JsonPrimitive(spec.name))
-        put("description", JsonPrimitive(spec.description))
-        put("input_schema", spec.parameters.normalizedSchema() as JsonElement)
+    private fun encodeAnthropicTool(spec: ToolSpec): JsonObject = cachedTool(ToolWireFormat.ANTHROPIC, spec) {
+        buildJsonObject {
+            put("name", JsonPrimitive(it.name))
+            put("description", JsonPrimitive(it.description))
+            put("input_schema", it.parameters.normalizedSchema() as JsonElement)
+        }
     }
 
     /** Responses takes the flat function shape, with the schema under `parameters`. */
-    private fun encodeResponseTool(spec: ToolSpec): JsonObject = buildJsonObject {
-        put("type", JsonPrimitive("function"))
-        put("name", JsonPrimitive(spec.name))
-        put("description", JsonPrimitive(spec.description))
-        put("parameters", spec.parameters.normalizedSchema() as JsonElement)
+    private fun encodeResponseTool(spec: ToolSpec): JsonObject = cachedTool(ToolWireFormat.RESPONSES, spec) {
+        buildJsonObject {
+            put("type", JsonPrimitive("function"))
+            put("name", JsonPrimitive(it.name))
+            put("description", JsonPrimitive(it.description))
+            put("parameters", it.parameters.normalizedSchema() as JsonElement)
+        }
     }
 
     private fun encodeMessage(message: ChatMessage): JsonObject = encodeMessageStreaming(message, null)
@@ -1408,20 +1437,22 @@ class LlmClient(http: OkHttpClient? = null) {
         }
     }
 
-    private fun encodeTool(spec: ToolSpec): JsonObject = buildJsonObject {
-        put("type", JsonPrimitive("function"))
-        put(
-            "function",
-            buildJsonObject {
-                put("name", JsonPrimitive(spec.name))
-                put("description", JsonPrimitive(spec.description))
-                // 出口兜底（取证：网关 11129「工具定义不符合模型要求」会拒掉**整个请求**，一个
-                // 工具的 schema 缺 type/properties 就连坐全部工具）：这里再确认一次它是合法的
-                // JSON Schema 对象。源头已在 PluginRuntime.normalizeSchema 补齐，这一层保证
-                // 任何工具族（内置/插件/将来新增）都不会把整批请求拖死。
-                put("parameters", spec.parameters.normalizedSchema() as JsonElement)
-            },
-        )
+    private fun encodeTool(spec: ToolSpec): JsonObject = cachedTool(ToolWireFormat.OPENAI, spec) {
+        buildJsonObject {
+            put("type", JsonPrimitive("function"))
+            put(
+                "function",
+                buildJsonObject {
+                    put("name", JsonPrimitive(it.name))
+                    put("description", JsonPrimitive(it.description))
+                    // 出口兜底（取证：网关 11129「工具定义不符合模型要求」会拒掉**整个请求**，一个
+                    // 工具的 schema 缺 type/properties 就连坐全部工具）：这里再确认一次它是合法的
+                    // JSON Schema 对象。源头已在 PluginRuntime.normalizeSchema 补齐，这一层保证
+                    // 任何工具族（内置/插件/将来新增）都不会把整批请求拖死。
+                    put("parameters", it.parameters.normalizedSchema() as JsonElement)
+                },
+            )
+        }
     }
 
     /** `{"type":"object","properties":{…}}`：缺什么补什么，已有的关键字原样保留。 */
@@ -1518,6 +1549,35 @@ class LlmClient(http: OkHttpClient? = null) {
 
     companion object {
         private val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
+        private const val MAX_ENCODED_TOOLS = 256
+
+        private enum class ToolWireFormat { OPENAI, ANTHROPIC, RESPONSES }
+
+        private data class ToolCacheKey(val format: ToolWireFormat, val spec: ToolSpec)
+
+        private val encodedToolCache =
+            object : LinkedHashMap<ToolCacheKey, JsonObject>(64, 0.75f, true) {
+                override fun removeEldestEntry(
+                    eldest: MutableMap.MutableEntry<ToolCacheKey, JsonObject>?,
+                ): Boolean = size > MAX_ENCODED_TOOLS
+            }
+
+        private fun cachedTool(
+            format: ToolWireFormat,
+            spec: ToolSpec,
+            build: (ToolSpec) -> JsonObject,
+        ): JsonObject {
+            val key = ToolCacheKey(format, spec)
+            synchronized(encodedToolCache) {
+                encodedToolCache[key]?.let { return it }
+            }
+            val encoded = build(spec)
+            synchronized(encodedToolCache) {
+                encodedToolCache[key]?.let { return it }
+                encodedToolCache[key] = encoded
+            }
+            return encoded
+        }
 
         /** Anthropic requires `max_tokens`; this is what an unset budget becomes there. */
         internal const val DEFAULT_ANTHROPIC_MAX_TOKENS = 4096
@@ -1602,7 +1662,9 @@ internal fun parseUsage(usage: JsonObject): Usage? {
 }
 
 /** Reads the model ids out of an OpenAI-style `GET /models` response. */
-internal fun parseModels(body: String): List<String> {    val trimmed = body.trim()
+internal fun parseModels(body: String): List<String> {
+    NativeLlmOps.parseModels(body)?.let { return it }
+    val trimmed = body.trim()
     if (trimmed.isEmpty()) throw LlmException("服务器返回了空内容")
     val root = runCatching { Json.parseCoreValue(trimmed) }.getOrNull()
         ?: throw LlmException("服务器返回的不是 JSON：${trimmed.take(160)}")
@@ -1641,6 +1703,7 @@ data class ProviderModel(val id: String, val contextLength: Int? = null)
  * the caller decides what to do about that.
  */
 internal fun parseModelDetails(body: String): List<ProviderModel> {
+    NativeLlmOps.parseModelDetails(body)?.let { return it }
     val trimmed = body.trim()
     if (trimmed.isEmpty()) throw LlmException("服务器返回了空内容")
     val root = runCatching { Json.parseCoreValue(trimmed) }.getOrNull()
@@ -1687,6 +1750,7 @@ private fun contextLengthOf(element: JsonObject): Int? {
 
 /** Pulls a human-readable reason out of an error body, whatever shape it has. */
 internal fun extractApiError(body: String): String {
+    NativeLlmOps.extractApiError(body)?.let { return it }
     val trimmed = body.trim()
     if (trimmed.isEmpty()) return ""
     val parsed = runCatching { Json.parseCoreValue(trimmed) as? JsonObject }.getOrNull()
@@ -1762,7 +1826,9 @@ private fun String.toJsonObjectOrEmpty(): JsonObject =
 /** Keep valid argument strings verbatim; rejected historical calls still need an object on the wire. */
 private fun String.toJsonObjectArgumentsOrEmpty(): String {
     if (isBlank()) return "{}"
-    return if (runCatching { Json.parseCoreValue(this) is JsonObject }.getOrDefault(false)) this else "{}"
+    val isObj = NativeLlmOps.isJsonObject(this)
+        ?: runCatching { Json.parseCoreValue(this) is JsonObject }.getOrDefault(false)
+    return if (isObj) this else "{}"
 }
 
 /**

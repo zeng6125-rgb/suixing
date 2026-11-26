@@ -46,6 +46,16 @@ internal fun PageTopBarAction(
     enabled: Boolean = true,
     glyphSize: Dp = 20.dp,
 ) {
+    if (com.suixing.agent.ui.theme.LocalUseMiuix.current) {
+        MiuixPageTopBarAction(
+            icon = icon,
+            contentDescription = contentDescription,
+            onClick = onClick,
+            enabled = enabled,
+            glyphSize = glyphSize,
+        )
+        return
+    }
     IconButton(
         onClick = onClick,
         enabled = enabled,
@@ -285,17 +295,21 @@ fun PageTopBar(
                 // 阶段回调，写 State 就是跨阶段回写 —— 每次文本排版都要多一轮组合+布局。
                 // 位移在一趟布局里先测量后放置，存放位即可读到本次测量值；
                 // 读点在 `offset { }` 里（放置阶段），与 MarkdownText 的 `caret[0]` 同一写法。
-                val opticalShift = remember(title, subtitle) { FloatArray(1) }
+                val baseTitleStyle = MaterialTheme.typography.titleMedium
+                val titleStyle = remember(baseTitleStyle) {
+                    baseTitleStyle.copy(
+                        platformStyle = androidx.compose.ui.text.PlatformTextStyle(
+                            includeFontPadding = false,
+                        ),
+                    )
+                }
+                val opticalShift = remember(title, subtitle, titleStyle) { FloatArray(1) }
                 Box(Modifier.weight(1f)) {
                     Text(
                         text = title,
                         // 关掉字体自带的上下留白：默认 includeFontPadding 让文字盒比字形盒高，
                         // 文字看起来比返回图标低半像素到一像素（用户：「标题和 icon 没有严格垂直居中」）。
-                        style = MaterialTheme.typography.titleMedium.copy(
-                            platformStyle = androidx.compose.ui.text.PlatformTextStyle(
-                                includeFontPadding = false,
-                            ),
-                        ),
+                        style = titleStyle,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                         onTextLayout = { layout -> opticalShift[0] = opticalCenterShift(layout) },
@@ -352,12 +366,12 @@ fun PageTopBar(
  * 盒子里下伸那一段是空的 ⇒ 盒子居中后字看起来偏高。这里按 baseline 与字高估出字形中心，
  * 与盒中心求差；字号、字体、行高变了都自动跟随，不需要写死补偿值。
  */
-private fun opticalCenterShift(layout: TextLayoutResult): Float {
+internal fun opticalCenterShift(layout: TextLayoutResult): Float {
     if (layout.lineCount <= 0) return 0f
     val baseline = layout.getLineBaseline(0)
-    // 字形中心 ≈ baseline 往上半个字高。cap height 取 0.7 em（中英文常见值）。
+    // 字形中心 ≈ baseline 往上半个字高（中文全角 ≈ 0.37em，英文大写 ≈ 0.36em）。
     val em = layout.layoutInput.style.fontSize
     val emPx = if (em.isSp) with(layout.layoutInput.density) { em.toPx() } else em.value
-    val glyphCenter = baseline - emPx * 0.35f
+    val glyphCenter = baseline - emPx * 0.37f
     return layout.size.height / 2f - glyphCenter
 }

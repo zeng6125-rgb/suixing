@@ -1,6 +1,7 @@
 #include <jni.h>
 #include <cstdint>
 #include <cstddef>
+#include <vector>
 extern "C" {
 struct SearchBuffer { std::uint8_t* data; std::size_t len; };
 std::uint64_t sx_search_create();
@@ -17,6 +18,7 @@ int sx_core_json(std::uint64_t, const std::uint16_t*, std::size_t, SearchBuffer*
 int sx_core_trim_chunk(const std::int32_t*, const std::uint8_t*, std::size_t, int, int, int, std::int32_t*);
 int sx_json_measure(const std::uint16_t*, std::size_t, std::uint64_t*, std::uint64_t*);
 int sx_json_write(const std::uint16_t*, std::size_t, bool, bool (*)(void*, const std::uint8_t*, std::size_t), void*);
+int sx_core_sha256(const std::uint8_t*, std::size_t, std::uint8_t*);
 }
 namespace {
 void fail(JNIEnv* env, const char* type, const char* message) {
@@ -132,4 +134,25 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_suixing_agent_core_NativeCoreJn
     auto bytes = env->NewByteArray(static_cast<jsize>(response.value.len));
     if (bytes) env->SetByteArrayRegion(bytes, 0, static_cast<jsize>(response.value.len), reinterpret_cast<const jbyte*>(response.value.data));
     return env->ExceptionCheck() ? nullptr : bytes;
+}
+extern "C" JNIEXPORT jbyteArray JNICALL Java_com_suixing_agent_core_NativeCoreJni_nativeSha256(JNIEnv* env, jobject, jbyteArray source) {
+    if (!source) { fail(env, "java/lang/IllegalArgumentException", "Null SHA-256 input."); return nullptr; }
+    const jsize length = env->GetArrayLength(source);
+    if (env->ExceptionCheck() || length < 0) return nullptr;
+    std::uint8_t digest[32] = {};
+    std::uint8_t stack[4096];
+    std::vector<std::uint8_t> heap;
+    std::uint8_t* ptr = stack;
+    if (length > static_cast<jsize>(sizeof(stack))) {
+        heap.resize(static_cast<std::size_t>(length));
+        ptr = heap.data();
+    }
+    if (length > 0) {
+        env->GetByteArrayRegion(source, 0, length, reinterpret_cast<jbyte*>(ptr));
+        if (env->ExceptionCheck()) return nullptr;
+    }
+    if (!succeeded(env, sx_core_sha256(ptr, static_cast<std::size_t>(length), digest))) return nullptr;
+    auto result = env->NewByteArray(32);
+    if (result) env->SetByteArrayRegion(result, 0, 32, reinterpret_cast<const jbyte*>(digest));
+    return env->ExceptionCheck() ? nullptr : result;
 }

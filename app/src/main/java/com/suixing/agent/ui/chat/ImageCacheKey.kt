@@ -2,7 +2,7 @@ package com.suixing.agent.ui.chat
 
 /** ByteBuffer has no default Coil keyer; use the actual image content for cache identity. */
 internal fun imageCacheKey(bytes: ByteArray): String {
-    val digest = java.security.MessageDigest.getInstance("SHA-256").digest(bytes)
+    val digest = com.suixing.agent.core.NativeCore.sha256Digest(bytes)
     val digits = "0123456789abcdef"
     return buildString(75) {
         append("screenshot:")

@@ -35,6 +35,7 @@ internal data class UiNode(
 }
 
 internal fun parseUiDump(xml: String): List<UiNode> {
+    NativeUiDump.parse(xml)?.let { return it }
     val nodes = ArrayList<UiNode>(64)
     for (match in NODE_TAG.findAll(xml)) {
         val tag = match.value
@@ -83,11 +84,23 @@ internal fun renderUiNodes(nodes: List<UiNode>, truncated: Boolean = false): Str
         builder.append(" center=(").append(node.centerX).append(',').append(node.centerY).append(')')
         builder.append(" bounds=(").append(node.left).append(',').append(node.top)
             .append(',').append(node.right).append(',').append(node.bottom).append(')')
-        val flags = ArrayList<String>(3)
-        if (node.clickable) flags.add("clickable")
-        if (node.scrollable) flags.add("scrollable")
-        if (node.editable) flags.add("editable")
-        if (flags.isNotEmpty()) builder.append(' ').append(flags.joinToString(","))
+        if (node.clickable || node.scrollable || node.editable) {
+            builder.append(' ')
+            var wrote = false
+            if (node.clickable) {
+                builder.append("clickable")
+                wrote = true
+            }
+            if (node.scrollable) {
+                if (wrote) builder.append(',')
+                builder.append("scrollable")
+                wrote = true
+            }
+            if (node.editable) {
+                if (wrote) builder.append(',')
+                builder.append("editable")
+            }
+        }
         if (node.id.isNotEmpty()) builder.append(" id=").append(node.id)
         builder.append('\n')
     }
@@ -107,10 +120,16 @@ private val ATTR_EDITABLE = Regex("\\bclass=\"[^\"]*(EditText|AutoCompleteTextVi
 private val FOCUS_PACKAGE = Regex("([A-Za-z0-9_.]+)/[A-Za-z0-9_.$]+")
 
 /** Pulls the package name out of `dumpsys window`'s focus lines. */
-internal fun focusedPackage(dump: String): String? =
-    dump.lineSequence()
+internal fun focusedPackage(dump: String): String? {
+    when (val outcome = NativeUiDump.focusedPackage(dump)) {
+        is NativeUiDump.FocusOutcome.Found -> return outcome.pkg
+        NativeUiDump.FocusOutcome.Empty -> return null
+        null -> Unit
+    }
+    return dump.lineSequence()
         .firstOrNull { it.contains("mCurrentFocus") || it.contains("mFocusedApp") }
         ?.let { FOCUS_PACKAGE.find(it)?.groupValues?.get(1) }
+}
 
 /**
  * 一遍扫描做 XML 实体反转义。

@@ -21,6 +21,7 @@ internal object NativeCoreJni {
     external fun nativeTrimChunk(costs: IntArray, users: ByteArray, count: Int, budget: Int, used: Int, kept: Int): IntArray
     external fun nativeMeasureString(text: String): LongArray
     external fun nativeWriteString(text: String, sink: NativeJsonSink, scratch: ByteArray, quoted: Boolean)
+    external fun nativeSha256(bytes: ByteArray): ByteArray?
 }
 
 /** Shared pure computation/JSON ABI. Kotlin retains Android effects and typed schema decoding. */
@@ -43,6 +44,12 @@ internal object NativeCore {
         } finally { NativeCoreJni.nativeRelease(handle) }
     }
     fun parseObject(text: String): JsonObject? = parseValue(text) as? JsonObject
+
+    fun sha256(bytes: ByteArray): ByteArray? =
+        if (!available) null else try { NativeCoreJni.nativeSha256(bytes) } catch (_: UnsatisfiedLinkError) { null }
+
+    fun sha256Digest(bytes: ByteArray): ByteArray =
+        sha256(bytes) ?: java.security.MessageDigest.getInstance("SHA-256").digest(bytes)
 }
 
 /** The existing serializer keeps defaults, enums and platform schema behavior. */

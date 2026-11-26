@@ -791,6 +791,13 @@ internal fun SuixingDrawer(
                 .fillMaxHeight()
                 .graphicsLayer {
                     translationX = -panelPx * (1f - state.visualProgress.value)
+                    // Rasterize the static drawer surface + rounded sheet once while sliding so
+                    // high-refresh motion translates a single GPU layer instead of re-clipping every row.
+                    compositingStrategy = if (state.isMoving) {
+                        androidx.compose.ui.graphics.CompositingStrategy.Offscreen
+                    } else {
+                        androidx.compose.ui.graphics.CompositingStrategy.Auto
+                    }
                 },
         ) {
             drawerContent()

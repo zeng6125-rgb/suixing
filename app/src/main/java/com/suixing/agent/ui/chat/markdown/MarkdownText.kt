@@ -554,8 +554,12 @@ private class InlineScanner(
     private val parseMarkup: Boolean = true,
 ) {
     private val out = AnnotatedString.Builder()
-    private val delimiters = searchState?.delimiters ?: InlineDelimiterSearch(text)
-    private val links = searchState?.links ?: InlineLinkSearch(text)
+    private val delimiters by lazy(LazyThreadSafetyMode.NONE) {
+        searchState?.delimiters ?: InlineDelimiterSearch(text)
+    }
+    private val links by lazy(LazyThreadSafetyMode.NONE) {
+        searchState?.links ?: InlineLinkSearch(text)
+    }
     private val linkStyle = SpanStyle(color = linkColor, textDecoration = TextDecoration.Underline)
     // 文件路径：主色但**无下划线**（LINK-CLICK-SPEC §2.1）——与 URL 区分，符合「链接才带下划线」的直觉。
     private val pathStyle = SpanStyle(color = linkColor)
@@ -581,7 +585,7 @@ private class InlineScanner(
                 if (run.style and 1 != 0) style = style.merge(BOLD_SPAN)
                 if (run.style and 2 != 0) style = style.merge(ITALIC_SPAN)
                 if (run.style and 4 != 0) style = style.merge(STRIKE_SPAN)
-                if (run.style and 16 != 0) style = style.merge(SpanStyle(textDecoration = TextDecoration.Underline))
+                if (run.style and 16 != 0) style = style.merge(UNDERLINE_SPAN)
                 if (run.style and 32 != 0) style = style.merge(pathStyle)
                 if (run.style and 8 != 0) style = style.merge(codeStyle)
                 addRun(run.text, style, run.link)
@@ -842,6 +846,7 @@ private class InlineScanner(
 // Composable
 // ---------------------------------------------------------------------------
 
+private val UNDERLINE_SPAN = SpanStyle(textDecoration = TextDecoration.Underline)
 private val BlockGap = 8.dp
 private val HeadingGapAbove = 12.dp
 private val HeadingGapBelow = 6.dp
@@ -851,6 +856,14 @@ private val BulletDot = 4.dp
 private val ListIndent = 16.dp
 private val MarkerWidth = 22.dp
 private val RuleGap = 12.dp
+private val BlockGapModifier = Modifier.padding(top = BlockGap)
+private val HeadingGapAboveModifier = Modifier.padding(top = HeadingGapAbove)
+private val HeadingGapBelowModifier = Modifier.padding(top = HeadingGapBelow)
+private val ListGapModifier = Modifier.padding(top = ListGap)
+private val RuleGapModifier = Modifier.padding(top = RuleGap)
+private val CodeBlockInnerModifier = Modifier.padding(12.dp)
+private val CodeBlockHeaderModifier = Modifier.fillMaxWidth()
+private val CodeCopyIconModifier = Modifier.size(16.dp)
 
 /**
  * The renderer's own body metrics: 15sp on a 24sp leading.
@@ -1052,12 +1065,18 @@ internal class LiveBlocks {
         val hasCarriageReturn = keepsPrefix && sawCarriageReturn || next.indexOf('\r', from) >= 0
         val normalized = when {
             !hasCarriageReturn -> next
-            !keepsPrefix -> next.replace("\r\n", "\n").replace('\r', '\n')
+            !keepsPrefix -> normalizeLineEndings(next)
             else -> {
                 // A trailing CR has already become LF. Skip its partner if it arrived in this batch.
                 val start = if (previous.endsWith('\r') && next.getOrNull(from) == '\n') from + 1 else from
-                if (start == next.length) text
-                else text + next.substring(start).replace("\r\n", "\n").replace('\r', '\n')
+                if (start == next.length) {
+                    text
+                } else {
+                    StringBuilder(text.length + next.length - start).apply {
+                        append(text)
+                        appendNormalizedLf(this, next, start)
+                    }.toString()
+                }
             }
         }
         if (normalized != text) {
@@ -1122,6 +1141,32 @@ internal class LiveBlocks {
         }
         return result
     }
+}
+
+private fun normalizeLineEndings(source: String): String {
+    val firstCr = source.indexOf('\r')
+    if (firstCr < 0) return source
+    return StringBuilder(source.length).apply {
+        append(source, 0, firstCr)
+        appendNormalizedLf(this, source, firstCr)
+    }.toString()
+}
+
+private fun appendNormalizedLf(dst: StringBuilder, src: String, start: Int) {
+    var i = start
+    var segment = start
+    val len = src.length
+    while (i < len) {
+        if (src[i] == '\r') {
+            dst.append(src, segment, i)
+            dst.append('\n')
+            i += if (i + 1 < len && src[i + 1] == '\n') 2 else 1
+            segment = i
+        } else {
+            i++
+        }
+    }
+    if (segment < len) dst.append(src, segment, len)
 }
 
 /** Each published prefix exposes only the slots written before that snapshot was created. */
@@ -1368,8 +1413,7 @@ fun MarkdownBlocks(
     Column(modifier) {
         blocks.forEachIndexed { index, block ->
             key(keys[index]) {
-                val blockModifier = if (index == 0) Modifier else
-                    Modifier.padding(top = gapBetween(blocks[index - 1], block))
+                val blockModifier = if (index == 0) Modifier else gapModifier(blocks[index - 1], block)
                 // Lists and tables refine the block key by item/child or row/cell below.
                 val blockReadingKey = remember(readingKey, index, block is MdBlock.Rule) {
                     readingKey?.takeUnless { block is MdBlock.Rule }?.let { "$it:block:$index" }
@@ -1456,6 +1500,14 @@ private fun MarkdownBlock(
         }
         is MdBlock.Table -> TableBlock(block, style, color, palette, onUrlClick, cursor, growing, modifier)
     }
+}
+
+private fun gapModifier(previous: MdBlock, current: MdBlock): Modifier = when {
+    previous is MdBlock.Rule || current is MdBlock.Rule -> RuleGapModifier
+    previous is MdBlock.Heading -> HeadingGapBelowModifier
+    current is MdBlock.Heading -> HeadingGapAboveModifier
+    previous is MdBlock.Bullet || current is MdBlock.Bullet -> ListGapModifier
+    else -> BlockGapModifier
 }
 
 private fun gapBetween(previous: MdBlock, current: MdBlock): Dp = when {
@@ -1585,25 +1637,28 @@ internal fun rememberInlineMarkdown(requestedSource: InlineMarkdownSource): Anno
         val literalSource = InlineLiteralSource()
         val searchState = InlineSearchState("")
         var preparedSource = initial
+        val callerInterceptor = kotlin.coroutines.coroutineContext[kotlin.coroutines.ContinuationInterceptor]
         snapshotFlow { source.value }.conflate().collect { requested ->
             val prepared = preparedSource
             if (prepared != null && requested.text == prepared.text && requested.samePresentation(prepared)) {
                 return@collect
             }
             preparedSource = null
-            val literal = withContext(Dispatchers.Default) {
+            val completed = withContext(Dispatchers.Default) {
                 // Settled, cached text may leave the viewport without ever changing.
                 // Initialize the incremental scanner only when there is a new request.
                 if (prepared != null) {
                     literalSource.accepts(prepared.text)
                     searchState.update(prepared.text, appendOnly = false)
                 }
-                literalSource.accepts(requested.text)
-            }
-            val appendOnly = literalSource.lastWasAppend
-            if (!appendOnly && source.value === requested) annotated.value = null
-            val completed = withContext(Dispatchers.Default) {
-                val prepared = if (literal) {
+                val literal = literalSource.accepts(requested.text)
+                val appendOnly = literalSource.lastWasAppend
+                if (!appendOnly && callerInterceptor != null) {
+                    withContext(callerInterceptor) {
+                        if (source.value === requested) annotated.value = null
+                    }
+                }
+                val renderedText = if (literal) {
                     searchState.update(requested.text, appendOnly)
                     codeBlockAnnotatedText(requested.text, requested.cursor)
                 } else {
@@ -1624,7 +1679,7 @@ internal fun rememberInlineMarkdown(requestedSource: InlineMarkdownSource): Anno
                 val current = source.value
                 if (current === requested || current.samePresentation(requested) &&
                     current.text.length >= requested.text.length && current.text.startsWith(requested.text)
-                ) current to prepared else null
+                ) current to renderedText else null
             }
             // Prefix checks and annotation construction stay on the worker; Main only checks ownership.
             if (completed != null && source.value === completed.first) {
@@ -1648,7 +1703,9 @@ private fun CaretText(
     // 带光标的调用方已在扫描器/代码文本的最终 builder 里追加零宽占位符；这里仅
     // 在绘制阶段读取闪烁状态并按占位符坐标画竖线，不再复制整段 AnnotatedString。
     val caret = remember { arrayOfNulls<TextLayoutResult>(1) }
-    val readingModifier = modifier.readingText { caret[0] }
+    val caretReader = remember(caret) { { caret[0] } }
+    val onTextLayout = remember(caret) { { result: TextLayoutResult -> caret[0] = result } }
+    val readingModifier = modifier.readingText(caretReader)
     val caretAlpha = if (cursor) blinkingCursorAlphaState() else null
     // 零宽占位符参与末行排版，光标的位置由其字符坐标给出。
     // 闪烁的透明度只在绘制期叠加，不触发重组与重新排版。
@@ -1681,7 +1738,7 @@ private fun CaretText(
         },
         style = style,
         color = color,
-        onTextLayout = { caret[0] = it },
+        onTextLayout = onTextLayout,
     )
 }
 
@@ -1748,11 +1805,13 @@ private fun HeadingBlock(
     // Leading scales with the size, so a heading keeps the 22/29 ratio it was drawn with
     // instead of every level inheriting titleLarge's airy 29sp.
     val large = MaterialTheme.typography.titleLarge
-    val base = when (block.level) {
-        1 -> large.scaled(20f / 22f).copy(fontWeight = FontWeight.Bold)
-        2 -> large.scaled(18f / 22f).copy(fontWeight = FontWeight.Bold)
-        3 -> large.scaled(16f / 22f).copy(fontWeight = FontWeight.SemiBold)
-        else -> large.scaled(16f / 22f).copy(fontWeight = FontWeight.Medium)
+    val base = remember(block.level, large) {
+        when (block.level) {
+            1 -> large.scaled(20f / 22f).copy(fontWeight = FontWeight.Bold)
+            2 -> large.scaled(18f / 22f).copy(fontWeight = FontWeight.Bold)
+            3 -> large.scaled(16f / 22f).copy(fontWeight = FontWeight.SemiBold)
+            else -> large.scaled(16f / 22f).copy(fontWeight = FontWeight.Medium)
+        }
     }
     InlineText(
         text = block.text,
@@ -1792,9 +1851,22 @@ private fun BulletBlock(
     val readingKey = LocalReadingTextKey.current
     // The marker sits on the first line's centre, not on the row's top: a 4dp dot level
     // with the top edge reads as floating above the text it belongs to.
-    val markerOffset = with(LocalDensity.current) {
-        ((style.lineHeight.takeIf { it.isSp }?.toDp() ?: 20.dp) - BulletDot) / 2
+    val density = LocalDensity.current
+    val markerOffset = remember(style.lineHeight, density) {
+        with(density) {
+            ((style.lineHeight.takeIf { it.isSp }?.toDp() ?: 20.dp) - BulletDot) / 2
+        }
     }
+    val markerColor = MaterialTheme.colorScheme.onSurfaceVariant
+    val markerColumnModifier = remember { Modifier.width(MarkerWidth) }
+    val dotModifier = remember(markerOffset, markerColor) {
+        Modifier
+            .padding(top = markerOffset)
+            .size(BulletDot)
+            .clip(CircleShape)
+            .background(markerColor)
+    }
+    val rowPaddingModifier = remember { Modifier.fillMaxWidth().padding(vertical = ListItemGap / 2) }
     Column(
         modifier
             .fillMaxWidth()
@@ -1806,13 +1878,11 @@ private fun BulletBlock(
             val children = block.children[index].orEmpty()
             val itemCursor = cursor && index == block.items.lastIndex
             Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = ListItemGap / 2),
+                modifier = rowPaddingModifier,
                 verticalAlignment = Alignment.Top,
             ) {
                 Box(
-                    modifier = Modifier.width(MarkerWidth),
+                    modifier = markerColumnModifier,
                     contentAlignment = Alignment.TopStart,
                 ) {
                     if (block.ordered) {
@@ -1821,16 +1891,10 @@ private fun BulletBlock(
                         Text(
                             text = orderedMarker(block, index),
                             style = style,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            color = markerColor,
                         )
                     } else {
-                        Box(
-                            Modifier
-                                .padding(top = markerOffset)
-                                .size(BulletDot)
-                                .clip(CircleShape)
-                                .background(MaterialTheme.colorScheme.onSurfaceVariant),
-                        )
+                        Box(dotModifier)
                     }
                 }
                 CompositionLocalProvider(LocalReadingTextKey provides readingKey?.let { "$it:item:$index" }) {
@@ -1864,17 +1928,27 @@ private fun BulletBlock(
     }
 }
 
+private val CodeBlockShape = RoundedCornerShape(12.dp)
+private val TableBlockShape = RoundedCornerShape(10.dp)
+
 @Composable
 private fun CodeBlock(block: MdBlock.Code, palette: MarkdownPalette, cursor: Boolean, modifier: Modifier) {
     val clipboard = LocalClipboardManager.current
     var copied by remember(block.code) { mutableStateOf(false) }
+    val bodySmall = MaterialTheme.typography.bodySmall
+    val codeStyle = remember(bodySmall) {
+        bodySmall.copy(
+            fontFamily = FontFamily.Monospace,
+            lineHeight = bodySmall.fontSize * (20f / 13f),
+        )
+    }
     Surface(
         modifier = modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(12.dp),
+        shape = CodeBlockShape,
         color = MaterialTheme.colorScheme.surfaceContainerHighest,
     ) {
-        Column(Modifier.padding(12.dp)) {
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Column(CodeBlockInnerModifier) {
+            Row(CodeBlockHeaderModifier, verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     // A fenced block with no info string — a plain ``` — has an empty language,
                     // and the title row is drawn for every block so the copy button always sits
@@ -1890,14 +1964,17 @@ private fun CodeBlock(block: MdBlock.Code, palette: MarkdownPalette, cursor: Boo
                 )
                 // Copying a code block is the one thing anyone does with one, and the
                 // tick is the only confirmation there is room for.
-                Box(
-                    modifier = Modifier
+                val copyModifier = remember(clipboard, block.code) {
+                    Modifier
                         .size(20.dp)
                         .clip(CircleShape)
                         .clickable {
                             clipboard.setText(AnnotatedString(block.code))
                             copied = true
-                        },
+                        }
+                }
+                Box(
+                    modifier = copyModifier,
                     contentAlignment = Alignment.Center,
                 ) {
                     Icon(
@@ -1908,7 +1985,7 @@ private fun CodeBlock(block: MdBlock.Code, palette: MarkdownPalette, cursor: Boo
                         } else {
                             MaterialTheme.colorScheme.onSurfaceVariant
                         },
-                        modifier = Modifier.size(16.dp),
+                        modifier = CodeCopyIconModifier,
                     )
                 }
             }
@@ -1919,21 +1996,18 @@ private fun CodeBlock(block: MdBlock.Code, palette: MarkdownPalette, cursor: Boo
                 }
             }
             Spacer(Modifier.height(6.dp))
+            val scroll = rememberScrollState()
+            val canScrollHorizontal = remember(scroll) {
+                { delta: Float -> if (delta < 0f) scroll.canScrollForward else scroll.canScrollBackward }
+            }
             CaretText(
                 annotated = remember(block.code, cursor) { codeBlockAnnotatedText(block.code, cursor) },
                 caretColor = palette.linkColor,
                 cursor = cursor,
-                modifier = rememberScrollState().let { scroll ->
-                    Modifier.drawerScrollPriority { delta ->
-                        if (delta < 0f) scroll.canScrollForward else scroll.canScrollBackward
-                    }.horizontalScroll(scroll)
-                },
+                modifier = Modifier.drawerScrollPriority(canScrollHorizontal).horizontalScroll(scroll),
                 // bodySmall is already 13sp monospace-sized; only the leading differs,
                 // and it is scaled off the font size so 字号 still applies.
-                style = MaterialTheme.typography.bodySmall.copy(
-                    fontFamily = FontFamily.Monospace,
-                    lineHeight = MaterialTheme.typography.bodySmall.fontSize * (20f / 13f),
-                ),
+                style = codeStyle,
                 color = MaterialTheme.colorScheme.onSurface,
             )
         }
@@ -1951,17 +2025,11 @@ private fun QuoteBlock(
     settled: Boolean = !cursor,
 ) {
     val scheme = MaterialTheme.colorScheme
-    val lineColor = scheme.primary.copy(alpha = 0.4f)
-    val indent = with(LocalDensity.current) { (3.dp.roundToPx() + 12.dp.roundToPx()).toDp() }
-    InlineText(
-        text = block.text,
-        style = style,
-        color = scheme.onSurfaceVariant,
-        palette = palette,
-        onUrlClick = onUrlClick,
-        cursor = cursor,
-        settled = settled,
-        modifier = modifier
+    val lineColor = remember(scheme.primary) { scheme.primary.copy(alpha = 0.4f) }
+    val density = LocalDensity.current
+    val indent = remember(density) { with(density) { (3.dp.roundToPx() + 12.dp.roundToPx()).toDp() } }
+    val quoteModifier = remember(modifier, lineColor, indent) {
+        modifier
             .fillMaxWidth()
             .drawBehind {
                 val width = 3.dp.roundToPx().toFloat().coerceAtMost(size.width)
@@ -1973,7 +2041,17 @@ private fun QuoteBlock(
                     cornerRadius = CornerRadius(minOf(2.dp.toPx(), width / 2f, size.height / 2f)),
                 )
             }
-            .padding(start = indent),
+            .padding(start = indent)
+    }
+    InlineText(
+        text = block.text,
+        style = style,
+        color = scheme.onSurfaceVariant,
+        palette = palette,
+        onUrlClick = onUrlClick,
+        cursor = cursor,
+        settled = settled,
+        modifier = quoteModifier,
     )
 }
 
@@ -1998,11 +2076,13 @@ private fun TableBlock(
     SideEffect { rowSnapshot[0] = reusableRows }
     val cellStyle = MaterialTheme.typography.bodySmall
     // 12sp semibold, scaled off bodySmall so the header still follows the 字号 setting.
-    val headerStyle = cellStyle.copy(
-        fontSize = cellStyle.fontSize * (12f / 13f),
-        lineHeight = cellStyle.lineHeight * (12f / 13f),
-        fontWeight = FontWeight.SemiBold,
-    )
+    val headerStyle = remember(cellStyle) {
+        cellStyle.copy(
+            fontSize = cellStyle.fontSize * (12f / 13f),
+            lineHeight = cellStyle.lineHeight * (12f / 13f),
+            fontWeight = FontWeight.SemiBold,
+        )
+    }
     val pathClick = LocalPathClick.current
     // Annotations can contain callbacks. A changed palette or handler gets a fresh local cache.
     val inlineCache = remember(palette, onUrlClick, pathClick) { TableInlineCache() }
@@ -2023,8 +2103,8 @@ private fun TableBlock(
         dividerColor = MaterialTheme.colorScheme.outlineVariant,
         modifier = modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(10.dp))
-            .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(10.dp)),
+            .clip(TableBlockShape)
+            .border(1.dp, MaterialTheme.colorScheme.outlineVariant, TableBlockShape),
     ) { row, cells ->
         TableCells(
             cells = cells,
@@ -2135,16 +2215,19 @@ private fun TableCells(
             } else {
                 val annotated = remember(cell, caret, inlineCache, cacheable) {
                     inlineCache.getOrParse(cell, caret, cacheable) {
-                        if (literalInlineSource(cell)) codeBlockAnnotatedText(cell, caret) else InlineScanner(
-                            text = cell,
-                            codeBackground = palette.codeBackground,
-                            codeColor = palette.codeColor,
-                            linkColor = palette.linkColor,
-                            baseWeight = null,
-                            onUrlClick = onUrlClick,
-                            onPathClick = onPathClick,
-                            codeFontSize = palette.codeFontSize,
-                        ).scan(appendCaret = caret)
+                        if (literalInlineSource(cell)) codeBlockAnnotatedText(cell, caret) else {
+                            val prepared = NativeMarkdown.inlineRuns(cell) ?: NativeMarkdown.parseInline(cell)
+                            InlineScanner(
+                                text = cell,
+                                codeBackground = palette.codeBackground,
+                                codeColor = palette.codeColor,
+                                linkColor = palette.linkColor,
+                                baseWeight = null,
+                                onUrlClick = onUrlClick,
+                                onPathClick = onPathClick,
+                                codeFontSize = palette.codeFontSize,
+                            ).scan(appendCaret = caret, prepared = prepared)
+                        }
                     }
                 }
                 CaretText(annotated, style, color, palette.linkColor,

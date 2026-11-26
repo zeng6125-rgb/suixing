@@ -32,7 +32,7 @@ internal class IncrementalLines {
         }
         val prev = text
         // 同一个字符串（重组时文本没变）：连前缀比较都不用做。
-        if (next == prev) return lines
+        if (next === prev || next == prev) return lines
         // 不是前缀（变短、换块、重放）：上一次的结果一条都用不上，整体重建。
         if (!next.startsWith(prev)) {
             text = next
@@ -41,13 +41,19 @@ internal class IncrementalLines {
         }
         // 纯追加。旧的最后一行可能还在长，所以是「去掉旧末行 + 旧末行拼新首段 + 新余段」。
         // 这不是近似：切分只由换行位置决定，而 prev|next 的接缝不在换行上，拼接与整切等价。
-        val added = next.substring(prev.length).split('\n')
-        if (added.size == 1) {
-            tail += added[0]
+        val firstNl = next.indexOf('\n', prev.length)
+        if (firstNl < 0) {
+            tail += next.substring(prev.length)
         } else {
-            completed.add(tail + added[0])
-            for (i in 1 until added.lastIndex) completed.add(added[i])
-            tail = added.last()
+            completed.add(tail + next.substring(prev.length, firstNl))
+            var cursor = firstNl + 1
+            while (true) {
+                val nl = next.indexOf('\n', cursor)
+                if (nl < 0) break
+                completed.add(next.substring(cursor, nl))
+                cursor = nl + 1
+            }
+            tail = next.substring(cursor)
         }
         text = next
         lines = LineSnapshot(completed, completed.size, tail)

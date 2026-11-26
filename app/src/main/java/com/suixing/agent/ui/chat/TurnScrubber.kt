@@ -395,26 +395,31 @@ internal fun TurnScrubber(
     //  · ≤12 轮恒为 oldest → 不触发；
     //  · 拖动内部的 unlocked/pin 完全不进这个式子 ⇒ 松手 recenter 不会补一次假动效，
     //    取消的拖动也不会抖；currentTurn 也不必当信号（它还掺着 pendingTurn）。
-    val readingWindowStart = scrubberWindow(
-        totalTurns = totalTurns,
-        currentTurn = currentTurn,
-        drawnTurns = drawnTurns,
-    ).first
+    val readingWindowStart = remember(totalTurns, currentTurn, drawnTurns) {
+        scrubberWindow(
+            totalTurns = totalTurns,
+            currentTurn = currentTurn,
+            drawnTurns = drawnTurns,
+        ).first
+    }
     // A gesture outlives the recomposition it started in, so it reads the turns and the
     // jump through these instead of closing over values a new message has replaced.
     val latestRows by rememberUpdatedState(rows)
     val latestJump by rememberUpdatedState(onJumpTo)
     val latestCurrentTurn by rememberUpdatedState(currentTurn)
-    val latestRowsForPull by rememberUpdatedState<(Int) -> List<Int>> { pull ->
-        scrubberSlots(
-            scrubberWindow(
-                totalTurns = totalTurns,
-                currentTurn = windowCurrentTurn,
-                drawnTurns = drawnTurns,
-                unlocked = pull,
+    val rowsForPull = remember(totalTurns, windowCurrentTurn, drawnTurns) {
+        { pull: Int ->
+            scrubberSlots(
+                scrubberWindow(
+                    totalTurns = totalTurns,
+                    currentTurn = windowCurrentTurn,
+                    drawnTurns = drawnTurns,
+                    unlocked = pull,
+                )
             )
-        )
+        }
     }
+    val latestRowsForPull by rememberUpdatedState(rowsForPull)
     // Which row the finger is on, which row the label names, and whether the label is out.
     // All three are cleared when the finger lifts, so no frame can leave the rail stuck open.
     var pressRow by remember(conversationId, rowCount) { mutableIntStateOf(-1) }
@@ -480,10 +485,20 @@ internal fun TurnScrubber(
     }
 
     val density = LocalDensity.current
-    val rowPx = with(density) { SCRUBBER_ROW.toPx() }
-    val gapPx = with(density) { SCRUBBER_GAP.toPx() }
-    val railPx = with(density) { SCRUBBER_RAIL.toPx() }
-    val labelGapPx = with(density) { SCRUBBER_LABEL_GAP.toPx() }
+    val screenWidthDp = LocalConfiguration.current.screenWidthDp
+    val labelMaxWidth = remember(screenWidthDp) { scrubberLabelMax(screenWidthDp.dp) }
+    val rowPx = remember(density) { with(density) { SCRUBBER_ROW.toPx() } }
+    val gapPx = remember(density) { with(density) { SCRUBBER_GAP.toPx() } }
+    val pitchPx = rowPx + gapPx
+    val halfRowPx = rowPx / 2f
+    val railPx = remember(density) { with(density) { SCRUBBER_RAIL.toPx() } }
+    val labelGapPx = remember(density) { with(density) { SCRUBBER_LABEL_GAP.toPx() } }
+    val missingTickColor = remember(scheme.outlineVariant) { scheme.outlineVariant.copy(alpha = 0.35f) }
+    val activeTickColor = remember(scheme.primary) { scheme.primary.copy(alpha = 0.28f) }
+    val nearTickColor = remember(scheme.primary) { scheme.primary.copy(alpha = 0.44f) }
+    val midTickColor = remember(scheme.primary) { scheme.primary.copy(alpha = 0.30f) }
+    val farTickColor = remember(scheme.primary) { scheme.primary.copy(alpha = 0.20f) }
+    val tickBoxSizeModifier = remember { Modifier.width(SCRUBBER_RAIL).height(SCRUBBER_ROW) }
     // The label rides beside its own row, and only the rows know where they sit, so it is
     // measured off the rail's vertical centre: the strip itself is centred on the reading
     // area and its height changes with the number of turns in the window.
@@ -526,12 +541,10 @@ internal fun TurnScrubber(
                 .drawWithContent {
                     drawContent()
                     val scale = rowScales.value(activeTurn)
-                    val width = (20f * scale).dp.toPx().coerceIn(0f, size.width)
-                    val height = (3f * scale).dp.toPx().coerceAtLeast(0f)
-                    val pitchPx = (SCRUBBER_ROW + SCRUBBER_GAP).toPx()
-                    val rowCenterOffsetPx = SCRUBBER_ROW.toPx() / 2f
+                    val width = (20f * scale * this.density).coerceIn(0f, size.width)
+                    val height = (3f * scale * this.density).coerceAtLeast(0f)
                     val currentSlot = if (settling) activeRowIndex.toFloat() else indicatorRow.value
-                    val centerY = currentSlot * pitchPx + rowCenterOffsetPx
+                    val centerY = currentSlot * pitchPx + halfRowPx
                     drawRoundRect(
                         color = scheme.primary,
                         topLeft = Offset((size.width - width) / 2f, centerY - height / 2f),
@@ -723,19 +736,19 @@ internal fun TurnScrubber(
                 }
                 val targetHeight = 2f
                 val targetColor = when {
-                    !exists -> scheme.outlineVariant.copy(alpha = 0.35f)
-                    active -> scheme.primary.copy(alpha = 0.28f)
-                    distance == 1L -> scheme.primary.copy(alpha = 0.44f)
-                    distance <= 3L -> scheme.primary.copy(alpha = 0.30f)
-                    else -> scheme.primary.copy(alpha = 0.20f)
+                    !exists -> missingTickColor
+                    active -> activeTickColor
+                    distance == 1L -> nearTickColor
+                    distance <= 3L -> midTickColor
+                    else -> farTickColor
                 }
                 val targetStyle = ScrubberTickStyle(targetWidth, targetHeight, targetColor)
                 val tickStyle = scrubberTickStyle(conversationId, targetStyle, settling)
                 Box(
-                    Modifier.width(SCRUBBER_RAIL).height(SCRUBBER_ROW).drawBehind {
+                    tickBoxSizeModifier.drawBehind {
                         val scale = rowScales.value(turn)
-                        val width = (tickStyle.width.value * scale).dp.toPx().coerceIn(0f, size.width)
-                        val height = (tickStyle.height.value * scale).dp.toPx().coerceAtLeast(0f)
+                        val width = (tickStyle.width.value * scale * this.density).coerceIn(0f, size.width)
+                        val height = (tickStyle.height.value * scale * this.density).coerceAtLeast(0f)
                         // Keep the centred slot and the proportions of the previous scaled corners.
                         drawRoundRect(
                             color = tickStyle.color.value,
@@ -780,7 +793,7 @@ internal fun TurnScrubber(
                 softWrap = false,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier
-                    .widthIn(max = scrubberLabelMax(LocalConfiguration.current.screenWidthDp.dp))
+                    .widthIn(max = labelMaxWidth)
                     .clip(ScrubLabelShape)
                     .background(scheme.inverseSurface)
                     .padding(horizontal = 10.dp, vertical = 6.dp),

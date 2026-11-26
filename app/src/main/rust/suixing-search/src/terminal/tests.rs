@@ -63,19 +63,16 @@ fn row_delta(emulator: &mut Emulator, from: i32, full: bool) -> (i32, i32) {
         len: 0,
     };
     // SAFETY: the emulator and output stay alive for the call; the returned buffer is freed below.
-    assert_eq!(
-        0,
-        unsafe {
-            super::sx_terminal_rows(
-                (emulator as *mut Emulator).cast(),
-                false,
-                from,
-                emulator.rows,
-                full,
-                &mut output,
-            )
-        }
-    );
+    assert_eq!(0, unsafe {
+        super::sx_terminal_rows(
+            (emulator as *mut Emulator).cast(),
+            false,
+            from,
+            emulator.rows,
+            full,
+            &mut output,
+        )
+    });
     // SAFETY: sx_terminal_rows returned the initialized byte buffer and its length.
     let bytes = unsafe { std::slice::from_raw_parts(output.data, output.len) };
     let header = (

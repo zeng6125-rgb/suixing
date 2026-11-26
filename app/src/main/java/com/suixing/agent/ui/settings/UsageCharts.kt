@@ -43,6 +43,11 @@ internal fun usageHeatWeeks(days: List<DayUsage>): List<List<DayUsage?>> {
     return (cells + List<DayUsage?>((7 - cells.size % 7) % 7) { null }).chunked(7)
 }
 
+private val HeatCellShape = RoundedCornerShape(3.dp)
+private val HeatLegendShape = RoundedCornerShape(2.dp)
+private val HeatBarShape = RoundedCornerShape(3.dp)
+private val HeatWeekLabels = listOf("一", "", "三", "", "五", "", "日")
+
 @Composable
 internal fun UsageHeatmap(days: List<DayUsage>) {
     val scheme = MaterialTheme.colorScheme
@@ -52,8 +57,15 @@ internal fun UsageHeatmap(days: List<DayUsage>) {
     val current = days.firstOrNull { it.date == selected } ?: days.lastOrNull()
     val lineHeight = MaterialTheme.typography.labelSmall.lineHeight
     val headerHeight = with(LocalDensity.current) { lineHeight.toDp() }.coerceAtLeast(16.dp)
-    val palette = listOf(scheme.surfaceContainerHighest, scheme.primary.copy(alpha = .22f),
-        scheme.primary.copy(alpha = .45f), scheme.primary.copy(alpha = .7f), scheme.primary)
+    val palette = remember(scheme.surfaceContainerHighest, scheme.primary) {
+        listOf(
+            scheme.surfaceContainerHighest,
+            scheme.primary.copy(alpha = .22f),
+            scheme.primary.copy(alpha = .45f),
+            scheme.primary.copy(alpha = .7f),
+            scheme.primary,
+        )
+    }
     SuixingCard {
         Text("活动热力图", style = SettingsStyle.cardTitle)
         Text("近 90 个自然日 · 按已报告 tokens 着色", style = SettingsStyle.description, color = scheme.onSurfaceVariant)
@@ -70,7 +82,7 @@ internal fun UsageHeatmap(days: List<DayUsage>) {
             Row(horizontalArrangement = Arrangement.spacedBy(gap)) {
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Spacer(Modifier.height(headerHeight))
-                    listOf("一", "", "三", "", "五", "", "日").forEach { label ->
+                    HeatWeekLabels.forEach { label ->
                         Box(Modifier.width(labelWidth).height(cellSize), contentAlignment = Alignment.Center) {
                             Text(label, style = SettingsStyle.badge, color = scheme.onSurfaceVariant)
                         }
@@ -83,14 +95,13 @@ internal fun UsageHeatmap(days: List<DayUsage>) {
                             modifier = Modifier.height(headerHeight), style = SettingsStyle.badge,
                             color = scheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Clip)
                         week.forEach { day ->
-                            val shape = RoundedCornerShape(3.dp)
                             val level = usageHeatLevel(day?.tokens?.total ?: 0, peak)
                             Box(Modifier.size(cellSize)
-                                .background(if (day == null) Color.Transparent else palette[level], shape)
+                                .background(if (day == null) Color.Transparent else palette[level], HeatCellShape)
                                 .then(if (day == null) Modifier else Modifier
                                     .border(if (day.date == selected) 2.dp else 1.dp,
                                         if (day.date == selected) scheme.onSurface else if (day.unreported > 0 && day.reported == 0L)
-                                            scheme.primary else Color.Transparent, shape)
+                                            scheme.primary else Color.Transparent, HeatCellShape)
                                     .clickable { selected = day.date }
                                     .semantics { contentDescription = "${day.date}，已报告 ${day.tokens.total} tokens，${day.unreported} 次未报告用量" }))
                         }
@@ -100,7 +111,7 @@ internal fun UsageHeatmap(days: List<DayUsage>) {
         }
         Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             Text("少", style = SettingsStyle.badge, color = scheme.onSurfaceVariant)
-            palette.forEach { color -> Box(Modifier.padding(start = 4.dp).size(10.dp).background(color, RoundedCornerShape(2.dp))) }
+            palette.forEach { color -> Box(Modifier.padding(start = 4.dp).size(10.dp).background(color, HeatLegendShape)) }
             Text("多", modifier = Modifier.padding(start = 4.dp), style = SettingsStyle.badge, color = scheme.onSurfaceVariant)
             Spacer(Modifier.weight(1f))
             Text("空心：仅未报告", style = SettingsStyle.badge, color = scheme.onSurfaceVariant)
@@ -184,7 +195,7 @@ private fun UsageDayDetail(day: DayUsage, days: List<DayUsage>, onSelect: (Strin
 @Composable
 private fun UsageLegend(label: String, color: Color) {
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-        Box(Modifier.size(8.dp).background(color, RoundedCornerShape(2.dp)))
+        Box(Modifier.size(8.dp).background(color, HeatLegendShape))
         Text(label, style = SettingsStyle.badge, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
@@ -200,8 +211,8 @@ internal fun UsageModelBar(model: ModelUsage, total: Long, onClick: () -> Unit) 
             Spacer(Modifier.width(10.dp))
             Text(compact(model.tokens.total), style = SettingsStyle.metadata)
         }
-        Box(Modifier.fillMaxWidth().padding(top = 8.dp).height(5.dp).background(scheme.surfaceContainerHighest, RoundedCornerShape(3.dp))) {
-            if (fraction > 0f) Box(Modifier.fillMaxWidth(fraction).fillMaxHeight().background(scheme.primary, RoundedCornerShape(3.dp)))
+        Box(Modifier.fillMaxWidth().padding(top = 8.dp).height(5.dp).background(scheme.surfaceContainerHighest, HeatBarShape)) {
+            if (fraction > 0f) Box(Modifier.fillMaxWidth(fraction).fillMaxHeight().background(scheme.primary, HeatBarShape))
         }
         Row(Modifier.padding(top = 6.dp)) {
             Text("${usageExact(model.tokens.total)} tokens", modifier = Modifier.weight(1f), style = SettingsStyle.badge,

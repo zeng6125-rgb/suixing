@@ -59,9 +59,8 @@ impl Encoder {
         self.emit(&[byte], 1)
     }
     fn ascii_prefix(&mut self, units: &[u16], escaping: bool) -> Result<usize, i32> {
-        let plain_ascii = |unit: u16| {
-            unit < 128 && (!escaping || (unit >= 32 && unit != 34 && unit != 92))
-        };
+        let plain_ascii =
+            |unit: u16| unit < 128 && (!escaping || (unit >= 32 && unit != 34 && unit != 92));
         let mut index = 0;
         while index < units.len() && plain_ascii(units[index]) {
             // Bound scans by the next write so cancellation keeps its original chunk boundary.
@@ -115,12 +114,7 @@ impl Encoder {
         }
         Ok(())
     }
-    fn scalar_string(
-        &mut self,
-        units: &[u16],
-        quoted: bool,
-        escaping: bool,
-    ) -> Result<(), i32> {
+    fn scalar_string(&mut self, units: &[u16], quoted: bool, escaping: bool) -> Result<(), i32> {
         if quoted {
             self.ascii(b'"')?;
         }

@@ -486,6 +486,7 @@ internal class AgentRun(
             }
             throw cancellation
         } finally {
+            ledger.release()
             UiOperationStatus.shared.finish(UiOperationOwner(chatId, terminalCaller.runId))
             // A child that never completes keeps its parent in "completing" forever, which would
             // hang an await() on the caller. Completing it is what lets the caller finish.

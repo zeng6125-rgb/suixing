@@ -530,7 +530,11 @@ pub(crate) fn write_scoped(id: u64, bytes: &[u8], cancel: &AtomicBool) -> io::Re
         Err(_) => Err(io::Error::other("scoped PTY写入异常；可能已提交部分字节")),
     }
 }
-fn write_bytes(task: &WriteTask, bytes: &[u8], scope_cancel: Option<&AtomicBool>) -> Result<i32, i32> {
+fn write_bytes(
+    task: &WriteTask,
+    bytes: &[u8],
+    scope_cancel: Option<&AtomicBool>,
+) -> Result<i32, i32> {
     let mut at = 0;
     let deadline = Instant::now() + Duration::from_secs(2);
     while at < bytes.len() {

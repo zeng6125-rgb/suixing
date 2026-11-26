@@ -136,13 +136,39 @@ class LiveSampler {
             systemStatFile.useLines { lines -> lines.firstOrNull() }
         }.getOrElse { systemStatReadable = false; null }
         ?.takeIf { it.startsWith("cpu ") }
-        ?.let { line ->
-            val parts = line.trim().split(' ')
-                .filter { it.isNotEmpty() }
-                .drop(1)
-                .mapNotNull { it.toLongOrNull() }
-            if (parts.size < 5) null else parts.sum() to (parts[3] + parts[4])
+        ?.let(::parseProcStatCpuLine)
+    }
+
+    private fun parseProcStatCpuLine(line: String): Pair<Long, Long>? {
+        val len = line.length
+        var i = 0
+        while (i < len && line[i] != ' ') i++
+        var total = 0L
+        var idle = 0L
+        var col = 0
+        while (i < len) {
+            while (i < len && line[i] == ' ') i++
+            if (i >= len) break
+            val start = i
+            while (i < len && line[i] != ' ') i++
+            val value = parseUnsignedLong(line, start, i) ?: continue
+            total += value
+            if (col == 3 || col == 4) idle += value
+            col++
         }
+        return if (col < 5) null else total to idle
+    }
+
+    private fun parseUnsignedLong(text: String, start: Int, end: Int): Long? {
+        if (start >= end) return null
+        var acc = 0L
+        for (idx in start until end) {
+            val d = text[idx] - '0'
+            if (d !in 0..9) return null
+            if (acc > (Long.MAX_VALUE - d) / 10L) return null
+            acc = acc * 10L + d
+        }
+        return acc
     }
 
     /** 见 [PSS_INTERVAL_SECONDS]：贵的那个按这个间隔量，中间沿用上次的数。 */

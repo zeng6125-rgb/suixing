@@ -26,14 +26,38 @@ object ManifestValidator {
      * `^[a-zA-Z0-9_-]+$` 校验工具名，带点号的整批拒收（11152）。两段式命名空间（`acme.github`）
      * 因此一并取消 —— 命名空间用横杠写（`acme-github`）。
      */
-    private val ID_OFFICIAL = Regex("^[a-z][a-z0-9-]*$")
-
-    private val TOOL_NAME = Regex("^[a-z][a-z0-9_]*$")
-
-    /** id 与工具名的长度上限：注册名 `<id>_<tool>` 要进网关的工具表，简洁是硬要求。 */
     private const val MAX_ID_LEN = 32
     private const val MAX_TOOL_NAME_LEN = 32
-    private val ENV_NAME = Regex("^[A-Z][A-Z0-9_]*$")
+
+    private fun isOfficialId(id: String): Boolean {
+        if (id.isEmpty() || id.length > MAX_ID_LEN) return false
+        if (id[0] !in 'a'..'z') return false
+        for (i in 1 until id.length) {
+            val ch = id[i]
+            if (ch !in 'a'..'z' && ch !in '0'..'9' && ch != '-') return false
+        }
+        return true
+    }
+
+    private fun isValidToolName(name: String): Boolean {
+        if (name.isEmpty() || name.length > MAX_TOOL_NAME_LEN) return false
+        if (name[0] !in 'a'..'z') return false
+        for (i in 1 until name.length) {
+            val ch = name[i]
+            if (ch !in 'a'..'z' && ch !in '0'..'9' && ch != '_') return false
+        }
+        return true
+    }
+
+    private fun isValidEnvName(name: String): Boolean {
+        if (name.isEmpty()) return false
+        if (name[0] !in 'A'..'Z') return false
+        for (i in 1 until name.length) {
+            val ch = name[i]
+            if (ch !in 'A'..'Z' && ch !in '0'..'9' && ch != '_') return false
+        }
+        return true
+    }
 
     /** `{{x}}` 与 `{{env.NAME}}`：变量名允许点号，`env.` 前缀由调用方区分。 */
     private val TEMPLATE_VAR = Regex("""\{\{\s*([A-Za-z_][A-Za-z0-9_.]*)\s*\}\}""")
@@ -114,7 +138,7 @@ object ManifestValidator {
         }
 
         // 2. id 格式 + 与目录名一致
-        val idOk = ID_OFFICIAL.matches(spec.id) && spec.id.length <= MAX_ID_LEN
+        val idOk = isOfficialId(spec.id)
         if (!idOk) {
             issues += issue(
                 ReasonCode.ID_MISMATCH, Severity.ERROR,
@@ -144,7 +168,7 @@ object ManifestValidator {
         }
         val seenTools = mutableSetOf<String>()
         for (tool in spec.tools) {
-            if (!TOOL_NAME.matches(tool.name) || tool.name.length > MAX_TOOL_NAME_LEN) {
+            if (!isValidToolName(tool.name)) {
                 issues += issue(
                     ReasonCode.TOOL_NAME_INVALID, Severity.ERROR,
                     "工具名「${tool.name}」不符合 `^[a-z][a-z0-9_]*\$` 或超过 $MAX_TOOL_NAME_LEN 字",
@@ -163,7 +187,7 @@ object ManifestValidator {
 
         // env 名格式
         for (env in spec.env) {
-            if (!ENV_NAME.matches(env.name)) {
+            if (!isValidEnvName(env.name)) {
                 issues += issue(
                     ReasonCode.SCHEMA_INVALID, Severity.ERROR,
                     "环境变量名「${env.name}」不符合 `^[A-Z][A-Z0-9_]*\$`",
@@ -202,9 +226,10 @@ object ManifestValidator {
             val declaredParams = tool.parameters?.let { params ->
                 (params["properties"] as? JsonObject)?.keys ?: params.keys
             }.orEmpty()
+            val usedInTool = mutableSetOf<String>()
             for (text in raw) {
-                for (match in TEMPLATE_VAR.findAll(text)) {
-                    val name = match.groupValues[1]
+                for (name in templateVars(text)) {
+                    usedInTool += name
                     val known = when {
                         name == "plugin_dir" -> true
                         name == "src" -> true // deps.install 专用
@@ -219,10 +244,6 @@ object ManifestValidator {
                     }
                 }
             }
-            // 声明了却没用到 → warning
-            val usedInTool = raw.flatMap { text ->
-                TEMPLATE_VAR.findAll(text).map { it.groupValues[1] }.toList()
-            }.toSet()
             for (param in declaredParams) {
                 if (param !in usedInTool) {
                     issues += issue(
@@ -285,8 +306,7 @@ object ManifestValidator {
                 )
             }
             if (context.source == "template") {
-                for (match in TEMPLATE_VAR.findAll(context.content)) {
-                    val name = match.groupValues[1]
+                for (name in templateVars(context.content)) {
                     if (name !in CONTEXT_VARS) {
                         issues += issue(
                             ReasonCode.UNRESOLVED_VAR, Severity.ERROR,
@@ -340,8 +360,30 @@ object ManifestValidator {
         for ((key, value) in exec.headers) add("$key: $value")
     }
 
+    private fun templateVars(text: String): List<String> =
+        NativePluginOps.extractTemplateVars(text)
+            ?: if (!text.contains("{{")) emptyList()
+            else TEMPLATE_VAR.findAll(text).map { it.groupValues[1] }.toList()
+
     /** §4 第 5 条：shell 黑名单。`rm -rf` 单独判，因为它有安全前缀豁免。 */
     private fun dangerousPatterns(toolName: String, command: String): List<PluginIssue> {
+        NativePluginOps.scanCommandDanger(command)?.let { hits ->
+            if (hits.isEmpty()) return emptyList()
+            val found = ArrayList<PluginIssue>(hits.size)
+            for (hit in hits) {
+                when (hit) {
+                    is NativePluginOps.DangerHit.RmForce -> found += issue(
+                        ReasonCode.DANGEROUS_PATTERN, Severity.ERROR,
+                        "工具「$toolName」的命令里有 rm -rf「${hit.target}」（只有 /sdcard、/storage、/data/local/tmp 前缀可豁免）",
+                    )
+                    is NativePluginOps.DangerHit.Blacklist -> {
+                        val label = SHELL_BLACKLIST.getOrNull(hit.index)?.second ?: continue
+                        found += issue(ReasonCode.DANGEROUS_PATTERN, Severity.ERROR, "工具「$toolName」的命令命中黑名单：$label")
+                    }
+                }
+            }
+            return found
+        }
         val found = mutableListOf<PluginIssue>()
         for (match in RM_FORCE.findAll(command)) {
             val target = match.groupValues[1]

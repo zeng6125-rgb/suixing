@@ -45,7 +45,7 @@ class DrawerGestureInteractionTest {
                 initialValue = if (opening) 0f else 1f,
                 targetValue = if (opening) 1f else 0f,
             )
-            val lastFrame = if (opening) 48 else 54
+            val lastFrame = 54
             val positions = (0..lastFrame).map { animation.getValueFromNanos(it * 1_000_000_000L / 120) }
             val largestStep = positions.zipWithNext { a, b -> kotlin.math.abs(b - a) }.max()
             assertTrue("Largest per-frame step: $largestStep", largestStep <= 0.075f)
@@ -130,6 +130,27 @@ class DrawerGestureInteractionTest {
                 assertTrue("Close at $refreshRate Hz jumps $lastStepPx px from $start", lastStepPx < 1f)
                 assertTrue(drawerHomeCornerFraction(previousProgress) < 0.005f)
                 assertEquals(0f, animation.getValueFromNanos(animation.durationNanos), 0f)
+            }
+        }
+    }
+
+    @Test
+    fun `opening settles the drawer less than one physical pixel on its last frame`() {
+        val homeLeftTravelPx = DRAWER_SHEET_WIDTH * 3f + 1080f * 0.025f
+        for ((start, velocity) in listOf(0f to 0f, 0.48f to 1.5f)) {
+            val animation = TargetBasedAnimation(
+                animationSpec = DRAWER_OPEN_SPEC,
+                typeConverter = Float.VectorConverter,
+                initialValue = start,
+                targetValue = 1f,
+                initialVelocityVector = Float.VectorConverter.convertToVector(velocity),
+            )
+            for (refreshRate in listOf(60, 120)) {
+                val previousFrame = animation.durationNanos - 1_000_000_000L / refreshRate
+                val previousProgress = animation.getValueFromNanos(previousFrame)
+                val lastStepPx = (1f - previousProgress) * homeLeftTravelPx
+                assertTrue("Open at $refreshRate Hz jumps $lastStepPx px from $start", lastStepPx < 1f)
+                assertEquals(1f, animation.getValueFromNanos(animation.durationNanos), 0f)
             }
         }
     }

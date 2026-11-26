@@ -226,7 +226,7 @@ internal fun ProviderDropdown(
         ModelDropdownMenu(
             expanded = open && enabled, onDismiss = { onExpandedChange(false) }, anchorWidth = anchorWidth,
         ) {
-            Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+            Row(Modifier.fillMaxWidth().padding(start = ActionMenuStyle.HorizontalPadding, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text("切换供应商", style = SettingsStyle.metadata, color = colors.onSurfaceVariant, modifier = Modifier.weight(1f))
                 if (onDelete != null) {
                     IconButton(enabled = selected != null && providers.size > 1,

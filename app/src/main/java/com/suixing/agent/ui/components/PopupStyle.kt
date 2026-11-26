@@ -75,6 +75,18 @@ internal const val POPUP_ANIM_MS = 110
 
 internal val PopupShadowMargin = PopupShadowMarginDp.dp
 
+/** Default content padding for detail and slider popup cards. */
+internal val PopupCardPadding = androidx.compose.foundation.layout.PaddingValues(
+    horizontal = 18.dp,
+    vertical = 14.dp,
+)
+
+/** Tighter vertical content padding for small floating list-item popups. */
+internal val PopupListPadding = androidx.compose.foundation.layout.PaddingValues(
+    horizontal = 18.dp,
+    vertical = 6.dp,
+)
+
 /** Read animation frames in the layer, keeping content measurement and popup anchors stable. */
 internal fun Modifier.popupMotion(state: PopupMotionState, origin: () -> TransformOrigin = { TransformOrigin.Center }): Modifier =
     graphicsLayer {

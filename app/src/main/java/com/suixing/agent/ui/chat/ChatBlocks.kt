@@ -61,6 +61,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Shape
@@ -187,19 +188,16 @@ internal val LocalTypewriter = compositionLocalOf { true }
 internal fun Modifier.blockPress(shape: Shape, expanded: Boolean? = null, label: String? = null, onClick: () -> Unit): Modifier {
     val position = LocalTranscriptPosition.current
     val interaction = remember { MutableInteractionSource() }
-    val pressed by interaction.collectIsPressedAsState()
+    val pressedState = interaction.collectIsPressedAsState()
+    val pressOverlay = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f)
     return this
         .semantics(mergeDescendants = true) {
             if (expanded != null) stateDescription = if (expanded) "已展开" else "已折叠"
         }
         .clip(shape)
-        .background(
-            if (pressed) {
-                MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f)
-            } else {
-                Color.Transparent
-            },
-        )
+        .drawBehind {
+            if (pressedState.value) drawRect(pressOverlay)
+        }
         .clickable(
             interactionSource = interaction,
             indication = null,
@@ -527,6 +525,10 @@ internal fun ReasoningBlock(
                     if (follow && offBottom && !inner.isScrollInProgress) inner.scrollToItem(lineCount)
                 }
             }
+            val thoughtStyle = thinkingStyle()
+            val thoughtColor = MaterialTheme.colorScheme.onSurfaceVariant
+            val blankSpacerModifier = remember { Modifier.height(4.dp) }
+            val chainSpacerModifier = remember { Modifier.height(0.dp) }
             LazyColumn(
                 state = inner,
                 reverseLayout = false,
@@ -556,13 +558,13 @@ internal fun ReasoningBlock(
                             // 与有字那行同一个光标实现（内联绘制），空串也会画出竖条。
                             MarkdownText(
                                 text = "",
-                                style = thinkingStyle(),
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                style = thoughtStyle,
+                                color = thoughtColor,
                                 cursor = true,
                             )
                         } else if (index > 0) {
                             // A leading blank line takes no extra space below the header.
-                            Spacer(Modifier.height(4.dp))
+                            Spacer(blankSpacerModifier)
                         }
                     } else {
                         // 思考链每一行都可选中复制（用户：「确实所有情况都要可复制」）——
@@ -572,8 +574,8 @@ internal fun ReasoningBlock(
                             text = line,
                             // 13sp with roomier leading than bodySmall's: a long chain of
                             // thought is read, not skimmed.
-                            style = thinkingStyle(),
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            style = thoughtStyle,
+                            color = thoughtColor,
                             // 不再额外加上边距：thinkingStyle 是 13sp 字号配 20sp 行高
                             // （ChatBlocks.thinkingStyle），首行上方已经有约 3.5dp 的半行距，
                             // 再叠 padding 就成了用户看到的那点「空白」。
@@ -591,7 +593,7 @@ internal fun ReasoningBlock(
                 }
                 // A zero-height terminal item provides exact bottom following even when
                 // the final logical line wraps taller than this capped viewport.
-                item(key = "reasoning-end", contentType = "reasoning-end") { Spacer(Modifier.height(0.dp)) }
+                item(key = "reasoning-end", contentType = "reasoning-end") { Spacer(chainSpacerModifier) }
             }
         }
     }
@@ -885,9 +887,14 @@ internal fun ToolDetail(line: ToolLine, maxHeight: Dp = 180.dp, listState: LazyL
     // 先取出 typography，再 remember 派生值；下面逐行复用它。
     val bodySmall = MaterialTheme.typography.bodySmall
     val monoStyle = remember(bodySmall) { bodySmall.copy(fontSize = 12.sp) }
+    val outputLineModifier = remember(line.ok) {
+        Modifier
+            .fillMaxWidth()
+            .padding(start = if (line.ok) 0.dp else 11.dp)
+    }
     LazyColumn(Modifier.fillMaxWidth().heightIn(max = maxHeight), state = listState ?: rememberLazyListState()) {
         if (args != null) {
-            item(key = "args") {
+            item(key = "args", contentType = "tool-args") {
                 Text(
                     text = args,
                     style = monoStyle,
@@ -904,7 +911,7 @@ internal fun ToolDetail(line: ToolLine, maxHeight: Dp = 180.dp, listState: LazyL
             if (args != null) {
                 // 输入（命令/参数）与输出之间要有一条分割线：两段都是等宽小字，没有这条线
                 // 读起来是连续的一大段，分不清哪是让它做的、哪是它返回的。
-                item(key = "divider") {
+                item(key = "divider", contentType = "tool-divider") {
                     // 只留上方 6dp：下方再留就成了「分割线与「输出」之间 6+8=14dp」的空白
                     // （用户看出来的「这一行离分割线的间距很大」）。
                     HorizontalDivider(
@@ -913,7 +920,7 @@ internal fun ToolDetail(line: ToolLine, maxHeight: Dp = 180.dp, listState: LazyL
                     )
                 }
             }
-            item(key = "output-head") {
+            item(key = "output-head", contentType = "tool-output-head") {
                 // 垂直居中对齐：28dp 的复制按钮和「输出」两字的视觉中线必须重合，用 Top 对齐时
                 // 图标会显得比文字高一截（用户看出来的）。
                 Row(
@@ -928,7 +935,7 @@ internal fun ToolDetail(line: ToolLine, maxHeight: Dp = 180.dp, listState: LazyL
                             Modifier
                                 .width(3.dp)
                                 .heightIn(min = 16.dp)
-                                .clip(RoundedCornerShape(2.dp))
+                                .clip(FailedToolBarShape)
                                 .background(scheme.error),
                         )
                         Spacer(Modifier.width(8.dp))
@@ -961,9 +968,7 @@ internal fun ToolDetail(line: ToolLine, maxHeight: Dp = 180.dp, listState: LazyL
                     style = monoStyle,
                     fontFamily = FontFamily.Monospace,
                     color = scheme.onSurfaceVariant,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(start = if (line.ok) 0.dp else 11.dp),
+                    modifier = outputLineModifier,
                 )
             }
         }
@@ -978,20 +983,25 @@ internal fun ToolDetail(line: ToolLine, maxHeight: Dp = 180.dp, listState: LazyL
  * 命中不了的一律 [R.drawable.ic_wrench] —— 通用工具保持原样。
  * 顺序敏感：更具体的词放前面（如 `web_fetch` 先命中网页组）。
  */
+private val TOOL_ICON_WEB = listOf("web", "search", "browse", "fetch", "url", "http")
+private val TOOL_ICON_SHELL = listOf("shell", "bash", "command", "terminal", "exec")
+private val TOOL_ICON_EDIT = listOf("edit", "write", "patch")
+private val TOOL_ICON_FILE = listOf("file", "read", "dir", "doc")
+
 internal fun toolIconRes(name: String): Int {
     val n = name.lowercase()
     return when {
         // 网页与搜索：web_search / web_fetch / browse / open_url / 插件搜索…
-        listOf("web", "search", "browse", "fetch", "url", "http").any { it in n } ->
+        TOOL_ICON_WEB.any { it in n } ->
             R.drawable.ic_globe
         // 终端与命令：run_shell / bash / exec…
-        listOf("shell", "bash", "command", "terminal", "exec").any { it in n } ->
+        TOOL_ICON_SHELL.any { it in n } ->
             R.drawable.ic_terminal
         // 文件写入与编辑：edit_file / write / patch
-        listOf("edit", "write", "patch").any { it in n } ->
+        TOOL_ICON_EDIT.any { it in n } ->
             R.drawable.ic_file_code
         // 文件读取与列目录：read_file / list_dir
-        listOf("file", "read", "dir", "doc").any { it in n } ->
+        TOOL_ICON_FILE.any { it in n } ->
             R.drawable.ic_file_text
         else -> R.drawable.ic_wrench
     }
@@ -1313,6 +1323,8 @@ internal fun TurnSummary(
 }
 
 
+private val FailedToolBarShape = RoundedCornerShape(2.dp)
+
 /** The run clock invalidates this header card, not the summary's process/state mapping. */
 @Composable
 private fun TurnSummaryProcessCard(
@@ -1328,20 +1340,32 @@ private fun TurnSummaryProcessCard(
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val elapsedMs = if (streaming) runningElapsed?.value ?: 0L else settledElapsedMs
-    val headline = remember(streaming, elapsedMs, thoughtCount, callCount) {
-        buildList {
-            if (streaming || elapsedMs > 0) add("用时 ${formatRunElapsed(elapsedMs)}")
-            if (thoughtCount > 0) add("思考 $thoughtCount 段")
-            if (callCount > 0) add("工具 $callCount 个")
-        }
-    }
     // Keep the existing title, compression note and ellipsis in their shared header slot.
-    val header = remember(headline, note, streaming) {
-        buildList {
-            add(if (headline.isEmpty()) if (streaming) "正在回复" else "本轮用量"
-                else "本轮：${headline.joinToString(" · ")}")
-            if (note.isNotBlank()) add(note)
-        }.joinToString(" · ")
+    val header = remember(streaming, elapsedMs, thoughtCount, callCount, note) {
+        val hasElapsed = streaming || elapsedMs > 0
+        val hasParts = hasElapsed || thoughtCount > 0 || callCount > 0
+        buildString {
+            if (!hasParts) {
+                append(if (streaming) "正在回复" else "本轮用量")
+            } else {
+                append("本轮：")
+                var first = true
+                if (hasElapsed) {
+                    append("用时 ").append(formatRunElapsed(elapsedMs))
+                    first = false
+                }
+                if (thoughtCount > 0) {
+                    if (!first) append(" · ")
+                    append("思考 ").append(thoughtCount).append(" 段")
+                    first = false
+                }
+                if (callCount > 0) {
+                    if (!first) append(" · ")
+                    append("工具 ").append(callCount).append(" 个")
+                }
+            }
+            if (note.isNotBlank()) append(" · ").append(note)
+        }
     }
     ProcessCard(
         icon = com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_chart_column),

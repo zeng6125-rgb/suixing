@@ -14,7 +14,6 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
 import java.io.File
-import java.security.MessageDigest
 import java.util.Collections
 import com.suixing.agent.core.NativeCore
 import com.suixing.agent.core.encodeCoreBytes
@@ -111,7 +110,7 @@ class MemoryStore(private val context: Context) {
         if (!file.exists()) { parsed = null; return emptyMap() }
         // Check actual bytes, not mtime/size: same-length replacements must invalidate the cache.
         val bytes = runCatching { file.readBytes() }.getOrNull() ?: run { parsed = null; return emptyMap() }
-        val digest = MessageDigest.getInstance("SHA-256").digest(bytes)
+        val digest = NativeCore.sha256Digest(bytes)
         parsed?.let { if (it.digest.contentEquals(digest)) return it.entries }
         val text = bytes.toString(Charsets.UTF_8)
         if (text.isBlank()) { parsed = null; return emptyMap() }
@@ -155,7 +154,7 @@ class MemoryStore(private val context: Context) {
         }
         val snapshot = MemorySnapshot(map)
         val bytes = Json.encodeCoreBytes(JsonObject.serializer(), json)
-        val digest = MessageDigest.getInstance("SHA-256").digest(bytes)
+        val digest = NativeCore.sha256Digest(bytes)
         return runCatching {
             // 公共原子写（issue #69 P1-B）：写 .tmp → fsync → 原子替换。
             // 旧实现在 rename 失败时回退成「原地覆盖」，那会在写失败时毁掉旧笔记；

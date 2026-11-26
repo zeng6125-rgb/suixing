@@ -256,12 +256,16 @@ fun SegmentedPill(
     val colors = MaterialTheme.colorScheme
     val useMiuix = com.suixing.agent.ui.theme.LocalUseMiuix.current
     val isDark = com.suixing.agent.ui.theme.LocalDarkTheme.current
-    val shape = if (useMiuix) {
-        androidx.compose.foundation.shape.RoundedCornerShape(
-            com.suixing.agent.ui.theme.miuixScaledCorner(10.dp, com.suixing.agent.ui.theme.LocalMiuixCornerScale.current),
-        )
-    } else {
-        MaterialTheme.shapes.small
+    val cornerScale = com.suixing.agent.ui.theme.LocalMiuixCornerScale.current
+    val fallbackShape = MaterialTheme.shapes.small
+    val shape = remember(useMiuix, cornerScale, fallbackShape) {
+        if (useMiuix) {
+            androidx.compose.foundation.shape.RoundedCornerShape(
+                com.suixing.agent.ui.theme.miuixScaledCorner(10.dp, cornerScale),
+            )
+        } else {
+            fallbackShape
+        }
     }
     val trackColor = if (useMiuix) {
         if (isDark) {

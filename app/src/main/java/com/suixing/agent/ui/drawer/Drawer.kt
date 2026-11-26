@@ -119,16 +119,18 @@ internal val DRAWER_SHEET_WIDTH = 300
  */
 private fun drawerSpring(visibilityThreshold: Float) = spring(
     dampingRatio = 1f,
-    stiffness = 500f,
+    stiffness = 515f,
     visibilityThreshold = visibilityThreshold,
 )
 
-internal val DRAWER_SPEC = drawerSpring(0.003f)
+private val DrawerSheetShape = RoundedCornerShape(topEnd = 30.dp, bottomEnd = 30.dp)
+
+internal val DRAWER_SPEC = drawerSpring(0.0005f)
 
 /** Close uses the same spring, with a subpixel tail before snapping to the anchor. */
-internal val DRAWER_CLOSE_SPEC = drawerSpring(0.0005f)
+internal val DRAWER_CLOSE_SPEC = DRAWER_SPEC
 
-/** Opening shares the same spring; gestures additionally carry their release velocity. */
+/** Opening shares the same subpixel spring tail so neither anchor snaps visibly. */
 internal val DRAWER_OPEN_SPEC: androidx.compose.animation.core.FiniteAnimationSpec<Float> =
     DRAWER_SPEC
 
@@ -357,7 +359,7 @@ internal fun Drawer(
             .fillMaxHeight()
             // **宽度只有一处定义**（[DRAWER_SHEET_WIDTH]），别再写魔数。
             .width(DRAWER_SHEET_WIDTH.dp),
-        drawerShape = RoundedCornerShape(topEnd = 30.dp, bottomEnd = 30.dp),
+        drawerShape = DrawerSheetShape,
         drawerContainerColor = LocalDrawerSurfaceColor.current ?: scheme.surfaceContainerHigh,
         drawerTonalElevation = 0.dp,
         windowInsets = WindowInsets(0, 0, 0, 0),
@@ -614,14 +616,15 @@ internal fun Drawer(
                         )
                     }
                     items(sections.pinned, key = { it.id }, contentType = { "conversation" }) { // 只保留位移动画。
-drawerRow(
-                        it,
-                        Modifier.animateItem(
-                            fadeInSpec = null,
-                            placementSpec = DrawerRowPlacementSpec,
-                            fadeOutSpec = null,
-                        ),
-                    ) }
+                        val rowAnimModifier = remember(this) {
+                            Modifier.animateItem(
+                                fadeInSpec = null,
+                                placementSpec = DrawerRowPlacementSpec,
+                                fadeOutSpec = null,
+                            )
+                        }
+                        drawerRow(it, rowAnimModifier)
+                    }
                     if (sections.normal.isNotEmpty()) {
                         item(key = "drawer-section-divider", contentType = "section-divider") {
                             HorizontalDivider(
@@ -632,14 +635,15 @@ drawerRow(
                     }
                 }
                 items(sections.normal, key = { it.id }, contentType = { "conversation" }) { // 只保留位移动画。
-drawerRow(
-                        it,
+                    val rowAnimModifier = remember(this) {
                         Modifier.animateItem(
                             fadeInSpec = null,
                             placementSpec = DrawerRowPlacementSpec,
                             fadeOutSpec = null,
-                        ),
-                    ) }
+                        )
+                    }
+                    drawerRow(it, rowAnimModifier)
+                }
             }
 
             Spacer(Modifier.height(6.dp))

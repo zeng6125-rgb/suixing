@@ -103,7 +103,9 @@ add_library(suixing_search SHARED
     search_jni.cpp file_find_jni.cpp usage_jni.cpp sse_jni.cpp markdown_jni.cpp
     text_read_jni.cpp core_jni.cpp memory_prompt_jni.cpp request_budget_jni.cpp
     loop_policy_jni.cpp json_document_jni.cpp edit_ops_jni.cpp usage_aggregation_jni.cpp
-    wire_text_jni.cpp skill_catalog_jni.cpp drawer_order_jni.cpp runtime_jni.cpp)
+    wire_text_jni.cpp skill_catalog_jni.cpp drawer_order_jni.cpp runtime_jni.cpp
+    ui_dump_jni.cpp speech_clean_jni.cpp web_html_jni.cpp llm_ops_jni.cpp
+    file_observe_jni.cpp run_ledger_jni.cpp tool_preview_jni.cpp plugin_ops_jni.cpp)
 target_compile_features(suixing_search PRIVATE cxx_std_17)
 target_compile_options(suixing_search PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(suixing_search PRIVATE suixing_search_rust android log ${CMAKE_DL_LIBS} m)

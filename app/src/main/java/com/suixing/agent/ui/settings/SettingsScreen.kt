@@ -626,10 +626,12 @@ internal fun lastUpdated(millis: Long): String = DateUtils.getRelativeTimeSpanSt
     DateUtils.MINUTE_IN_MILLIS,
 ).toString()
 
+private val EXPORT_UNSAFE_CHARS = Regex("""[\\/:*?"<>|\s]+""")
+
 /** 导出文件名：标题里的路径分隔符与空白换成下划线，空标题兜底。 */
 internal fun exportFileName(title: String): String {
     val base = title.trim()
-        .replace(Regex("""[\\/:*?"<>|\s]+"""), "_")
+        .replace(EXPORT_UNSAFE_CHARS, "_")
         .trim('_')
         .take(40)
     return "${base.ifBlank { "会话" }}.json"

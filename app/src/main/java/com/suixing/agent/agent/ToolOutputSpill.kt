@@ -52,7 +52,28 @@ internal fun spillToolOutput(
 internal fun pruneOldSpills(dir: File, keep: Int) {
     if (keep <= 0) return
     runCatching {
-        dir.listFiles()?.sortedByDescending { it.lastModified() }?.drop(keep)?.forEach { it.delete() }
+        val files = dir.listFiles() ?: return@runCatching
+        if (files.size <= keep) return@runCatching
+        if (files.size == keep + 1) {
+            var oldest = files[files.lastIndex]
+            var oldestTime = oldest.lastModified()
+            for (i in files.lastIndex - 1 downTo 0) {
+                val candidate = files[i]
+                val modified = candidate.lastModified()
+                if (modified < oldestTime) {
+                    oldest = candidate
+                    oldestTime = modified
+                }
+            }
+            oldest.delete()
+            return@runCatching
+        }
+        val stamped = ArrayList<Pair<File, Long>>(files.size)
+        for (file in files) stamped += file to file.lastModified()
+        stamped.sortByDescending { it.second }
+        for (i in keep until stamped.size) {
+            stamped[i].first.delete()
+        }
     }
 }
 

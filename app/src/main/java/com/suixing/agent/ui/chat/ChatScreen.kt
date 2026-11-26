@@ -126,7 +126,9 @@ fun ChatScreen(
     // 而 `scrollToItem` 已经执行过 ⇒ 整段恢复位置被推移一次。
     // **按会话 key**（评审）：底边距是"读历史期间冻结的那一个"，不同会话的输入框/让位不同，
     // 不 key 的话切到另一个会话会沿用上一个会话冻结值。
-    var heldFootprint by remember(state.conversationId) { mutableStateOf<Dp?>(null) }
+    val heldFootprintState = remember(state.conversationId) { mutableStateOf<Dp?>(null) }
+    var heldFootprint by heldFootprintState
+    val heldFootprintProvider = remember(heldFootprintState) { { heldFootprintState.value } }
     // **不含手势条那一截**：它在布局期由列表/空状态自己让出来（[keyboardAwareImePad]），
     // 这样这一项不随键盘逐帧变 —— 否则它就是上面说过的「每帧整页重组」。
     // 几何上与旧写法等价：列表视口少了 navBarPad、正文底边距也少了 navBarPad，
@@ -318,7 +320,7 @@ fun ChatScreen(
                     state, settings, transcript, contextReadout, runPresentation, actions, inputBindings,
                     transcriptPosition, revealGuardSpec, gesture, scroll, selectionTracker, viewConfig,
                     selectionFocus, setSelectionActive, composerH, navBarPx, imePxState,
-                    { heldFootprint }, stackFootprint, bubbleMaxWidth, live,
+                    heldFootprintProvider, stackFootprint, bubbleMaxWidth, live,
                     loadingEarlier, loadEarlier, editMessage, onOpenSettings,
                 )
             }

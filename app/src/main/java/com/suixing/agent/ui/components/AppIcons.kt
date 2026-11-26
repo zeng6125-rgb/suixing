@@ -121,14 +121,14 @@ private val miuixChevronUp: ImageVector by lazy {
     transformedMiuixVector(MiuixIcons.Regular.ChevronForward, "Up", degrees = -90f)
 }
 private val miuixCenteredSend: ImageVector by lazy {
-    // MiuixIcons.Regular.Send 在 40dp 圆形发射按钮里尖端视觉偏右；
-    // 保持 0.96 倍尺度与其他 20dp 标准图标对齐，同时做轻度光学居中补偿（-0.80dp X, +0.25dp Y）。
+    // MiuixIcons.Regular.Send 虽外框接近居中，但箭头右侧实体像素质心偏右约 2dp、最小包围圆偏右上，
+    // 在 40dp 圆形实底按钮内采用 (-1.05dp X, +0.15dp Y) 轻度左移以平衡视觉重心且不挤占左边缘。
     transformedMiuixVector(
         MiuixIcons.Regular.Send,
         "Centered",
-        scale = 0.96f,
-        shiftFractionX = -0.80f / 24f,
-        shiftFractionY = 0.25f / 24f,
+        scale = 0.94f,
+        shiftFractionX = -1.05f / 24f,
+        shiftFractionY = 0.15f / 24f,
     )
 }
 

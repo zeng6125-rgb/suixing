@@ -164,18 +164,25 @@ mod window_tests {
         let log = stale_window_fixture();
         let mut calls = 0;
         let mut bytes_read = 0;
-        let offset = window_start(log.len() as u64, 12, |out, at| {
-            let start = at as usize;
-            calls += 1;
-            bytes_read += out.len();
-            out.copy_from_slice(&log[start..start + out.len()]);
-            Ok(())
-        }, || Ok(())).unwrap();
+        let offset = window_start(
+            log.len() as u64,
+            12,
+            |out, at| {
+                let start = at as usize;
+                calls += 1;
+                bytes_read += out.len();
+                out.copy_from_slice(&log[start..start + out.len()]);
+                Ok(())
+            },
+            || Ok(()),
+        )
+        .unwrap();
         assert!(offset > 0);
         let cancelled_calls = Cell::new(0);
         let mut cancelled_bytes = 0;
         let stopped = window_start(
-            log.len() as u64, 12,
+            log.len() as u64,
+            12,
             |out, at| {
                 let start = at as usize;
                 cancelled_calls.set(cancelled_calls.get() + 1);
@@ -183,12 +190,20 @@ mod window_tests {
                 out.copy_from_slice(&log[start..start + out.len()]);
                 Ok(())
             },
-            || if cancelled_calls.get() >= 2 { Err(STATUS_CANCELLED) } else { Ok(()) },
+            || {
+                if cancelled_calls.get() >= 2 {
+                    Err(STATUS_CANCELLED)
+                } else {
+                    Ok(())
+                }
+            },
         );
         assert_eq!(Err(STATUS_CANCELLED), stopped);
         assert_eq!(2, cancelled_calls.get());
         assert!(cancelled_bytes < bytes_read);
-        println!("reply window baseline calls={calls} bytes_read={bytes_read}, cancelled bytes_read={cancelled_bytes}");
+        println!(
+            "reply window baseline calls={calls} bytes_read={bytes_read}, cancelled bytes_read={cancelled_bytes}"
+        );
     }
 
     #[test]
@@ -202,14 +217,23 @@ mod window_tests {
         let bytes_read = Cell::new(0);
         let mut batches = 0_usize;
         let result = read_content(
-            0, log.len() as u64, consume, (&raw mut batches).cast(),
+            0,
+            log.len() as u64,
+            consume,
+            (&raw mut batches).cast(),
             |out, at| {
                 let start = at as usize;
                 out.copy_from_slice(&log[start..start + out.len()]);
                 bytes_read.set(bytes_read.get() + out.len());
                 Ok(())
             },
-            || if bytes_read.get() >= 65_536 { Err(STATUS_CANCELLED) } else { Ok(()) },
+            || {
+                if bytes_read.get() >= 65_536 {
+                    Err(STATUS_CANCELLED)
+                } else {
+                    Ok(())
+                }
+            },
         );
         assert_eq!(Err(STATUS_CANCELLED), result);
         assert_eq!(65_536, bytes_read.get());
@@ -252,12 +276,17 @@ mod window_tests {
                 read = 0;
                 let bytes = black_box(log.as_bytes());
                 let started = Instant::now();
-                let offset = window_start(bytes.len() as u64, 12, |out, from| {
-                    let start = from as usize;
-                    read += out.len();
-                    out.copy_from_slice(&bytes[start..start + out.len()]);
-                    Ok(())
-                }, || Ok(()))
+                let offset = window_start(
+                    bytes.len() as u64,
+                    12,
+                    |out, from| {
+                        let start = from as usize;
+                        read += out.len();
+                        out.copy_from_slice(&bytes[start..start + out.len()]);
+                        Ok(())
+                    },
+                    || Ok(()),
+                )
                 .unwrap();
                 let elapsed = started.elapsed().as_nanos();
                 assert_eq!(offset, expected as u64);
@@ -289,10 +318,15 @@ mod window_tests {
             bytes.push(b'\n');
         }
         let plan = |want| {
-            window_start(bytes.len() as u64, want, |out, at| {
-                out.copy_from_slice(&bytes[at as usize..at as usize + out.len()]);
-                Ok(())
-            }, || Ok(()))
+            window_start(
+                bytes.len() as u64,
+                want,
+                |out, at| {
+                    out.copy_from_slice(&bytes[at as usize..at as usize + out.len()]);
+                    Ok(())
+                },
+                || Ok(()),
+            )
             .unwrap()
         };
         assert_eq!(plan(1), offset);
@@ -303,10 +337,15 @@ mod window_tests {
     fn damaged_records_defer_to_the_existing_diagnostic_reader() {
         let bytes = b"{\"id\":\"x\",\"role\":\"assistant\",\"timestamp\":0,\"text\":7}\n";
         assert!(
-            window_start(bytes.len() as u64, 1, |out, at| {
-                out.copy_from_slice(&bytes[at as usize..at as usize + out.len()]);
-                Ok(())
-            }, || Ok(()))
+            window_start(
+                bytes.len() as u64,
+                1,
+                |out, at| {
+                    out.copy_from_slice(&bytes[at as usize..at as usize + out.len()]);
+                    Ok(())
+                },
+                || Ok(())
+            )
             .is_err()
         );
     }
@@ -315,7 +354,11 @@ mod window_tests {
 #[cfg(unix)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_chat_log_window_start(
-    fd: i32, end: i64, want: i32, checkpoint: Option<Checkpoint>, context: *mut c_void,
+    fd: i32,
+    end: i64,
+    want: i32,
+    checkpoint: Option<Checkpoint>,
+    context: *mut c_void,
 ) -> i64 {
     use std::{
         fs::File,
@@ -327,10 +370,15 @@ pub unsafe extern "C" fn sx_chat_log_window_start(
     }
     catch_unwind(|| {
         let file = ManuallyDrop::new(unsafe { File::from_raw_fd(fd) });
-        window_start(end as u64, want as usize, |buffer, at| {
-            file.read_exact_at(buffer, at)
-                .map_err(|_| STATUS_REQUEST_ERROR)
-        }, || check(checkpoint, context))
+        window_start(
+            end as u64,
+            want as usize,
+            |buffer, at| {
+                file.read_exact_at(buffer, at)
+                    .map_err(|_| STATUS_REQUEST_ERROR)
+            },
+            || check(checkpoint, context),
+        )
         .map_or(-1, |start| start as i64)
     })
     .unwrap_or(-1)
@@ -356,8 +404,13 @@ fn flush(
 
 #[cfg(unix)]
 fn read(
-    fd: i32, start: u64, end: u64, consume: Consume, context: *mut c_void,
-    checkpoint: Option<Checkpoint>, check_context: *mut c_void,
+    fd: i32,
+    start: u64,
+    end: u64,
+    consume: Consume,
+    context: *mut c_void,
+    checkpoint: Option<Checkpoint>,
+    check_context: *mut c_void,
 ) -> Result<(), i32> {
     use std::{
         fs::File,
@@ -369,15 +422,24 @@ fn read(
         return Err(STATUS_REQUEST_ERROR);
     }
     read_content(
-        start, end, consume, context,
-        |buffer, position| file.read_exact_at(buffer, position).map_err(|_| STATUS_REQUEST_ERROR),
+        start,
+        end,
+        consume,
+        context,
+        |buffer, position| {
+            file.read_exact_at(buffer, position)
+                .map_err(|_| STATUS_REQUEST_ERROR)
+        },
         || check(checkpoint, check_context),
     )
 }
 
 #[cfg(any(test, unix))]
 fn read_content(
-    start: u64, end: u64, consume: Consume, context: *mut c_void,
+    start: u64,
+    end: u64,
+    consume: Consume,
+    context: *mut c_void,
     mut read_at: impl FnMut(&mut [u8], u64) -> Result<(), i32>,
     mut checkpoint: impl FnMut() -> Result<(), i32>,
 ) -> Result<(), i32> {
@@ -438,7 +500,13 @@ fn read_content(
 }
 #[cfg(not(unix))]
 fn read(
-    _: i32, _: u64, _: u64, _: Consume, _: *mut c_void, _: Option<Checkpoint>, _: *mut c_void,
+    _: i32,
+    _: u64,
+    _: u64,
+    _: Consume,
+    _: *mut c_void,
+    _: Option<Checkpoint>,
+    _: *mut c_void,
 ) -> Result<(), i32> {
     Err(4)
 }

@@ -2,10 +2,10 @@ package com.suixing.agent.data
 
 import com.suixing.agent.core.encodeCoreBytes
 import com.suixing.agent.core.AtomicFiles
+import com.suixing.agent.core.NativeCore
 import java.io.File
 import java.io.IOException
 import java.nio.file.Files
-import java.security.MessageDigest
 import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
@@ -37,7 +37,7 @@ internal class DeletedUsageStore(private val directory: File) {
         if (!directory.isDirectory && !directory.mkdirs()) throw IOException("无法保存删除前的用量记录。")
         val saved = usage.copy(deletedAt = usage.deletedAt.takeIf { it > 0L }
             ?: System.currentTimeMillis().coerceAtLeast(1L))
-        val name = MessageDigest.getInstance("SHA-256").digest(id.toByteArray(Charsets.UTF_8))
+        val name = NativeCore.sha256Digest(id.toByteArray(Charsets.UTF_8))
             .joinToString("") { (it.toInt() and 0xff).toString(16).padStart(2, '0') }
         AtomicFiles.writeBytes(File(directory, "$name.json"),
             json.encodeCoreBytes(DeletedUsageEntry.serializer(), DeletedUsageEntry(id, saved, zoneId)))

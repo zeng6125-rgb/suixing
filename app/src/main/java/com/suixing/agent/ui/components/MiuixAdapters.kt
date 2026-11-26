@@ -14,16 +14,24 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.calculateEndPadding
 import androidx.compose.foundation.layout.calculateStartPadding
 import androidx.compose.foundation.layout.defaultMinSize
+import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
@@ -45,19 +53,26 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.Layout
+import androidx.compose.ui.layout.layoutId
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.error
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.state.ToggleableState
+import androidx.compose.ui.text.PlatformTextStyle
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.DialogProperties
+import kotlin.math.max
+import kotlin.math.roundToInt
 import com.suixing.agent.ui.theme.LocalMiuixCornerScale
 import com.suixing.agent.ui.theme.miuixScaledCorner
 import top.yukonga.miuix.kmp.basic.BasicComponent
@@ -74,7 +89,6 @@ import top.yukonga.miuix.kmp.basic.ProgressIndicatorDefaults
 import top.yukonga.miuix.kmp.basic.RadioButton as MiuixRadioButton
 import top.yukonga.miuix.kmp.basic.Slider
 import top.yukonga.miuix.kmp.basic.SmallTitle
-import top.yukonga.miuix.kmp.basic.SmallTopAppBar
 import top.yukonga.miuix.kmp.basic.Switch
 import top.yukonga.miuix.kmp.basic.TextButton
 import top.yukonga.miuix.kmp.icon.MiuixIcons
@@ -146,6 +160,29 @@ internal fun MiuixCardContainer(
 }
 
 @Composable
+internal fun MiuixPageTopBarAction(
+    icon: ImageVector,
+    contentDescription: String,
+    onClick: () -> Unit,
+    enabled: Boolean = true,
+    glyphSize: Dp = 20.dp,
+) {
+    val scheme = MiuixTheme.colorScheme
+    MiuixIconButton(
+        onClick = onClick,
+        enabled = enabled,
+        backgroundColor = Color.Transparent,
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = contentDescription,
+            modifier = Modifier.size(glyphSize),
+            tint = if (enabled) scheme.onSurface else scheme.disabledOnSurface,
+        )
+    }
+}
+
+@Composable
 internal fun MiuixPageTopBar(
     title: String,
     onBack: () -> Unit,
@@ -153,36 +190,110 @@ internal fun MiuixPageTopBar(
     actions: @Composable RowScope.() -> Unit = {},
 ) {
     val scheme = MiuixTheme.colorScheme
-    SmallTopAppBar(
-        title = title,
-        color = scheme.surface,
-        titleColor = scheme.onSurface,
-        subtitle = subtitle.orEmpty(),
-        subtitleColor = scheme.onSurfaceVariantSummary,
-        defaultWindowInsetsPadding = true,
-        navigationIcon = {
-            MiuixIconButton(
-                onClick = onBack,
-                modifier = Modifier.padding(start = 12.dp),
-                backgroundColor = Color.Transparent,
-            ) {
-                Icon(
-                    imageVector = MiuixIcons.Regular.Back,
-                    contentDescription = "返回",
-                    tint = scheme.onSurface,
-                    modifier = Modifier.size(24.dp),
+    val styles = MiuixTheme.textStyles
+    val titleStyle = remember(styles.title3) {
+        styles.title3.copy(
+            fontWeight = FontWeight.Medium,
+            platformStyle = PlatformTextStyle(includeFontPadding = false),
+        )
+    }
+    val hasSubtitle = !subtitle.isNullOrEmpty()
+    val opticalShift = remember(title, subtitle, titleStyle) { FloatArray(1) }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(scheme.surface)
+            .windowInsetsPadding(WindowInsets.displayCutout.only(WindowInsetsSides.Horizontal))
+            .windowInsetsPadding(WindowInsets.navigationBars.only(WindowInsetsSides.Horizontal))
+            .statusBarsPadding(),
+    ) {
+        Layout(
+            content = {
+                Box(Modifier.layoutId("navigationIcon").padding(start = 16.dp)) {
+                    MiuixIconButton(
+                        onClick = onBack,
+                        backgroundColor = Color.Transparent,
+                    ) {
+                        Icon(
+                            imageVector = MiuixIcons.Regular.Back,
+                            contentDescription = "返回",
+                            tint = scheme.onSurface,
+                            modifier = Modifier.size(24.dp),
+                        )
+                    }
+                }
+                Box(Modifier.layoutId("smallTitle")) {
+                    Text(
+                        text = title,
+                        color = scheme.onSurface,
+                        style = titleStyle,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        onTextLayout = { layout -> opticalShift[0] = opticalCenterShift(layout) },
+                        modifier = Modifier.offset { IntOffset(0, opticalShift[0].roundToInt()) },
+                    )
+                }
+                Row(
+                    modifier = Modifier.layoutId("actionIcons").padding(end = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    ProvideDualContentColor(scheme.onSurface) {
+                        actions()
+                    }
+                }
+                if (hasSubtitle) {
+                    Box(Modifier.layoutId("smallSubtitle")) {
+                        Text(
+                            text = subtitle.orEmpty(),
+                            color = scheme.onSurfaceVariantSummary,
+                            style = styles.body2,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+            },
+        ) { measurables, constraints ->
+            val loose = constraints.copy(minWidth = 0, minHeight = 0)
+            val navPlaceable = measurables.first { it.layoutId == "navigationIcon" }.measure(loose)
+            val actionsPlaceable = measurables.first { it.layoutId == "actionIcons" }.measure(loose)
+            val maxTitleWidth =
+                (constraints.maxWidth - navPlaceable.width - actionsPlaceable.width).coerceAtLeast(0)
+            val titleConstraints = loose.copy(maxWidth = maxTitleWidth)
+            val titlePlaceable = measurables.first { it.layoutId == "smallTitle" }.measure(titleConstraints)
+            val subPlaceable = measurables.firstOrNull { it.layoutId == "smallSubtitle" }?.measure(titleConstraints)
+
+            val centerY = 50.dp.roundToPx() / 2
+            val collapsedHeightPx = 52.dp.roundToPx()
+            val subY = centerY + titlePlaceable.height / 2
+            val barHeight = if (subPlaceable != null) {
+                max(collapsedHeightPx, subY + subPlaceable.height + 8.dp.roundToPx())
+            } else {
+                max(collapsedHeightPx, titlePlaceable.height)
+            }
+
+            fun centeredX(width: Int): Int {
+                val maxRight = constraints.maxWidth - actionsPlaceable.width
+                val ideal = (constraints.maxWidth - width) / 2
+                return when {
+                    ideal < navPlaceable.width -> navPlaceable.width
+                    ideal + width > maxRight -> (maxRight - width).coerceAtLeast(navPlaceable.width)
+                    else -> ideal
+                }
+            }
+
+            layout(constraints.maxWidth, barHeight) {
+                navPlaceable.placeRelative(0, centerY - navPlaceable.height / 2)
+                titlePlaceable.placeRelative(centeredX(titlePlaceable.width), centerY - titlePlaceable.height / 2)
+                actionsPlaceable.placeRelative(
+                    constraints.maxWidth - actionsPlaceable.width,
+                    centerY - actionsPlaceable.height / 2,
                 )
+                subPlaceable?.placeRelative(centeredX(subPlaceable.width), subY)
             }
-        },
-        actions = {
-            ProvideDualContentColor(scheme.onSurface) {
-                actions()
-            }
-        },
-        bottomContent = {
-            Spacer(Modifier.height(4.dp))
-        },
-    )
+        }
+        Spacer(Modifier.height(4.dp))
+    }
 }
 
 @Composable
@@ -373,7 +484,7 @@ internal fun MiuixActionMenuItem(
     selected: Boolean = false,
     contentPadding: PaddingValues = PaddingValues(
         horizontal = 20.dp,
-        vertical = 12.dp,
+        vertical = 8.dp,
     ),
 ) {
     val scheme = MiuixTheme.colorScheme
@@ -582,7 +693,7 @@ internal fun MiuixCompactTextField(
     val scheme = MiuixTheme.colorScheme
     val styles = MiuixTheme.textStyles
     val corner = miuixScaledCorner(12.dp, LocalMiuixCornerScale.current)
-    val shape = RoundedCornerShape(corner)
+    val shape = remember(corner) { RoundedCornerShape(corner) }
     val textColor = when {
         !enabled -> scheme.disabledOnSurface
         isError -> scheme.error
@@ -786,7 +897,7 @@ internal fun MiuixButtonControl(
             disabledContentColor = scheme.disabledOnSecondaryVariant,
         )
     }
-    val shape = RoundedCornerShape(scaledCorner)
+    val shape = remember(scaledCorner) { RoundedCornerShape(scaledCorner) }
     val resolvedModifier = if (variant == MiuixButtonVariant.Outlined) {
         val borderColor = if (enabled) scheme.outline else scheme.dividerLine
         modifier.border(1.dp, borderColor, shape)
@@ -818,7 +929,8 @@ internal fun MiuixFilterChip(
     enabled: Boolean = true,
 ) {
     val scheme = MiuixTheme.colorScheme
-    val shape = RoundedCornerShape(miuixScaledCorner(10.dp, LocalMiuixCornerScale.current))
+    val chipCorner = miuixScaledCorner(10.dp, LocalMiuixCornerScale.current)
+    val shape = remember(chipCorner) { RoundedCornerShape(chipCorner) }
     val bg = if (selected) scheme.primary.copy(alpha = 0.14f) else scheme.secondaryVariant
     val fg = when {
         !enabled -> scheme.disabledOnSecondaryVariant

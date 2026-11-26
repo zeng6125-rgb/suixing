@@ -199,11 +199,35 @@ class JobStore(private val dir: File, private val scope: CoroutineScope,
         // deleting it leaves a job that keeps running while its output has silently become
         // unreadable — `job_output` would answer with an empty log and no hint of the loss.
         val live = synchronized(lock) { jobs.values.mapTo(mutableSetOf<String>()) { it.info.logPath } }
-        dir.listFiles { file -> file.extension == "log" }
-            ?.filterNot { it.absolutePath in live }
-            ?.sortedByDescending { it.lastModified() }
-            ?.filterIndexed { index, file -> index >= KEEP_LOGS || file.lastModified() < cutoff }
-            ?.forEach { it.delete() }
+        val files = dir.listFiles { file -> file.extension == "log" } ?: return
+        val candidates = ArrayList<Pair<File, Long>>(files.size)
+        for (file in files) {
+            if (file.absolutePath in live) continue
+            val modified = file.lastModified()
+            if (modified < cutoff) {
+                file.delete()
+            } else {
+                candidates += file to modified
+            }
+        }
+        if (candidates.size <= KEEP_LOGS) return
+        if (candidates.size == KEEP_LOGS + 1) {
+            var oldestIdx = candidates.lastIndex
+            var oldestTime = candidates[oldestIdx].second
+            for (i in candidates.lastIndex - 1 downTo 0) {
+                val modified = candidates[i].second
+                if (modified < oldestTime) {
+                    oldestTime = modified
+                    oldestIdx = i
+                }
+            }
+            candidates[oldestIdx].first.delete()
+            return
+        }
+        candidates.sortByDescending { it.second }
+        for (i in KEEP_LOGS until candidates.size) {
+            candidates[i].first.delete()
+        }
     }
 
     private companion object {

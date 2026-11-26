@@ -460,29 +460,37 @@ fun SuixingApp() {
             drawerState.freezesChat(drawerBusyState.value) && heldImeState.value == 0
         }
     }
-    val freezeChatDrawing = remember(chatFrozen) {
-        Modifier.drawWithCache {
+    val homeFreezeLayer = rememberGraphicsLayer()
+    val freezeCache = remember { DrawerFreezeCache() }
+    val freezeChatDrawing = remember(chatFrozen, homeFreezeLayer, freezeCache) {
+        Modifier.drawWithContent {
             if (!chatFrozen.value) {
-                onDrawWithContent { drawContent() }
-            } else {
-                val layer = obtainGraphicsLayer()
-                layer.compositingStrategy = CompositingStrategy.Offscreen
-                var recorded = false
-                onDrawWithContent {
-                    if (!recorded) {
-                        layer.record { this@onDrawWithContent.drawContent() }
-                        recorded = true
-                    }
-                    drawLayer(layer)
+                if (freezeCache.recorded) {
+                    freezeCache.recorded = false
+                    freezeCache.width = 0f
+                    freezeCache.height = 0f
+                    homeFreezeLayer.compositingStrategy = CompositingStrategy.Auto
                 }
+                drawContent()
+            } else {
+                val w = size.width
+                val h = size.height
+                if (!freezeCache.recorded || freezeCache.width != w || freezeCache.height != h) {
+                    homeFreezeLayer.compositingStrategy = CompositingStrategy.Offscreen
+                    homeFreezeLayer.record { this@drawWithContent.drawContent() }
+                    freezeCache.recorded = true
+                    freezeCache.width = w
+                    freezeCache.height = h
+                }
+                drawLayer(homeFreezeLayer)
             }
         }
     }
     val focusManager = LocalFocusManager.current
     val keyboardController = LocalSoftwareKeyboardController.current
-    val openSidebar: () -> Unit = remember(scope, drawerState, switchIntents, focusManager, keyboardController) { {
+    val openSidebar: () -> Unit = remember(scope, drawerState, switchIntents, focusManager, keyboardController, heldImeState) { {
         if (routeNow == "empty") {
-            keyboardController?.hide()
+            if (heldImeState.value > 0) keyboardController?.hide()
             focusManager.clearFocus(force = true)
             switchIntents.invalidate()
             scope.launch(start = CoroutineStart.UNDISPATCHED) {
@@ -672,6 +680,11 @@ fun SuixingApp() {
                 // The outline eases back to a rectangle as the home layer reaches full screen.
                 val panelWidthPx = with(LocalDensity.current) { DRAWER_SHEET_WIDTH.dp.toPx() }
                 val homeShape = remember { RoundedCornerShape(SCREEN_CORNER_DP.dp) }
+                val transitionShapes = remember {
+                    Array(DRAWER_CORNER_STEPS) { step ->
+                        RoundedCornerShape(SCREEN_CORNER_DP.dp * ((step + 1).toFloat() / (DRAWER_CORNER_STEPS + 1)))
+                    }
+                }
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
@@ -685,10 +698,11 @@ fun SuixingApp() {
                             spotShadowColor = Color.Black.copy(alpha = 0.24f * progress)
                             ambientShadowColor = Color.Black.copy(alpha = 0.24f * progress)
                             val rounding = drawerHomeCornerFraction(progress)
-                            shape = when (rounding) {
-                                0f -> RectangleShape
-                                1f -> homeShape
-                                else -> RoundedCornerShape(SCREEN_CORNER_DP.dp * rounding)
+                            shape = when {
+                                rounding <= 0f -> RectangleShape
+                                rounding >= 1f -> homeShape
+                                else -> transitionShapes[((rounding * (DRAWER_CORNER_STEPS + 1)).toInt() - 1)
+                                    .coerceIn(0, DRAWER_CORNER_STEPS - 1)]
                             }
                             clip = progress > 0f
                         },
@@ -995,6 +1009,14 @@ private fun FrozenConversation(snapshot: State<Pair<Int, ImageBitmap>?>) {
     snapshot.value?.second?.let { image ->
         Image(bitmap = image, contentDescription = null, modifier = Modifier.fillMaxSize())
     }
+}
+
+private const val DRAWER_CORNER_STEPS = 32
+
+private class DrawerFreezeCache {
+    var recorded = false
+    var width = 0f
+    var height = 0f
 }
 
 /**

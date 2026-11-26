@@ -23,6 +23,8 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import com.suixing.agent.ui.components.SuixingRadioButton
+import com.suixing.agent.ui.components.PopupCardPadding
+import com.suixing.agent.ui.components.PopupListPadding
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.ripple
@@ -242,6 +244,7 @@ internal fun GenerationSheet(
         // Both retain the same anchor and the original card padding.
         modifier = Modifier
             .widthIn(max = popupCap(if (picking) 340.dp else 300.dp, windowWidth)),
+        contentPadding = if (picking) PopupListPadding else PopupCardPadding,
         compactMotion = true,
     ) {
         GenerationSheetContent(

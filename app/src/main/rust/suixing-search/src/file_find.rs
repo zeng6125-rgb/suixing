@@ -5,6 +5,7 @@ use crate::{
     Input, LiteralNeedle, STATUS_OK, STATUS_PANIC, STATUS_REQUEST_ERROR, SearchBuffer,
     check_cancelled, task,
 };
+use std::borrow::Cow;
 use std::ffi::c_void;
 use std::fs;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -167,6 +168,8 @@ struct Find<'a> {
     visited: u32,
     reason: u32,
     hits: Vec<String>,
+    glob_curr: Vec<bool>,
+    glob_next: Vec<bool>,
 }
 
 impl<'a> Find<'a> {
@@ -205,9 +208,7 @@ impl<'a> Find<'a> {
             None
         };
         clock.check()?;
-        let base = request
-            .root
-            .replace('\\', "/")
+        let base = normalize_slashes(request.root)
             .trim_end_matches('/')
             .to_owned()
             + "/";
@@ -224,6 +225,8 @@ impl<'a> Find<'a> {
             visited: 0,
             reason: 0,
             hits: Vec::with_capacity(request.limit),
+            glob_curr: Vec::with_capacity(256),
+            glob_next: Vec::with_capacity(256),
         })
     }
 
@@ -300,7 +303,7 @@ impl<'a> Find<'a> {
         Ok(())
     }
 
-    fn matches(&self, path: &str, child: &Path) -> Result<bool, i32> {
+    fn matches(&mut self, path: &str, child: &Path) -> Result<bool, i32> {
         if self.request.pattern.is_empty() {
             let name = child
                 .file_name()
@@ -318,26 +321,37 @@ impl<'a> Find<'a> {
         }
         let normalized;
         let value = if self.request.pattern.contains('/') {
-            normalized = path.replace('\\', "/");
-            normalized.strip_prefix(&self.base).unwrap_or(&normalized)
+            normalized = normalize_slashes(path);
+            normalized
+                .strip_prefix(&self.base)
+                .unwrap_or(normalized.as_ref())
         } else {
             child
                 .file_name()
                 .and_then(|name| name.to_str())
                 .ok_or(KOTLIN_COMPATIBILITY)?
         };
-        match &self.glob {
-            Some(glob) if value.is_ascii() => glob.matches(value.as_bytes(), &self.clock),
-            _ => self.callback(path, 0),
+        if value.is_ascii()
+            && let Some(glob) = &self.glob
+        {
+            return glob.matches(
+                value.as_bytes(),
+                &self.clock,
+                &mut self.glob_curr,
+                &mut self.glob_next,
+            );
         }
+        self.callback(path, 0)
     }
 
     fn descend(&self, path: &str) -> Result<bool, i32> {
         if self.prefix.is_empty() {
             return Ok(true);
         }
-        let normalized = path.replace('\\', "/");
-        let relative = normalized.strip_prefix(&self.base).unwrap_or(&normalized);
+        let normalized = normalize_slashes(path);
+        let relative = normalized
+            .strip_prefix(&self.base)
+            .unwrap_or(normalized.as_ref());
         for (part, expected) in relative.split('/').zip(&self.prefix) {
             self.clock.check()?;
             if !part.is_ascii() || !expected.is_ascii() {
@@ -407,11 +421,16 @@ impl Glob {
         while at < bytes.len() {
             match bytes[at] {
                 b'*' if path && bytes.get(at + 1) == Some(&b'*') => {
-                    tokens.push(Token::Star(true));
+                    if !matches!(tokens.last(), Some(Token::Star(true))) {
+                        tokens.push(Token::Star(true));
+                    }
                     at += 2;
                 }
                 b'*' => {
-                    tokens.push(Token::Star(!path));
+                    let dot = !path;
+                    if !matches!(tokens.last(), Some(Token::Star(prev)) if *prev == dot) {
+                        tokens.push(Token::Star(dot));
+                    }
                     at += 1;
                 }
                 b'?' => {
@@ -419,7 +438,7 @@ impl Glob {
                     at += 1;
                 }
                 byte => {
-                    tokens.push(Token::Literal(byte));
+                    tokens.push(Token::Literal(byte.to_ascii_lowercase()));
                     at += 1;
                 }
             }
@@ -427,33 +446,69 @@ impl Glob {
         Some(Self { tokens })
     }
 
-    fn matches(&self, bytes: &[u8], clock: &Clock<'_>) -> Result<bool, i32> {
-        let mut current = vec![false; bytes.len() + 1];
-        let mut next = vec![false; bytes.len() + 1];
+    fn matches(
+        &self,
+        bytes: &[u8],
+        clock: &Clock<'_>,
+        current: &mut Vec<bool>,
+        next: &mut Vec<bool>,
+    ) -> Result<bool, i32> {
+        let needed = bytes.len() + 1;
+        current.clear();
+        current.resize(needed, false);
+        next.clear();
+        next.resize(needed, false);
         current[0] = true;
         let mut work = 0usize;
         for token in &self.tokens {
-            clock.check()?;
-            next.fill(false);
-            for at in 0..=bytes.len() {
-                work += 1;
-                if work % 8192 == 0 {
-                    clock.check()?;
-                }
-                next[at] = match *token {
-                    Token::Literal(byte) => {
-                        at > 0 && current[at - 1] && bytes[at - 1].eq_ignore_ascii_case(&byte)
-                    }
-                    Token::One(dot) => at > 0 && current[at - 1] && allowed(bytes[at - 1], dot),
-                    Token::Star(dot) => {
-                        current[at] || (at > 0 && next[at - 1] && allowed(bytes[at - 1], dot))
-                    }
-                };
+            work += needed;
+            if work >= 8192 {
+                work = 0;
+                clock.check()?;
             }
-            std::mem::swap(&mut current, &mut next);
+            next.fill(false);
+            match *token {
+                Token::Literal(lower) => {
+                    for (at, &byte) in bytes.iter().enumerate() {
+                        if current[at] && byte.to_ascii_lowercase() == lower {
+                            next[at + 1] = true;
+                        }
+                    }
+                }
+                Token::One(dot) => {
+                    for (at, &byte) in bytes.iter().enumerate() {
+                        if current[at] && allowed(byte, dot) {
+                            next[at + 1] = true;
+                        }
+                    }
+                }
+                Token::Star(dot) => {
+                    let mut active = false;
+                    for at in 0..needed {
+                        if current[at] {
+                            active = true;
+                        }
+                        if active {
+                            next[at] = true;
+                            if at < bytes.len() && !allowed(bytes[at], dot) {
+                                active = false;
+                            }
+                        }
+                    }
+                }
+            }
+            std::mem::swap(current, next);
         }
         clock.check()?;
         Ok(current[bytes.len()])
+    }
+}
+
+fn normalize_slashes(path: &str) -> Cow<'_, str> {
+    if path.as_bytes().contains(&b'\\') {
+        Cow::Owned(path.replace('\\', "/"))
+    } else {
+        Cow::Borrowed(path)
     }
 }
 

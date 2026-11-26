@@ -235,7 +235,13 @@ fn contains_surrogate_escape(bytes: &[u8], cancelled: &AtomicBool) -> Result<boo
 #[cfg(test)]
 #[test]
 fn surrogate_scan_covers_chunk_boundaries_and_tail() {
-    for start in [0, READ_BYTES - 5, READ_BYTES - 1, READ_BYTES, READ_BYTES + 1] {
+    for start in [
+        0,
+        READ_BYTES - 5,
+        READ_BYTES - 1,
+        READ_BYTES,
+        READ_BYTES + 1,
+    ] {
         let mut bytes = vec![b'x'; start];
         bytes.extend_from_slice(br"\udB03");
         let cancelled = AtomicBool::new(false);
@@ -337,8 +343,7 @@ pub(super) fn message_starts_turn(bytes: &[u8], cancelled: &AtomicBool) -> Resul
     if contains_surrogate_escape(bytes, cancelled)? {
         return Err(STATUS_COMPATIBILITY);
     }
-    let message: ProjectedMessage =
-        serde_json::from_str(text).map_err(|_| STATUS_COMPATIBILITY)?;
+    let message: ProjectedMessage = serde_json::from_str(text).map_err(|_| STATUS_COMPATIBILITY)?;
     Ok(message.role == "user" && !message.steer)
 }
 

@@ -2,13 +2,13 @@ package com.suixing.agent.ui.assistant
 
 import android.graphics.Bitmap
 import androidx.activity.compose.BackHandler
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -30,11 +30,12 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
-import androidx.compose.ui.graphics.PathOperation
+import androidx.compose.ui.graphics.PathFillType
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -115,18 +116,20 @@ fun AvatarCropper(
                             translationY = offset.y
                         },
                 )
-                // 2) 压暗：一整屏的黑减掉一个圆洞（Path 差集），框内保持原亮度、框外看得见但变暗。
-                //    用差集而不是 BlendMode.Clear：不需要离屏合成，也不会在某些 ROM 上留下黑块。
-                Canvas(Modifier.fillMaxSize()) {
-                    val hole = Path().apply {
-                        addOval(Rect(center = center, radius = framePx / 2f))
-                    }
-                    val scrim = Path().apply {
-                        addRect(Rect(Offset.Zero, size))
-                        op(this, hole, PathOperation.Difference)
-                    }
-                    drawPath(scrim, Color.Black.copy(alpha = 0.55f))
-                }
+                // 2) 压暗：一整屏的黑用 EvenOdd 洞挖出中心圆，缓存为单 Path 避免拖拽/缩放帧重复布尔求差。
+                val scrimColor = remember { Color.Black.copy(alpha = 0.55f) }
+                Spacer(
+                    Modifier
+                        .fillMaxSize()
+                        .drawWithCache {
+                            val scrim = Path().apply {
+                                fillType = PathFillType.EvenOdd
+                                addRect(Rect(Offset.Zero, size))
+                                addOval(Rect(center = Offset(size.width / 2f, size.height / 2f), radius = framePx / 2f))
+                            }
+                            onDrawBehind { drawPath(scrim, scrimColor) }
+                        },
+                )
                 // 3) 圈线：框要有边界，而它不能遮住框里的图。
                 Box(
                     modifier = Modifier

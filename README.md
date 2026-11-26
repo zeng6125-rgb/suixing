@@ -6,7 +6,7 @@
 
 > **会话存储**：`chats/store/<id>.meta`（元数据 + 累计统计）+ `<id>.<gen>.jsonl`（每行一条消息的追加日志）。保存一轮只追加尾部，不再全量重写——32 MB 的会话每轮保存从「序列化 + 写 32 MB + rename」降到「追加几十字节到几 KB」。重排类操作（编辑重答、分支切换）会换代重写，旧代留一代作回退。**装回 0.8.316 及更早版本看不到这些会话**；更早的 `<id>.json` 单文件格式已不再支持读取（迁移代码随兼容层一起删了），磁盘上残留的这类文件不会出现在列表里。
 
-- Kotlin + Jetpack Compose（Material 3，Compose BOM 2026.09.00 / Kotlin 2.4.21 / AGP 9.4.1 / Gradle 9.8.2），通过 NDK/JNI 接入 Rust 文件搜索与编辑、用量只读投影、共享 JSON 解码与文档编码、上下文预算与组装、记忆提示词、Skill 文档处理、列表顺序、历史 Markdown 冷解析与 PTY 内核；随包组件与固定来源见[第三方声明](THIRD_PARTY_NOTICES.md)。
+- Kotlin + Jetpack Compose（Material 3，Compose BOM 2026.09.00 / Kotlin 2.4.21 / AGP 9.4.1 / Gradle 9.8.2），通过 NDK/JNI 接入 Rust 文件搜索/编辑/变更观测、用量只读投影与聚合、SSE 与接口载荷解析、共享 JSON 解码/编码、上下文预算与组装、记忆提示词、Skill 文档处理、列表顺序、Markdown 解析、运行账本、工具入参脱敏预览、插件模板引擎、语音文本清洗、UI 树/网页正文提取、统一 SHA-256 及 PTY 内核；随包组件与固定来源见[第三方声明](THIRD_PARTY_NOTICES.md)。
 - 目标平台：Android 8.0 (API 26) 及以上；`compileSdk` / `targetSdk` = 37
 - 图片走 Coil 3（内存 + 磁盘双缓存、自动降采样），不再手写 `BitmapFactory` 与 LRU
 - 不做云同步、不做遥测，API Key 只存在本机应用私有目录
@@ -284,6 +284,14 @@ Rust crate 保留目录名 `app/src/main/rust/suixing-search`，承载下列核�
 | 上下文组装 | 按批次生成历史重放描述、摘要正文、工具说明和上下文压缩专用文本 | 保留原消息/图片引用；工具摘要输出沿用 2000 个 UTF-16 单位截取和原文案；压缩切点、checkpoint 与提交由 Kotlin 管理 |
 | Skill 文档与目录 | frontmatter 范围与 name/description、固定单行清洗、整批 catalog 文本 | 文件发现/排序、安装、enabled/origin、路径与执行校验保留；敏感 Regex/Unicode 空白和超预算整操作回 Kotlin |
 | 列表分区与顺序 | 大批次置顶/普通分区、稳定时间顺序和顺序表过滤，返回原 source 索引 | UI 与原对象留 Kotlin；小批次先走原路径，自定义 Set 的会员语义保留；不改变原视觉、重复 ID 与手动顺序规则 |
+| 核心摘要（SHA-256） | FIPS 180-4 字节流 SHA-256（`sha256` / `core_ops`）复用至记忆、子智能体、用量存档、账本与本地图/缓存键 | 库不可用时回退 JVM `MessageDigest`；大文件流式分块哈希仍留在 JVM |
+| 运行重复账本 | 内存账本状态、轮询与连续同果检测、SHA-256 参数归一化及无正则 `job_list` 耗时剥离（`run_ledger`） | 会话结束统一释放原生句柄；宿主 JVM 测试及超限输入回退原 Kotlin `RunLedger` |
+| 工具入参预览 | 严格 JSON 工具入参敏感键脱敏、凭据打码与 512 UTF-16 单位预览（`tool_preview`） | 宽松/畸形 JSON、非 ASCII 空白与控制字符通过状态码 `4` 回退原 Kotlin 正则格式化 |
+| 插件校验与模板引擎 | 危险 Shell 黑名单与 `rm -rf` 前缀扫描、`{{var}}` 提取及单趟 JSON 引号态模板渲染（`plugin_ops`） | `ManifestValidator` 与 `PluginRuntime` 保留 JVM 正则回退、异常 UTF-16 与自定义回调路径 |
+| 接口载荷与 SSE 工具增量 | `/models` 与报错体 JSON 提取、JSON 对象判定（`llm_ops`）及 SSE 三协议 `tool_calls` 增量直接投影（`sse_stream`） | 不支持的事件树、语法或状态码 `4` 交回 Kotlin 解析与 `StreamTurn` |
+| 文件变更观测 | 有界目录快照、SHA-256 变更检测、重命名核验与逻辑行增删统计（`file_observe`） | 权限、工作区根目录选择与原生不可用回退由 Kotlin 持有 |
+| 语音文本清洗 | `Speaker` 朗读文本多阶段 Markdown 清洗与空白归一化（`speech_clean`） | 含 `\r`、非 ASCII 空白或超限输入回退原 Kotlin 正则管线 |
+| UI 树与网页正文 | 无障碍 XML 交互节点解析与焦点包名提取（`ui_dump`）、HTML 去标签/实体解码与 DDG 结果解析（`web_html`） | 异常编码、超限与不兼容结构通过状态码 `4` 回退 Kotlin |
 
 **仓库现在带 `gradlew` / `gradle/wrapper/`**（0.8.4xx 起补上的），wrapper 固定 **Gradle 9.8.2**——AGP 9.4.1 要求 Gradle 9.x。本地直接 `./gradlew` 即可，不再需要一个已解包的 Gradle 发行版。
 
@@ -417,6 +425,12 @@ GLM、OpenAI 兼容（自填地址）、本机 Ollama、Kimi、千问、硅基�
 - **抽屉滚动**：`onGloballyPositioned` 只在长按菜单打开时挂载，不再每帧给每个可见行写一次测量状态；拖动排序期间只更新预览顺序，松手才落盘。
 - **冷启动不读盘**：`Application.onCreate` 不再 `runBlocking` 读 DataStore，主题模式改从一个几百字节的 `SharedPreferences` 同步读；DataStore 的收集器继续负责后续更新。
 - **审批弹卡**：待审批请求带单调序号，显式取最早的一条，不再依赖 `Map` 的迭代顺序。
+
+### 0.9.12 后续：多轮原生热路径收敛与 Compose 流畅度优化
+
+- **无害 Rust 热路径扩迁**：在零新增外部依赖前提下，将文件观测（`file_observe`）、接口载荷提取（`llm_ops`）、SSE 工具调用增量投影（`sse_stream` 扩展）、语音清洗（`speech_clean`）、无障碍 XML 与网页正文提取（`ui_dump` / `web_html`）、统一 `sha256`、运行重复账本（`run_ledger`）、工具入参脱敏预览（`tool_preview`）及插件危险命令扫描/模板渲染（`plugin_ops`）迁入 `suixing-search`，全部分支严格保持行为一致与 Kotlin 回退。
+- **Compose 重组与绘制层收口**：抽屉冻结复用 `GraphicsLayer` 与预建分级圆角，头像裁剪遮罩缓存 `EvenOdd` `Path`；工具调用/思考块按压叠加沉入 `drawBehind`，输入框键入回调与测量/阴影修饰符、`TurnScrubber` 颜色/度量、抽屉 `LazyColumn` 项动画及 `MarkdownText` 流式 LF 单趟归一化与块间距修饰符均完成记忆化/预分配，同时在 `LlmClient` / `JobStore` / `LiveMetrics` / `SkillStore` / `ShellTools` 等热点减少正则与中间集合分配。
+- **列表小浮层上下留白**：列表型小浮层菜单（`PopupListPadding`、`ActionMenuStyle`、`MiuixActionMenuItem`）收紧上下边缘内边距，左右边缘维持原有留白。
 
 ## 贡献者
 

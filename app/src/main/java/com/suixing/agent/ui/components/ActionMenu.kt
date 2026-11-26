@@ -40,7 +40,7 @@ internal object ActionMenuStyle {
     val MaxHeight = 360.dp
     val RowHeight = 48.dp
     val HorizontalPadding = 16.dp
-    val VerticalPadding = 8.dp
+    val VerticalPadding = 4.dp
 }
 
 /** The platform still owns positioning, dismissal, scrolling and keyboard focus. */

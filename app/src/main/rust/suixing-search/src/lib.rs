@@ -325,125 +325,152 @@ fn check_cancelled(cancelled: &AtomicBool) -> Result<(), i32> {
     }
 }
 
-/// Bound cancellation latency even inside long matching fallback chains or whitespace runs.
-struct CancellationPoll<'a> {
-    cancelled: &'a AtomicBool,
-    remaining: usize,
-}
-
-impl<'a> CancellationPoll<'a> {
-    fn new(cancelled: &'a AtomicBool) -> Result<Self, i32> {
-        check_cancelled(cancelled)?;
-        Ok(Self {
-            cancelled,
-            remaining: READ_CHUNK_BYTES,
-        })
-    }
-
-    fn advance(&mut self, work: usize) -> Result<(), i32> {
-        if work >= self.remaining {
-            check_cancelled(self.cancelled)?;
-            self.remaining = READ_CHUNK_BYTES;
-        } else {
-            self.remaining -= work;
-        }
-        Ok(())
-    }
-}
-
-/// Match UTF-8 bytes with a reusable prefix table. Valid UTF-8 queries and inputs make byte
-/// matching equivalent to literal string matching, including across read/chunk boundaries.
-struct LiteralNeedle<'a> {
-    bytes: &'a [u8],
-    prefix: Vec<usize>,
-    ignore_ascii_case: bool,
+/// Match UTF-8 bytes using SIMD prefilters while bounding cancellation checks to chunk windows.
+enum LiteralNeedle<'a> {
+    Sensitive {
+        bytes: &'a [u8],
+        finder: memchr::memmem::Finder<'a>,
+    },
+    AsciiCaseFold {
+        bytes: &'a [u8],
+        first_lo: u8,
+        first_hi: u8,
+    },
 }
 
 impl<'a> LiteralNeedle<'a> {
     fn new(query: &'a str, ignore_ascii_case: bool, cancelled: &AtomicBool) -> Result<Self, i32> {
-        let bytes = query.as_bytes();
-        let mut prefix = vec![0; bytes.len()];
-        let mut matched = 0;
-        let mut poll = CancellationPoll::new(cancelled)?;
-        for at in 1..bytes.len() {
-            poll.advance(1)?;
-            while matched > 0 && !literal_byte_equal(bytes[at], bytes[matched], ignore_ascii_case) {
-                poll.advance(1)?;
-                matched = prefix[matched - 1];
-            }
-            if literal_byte_equal(bytes[at], bytes[matched], ignore_ascii_case) {
-                matched += 1;
-            }
-            prefix[at] = matched;
-        }
         check_cancelled(cancelled)?;
-        Ok(Self {
-            bytes,
-            prefix,
-            ignore_ascii_case,
-        })
+        let bytes = query.as_bytes();
+        if ignore_ascii_case {
+            Ok(Self::AsciiCaseFold {
+                bytes,
+                first_lo: bytes[0].to_ascii_lowercase(),
+                first_hi: bytes[0].to_ascii_uppercase(),
+            })
+        } else {
+            Ok(Self::Sensitive {
+                bytes,
+                finder: memchr::memmem::Finder::new(bytes),
+            })
+        }
     }
 
     fn matches(&self, line: &str, cancelled: &AtomicBool) -> Result<bool, i32> {
-        let mut poll = CancellationPoll::new(cancelled)?;
-        if line.len() < self.bytes.len() {
+        check_cancelled(cancelled)?;
+        let hay = line.as_bytes();
+        let needle_len = match self {
+            Self::Sensitive { bytes, .. } | Self::AsciiCaseFold { bytes, .. } => bytes.len(),
+        };
+        if hay.len() < needle_len {
             return Ok(false);
         }
-        let mut matched = 0;
-        for chunk in line.as_bytes().chunks(READ_CHUNK_BYTES) {
-            check_cancelled(cancelled)?;
-            for &byte in chunk {
-                poll.advance(1)?;
-                while matched > 0
-                    && !literal_byte_equal(byte, self.bytes[matched], self.ignore_ascii_case)
-                {
-                    poll.advance(1)?;
-                    matched = self.prefix[matched - 1];
-                }
-                if literal_byte_equal(byte, self.bytes[matched], self.ignore_ascii_case) {
-                    matched += 1;
-                    if matched == self.bytes.len() {
-                        check_cancelled(cancelled)?;
-                        return Ok(true);
-                    }
-                }
+        let overlap = needle_len.saturating_sub(1);
+        let mut start = 0usize;
+        loop {
+            let end = (start + READ_CHUNK_BYTES).min(hay.len());
+            if start > 0 {
+                check_cancelled(cancelled)?;
             }
+            let window = &hay[start..end];
+            let matched = match self {
+                Self::Sensitive { finder, .. } => finder.find(window).is_some(),
+                Self::AsciiCaseFold {
+                    bytes,
+                    first_lo,
+                    first_hi,
+                } => find_ascii_case_fold(window, bytes, *first_lo, *first_hi),
+            };
+            if matched {
+                return Ok(true);
+            }
+            if end == hay.len() {
+                return Ok(false);
+            }
+            start = end - overlap;
         }
-        check_cancelled(cancelled)?;
-        Ok(false)
     }
 }
 
-fn literal_byte_equal(first: u8, second: u8, ignore_ascii_case: bool) -> bool {
-    if ignore_ascii_case {
-        first.eq_ignore_ascii_case(&second)
-    } else {
-        first == second
+#[inline]
+fn find_ascii_case_fold(window: &[u8], needle: &[u8], first_lo: u8, first_hi: u8) -> bool {
+    if needle.len() == 1 {
+        return memchr::memchr2(first_lo, first_hi, window).is_some();
     }
+    let limit = window.len() - needle.len() + 1;
+    let mut pos = 0usize;
+    while pos < limit {
+        let Some(rel) = memchr::memchr2(first_lo, first_hi, &window[pos..limit]) else {
+            return false;
+        };
+        let at = pos + rel;
+        if window[at + 1..at + needle.len()].eq_ignore_ascii_case(&needle[1..]) {
+            return true;
+        }
+        pos = at + 1;
+    }
+    false
+}
+
+#[inline]
+fn is_java_ascii_whitespace(byte: u8) -> bool {
+    matches!(byte, 0x09..=0x0d | 0x1c..=0x20)
 }
 
 fn trim_java_whitespace<'a>(text: &'a str, cancelled: &AtomicBool) -> Result<&'a str, i32> {
-    let mut poll = CancellationPoll::new(cancelled)?;
+    check_cancelled(cancelled)?;
+    let bytes = text.as_bytes();
+    let len = bytes.len();
     let mut start = 0;
-    for (at, ch) in text.char_indices() {
-        poll.advance(ch.len_utf8())?;
-        if !java_whitespace(ch) {
-            start = at;
-            break;
+    let mut next_poll = READ_CHUNK_BYTES;
+    while start < len {
+        if start >= next_poll {
+            check_cancelled(cancelled)?;
+            next_poll = start.saturating_add(READ_CHUNK_BYTES);
         }
-        start = at + ch.len_utf8();
+        let byte = bytes[start];
+        if byte < 0x80 {
+            if !is_java_ascii_whitespace(byte) {
+                break;
+            }
+            start += 1;
+        } else {
+            let Some(ch) = text[start..].chars().next() else {
+                break;
+            };
+            if !java_whitespace(ch) {
+                break;
+            }
+            start += ch.len_utf8();
+        }
     }
-    if start == text.len() {
+    if start == len {
         check_cancelled(cancelled)?;
         return Ok("");
     }
-    let mut end = text.len();
-    for (at, ch) in text.char_indices().rev() {
-        poll.advance(ch.len_utf8())?;
-        if at < start || !java_whitespace(ch) {
-            break;
+    let mut end = len;
+    let mut next_tail_poll = READ_CHUNK_BYTES;
+    while end > start {
+        let consumed = len - end;
+        if consumed >= next_tail_poll {
+            check_cancelled(cancelled)?;
+            next_tail_poll = consumed.saturating_add(READ_CHUNK_BYTES);
         }
-        end = at;
+        let byte = bytes[end - 1];
+        if byte < 0x80 {
+            if !is_java_ascii_whitespace(byte) {
+                break;
+            }
+            end -= 1;
+        } else {
+            let Some(ch) = text[start..end].chars().next_back() else {
+                break;
+            };
+            if !java_whitespace(ch) {
+                break;
+            }
+            end -= ch.len_utf8();
+        }
     }
     check_cancelled(cancelled)?;
     Ok(&text[start..end])
@@ -661,34 +688,41 @@ fn emit(
 }
 
 // Feature modules share the parent buffer/cancellation ABI; JNI is a thin byte bridge.
-mod core_ops;
 mod chat_log;
+mod core_ops;
 pub mod drawer_gesture;
 mod drawer_order;
 mod edit_ops;
 mod file_find;
+mod file_observe;
 mod json_document;
 mod json_encode;
+mod llm_ops;
 mod loop_policy;
 pub mod markdown_native;
 mod memory_prompt;
+mod plugin_ops;
 #[cfg(target_os = "android")]
 mod pty_android;
 mod request_budget;
+pub mod run_ledger;
+pub mod sha256;
 mod skill_catalog;
+mod speech_clean;
 mod sse_stream;
-mod text_read;
 mod terminal;
 #[cfg(any(target_os = "android", test))]
 mod terminal_output;
+mod text_read;
+mod tool_preview;
 mod transcript_plan;
+mod ui_dump;
 mod usage_aggregation;
 mod usage_projection;
+mod web_html;
 
 #[cfg(feature = "rust-app")]
 pub mod data_plan;
-#[cfg(feature = "rust-app")]
-pub mod run_ledger;
 #[cfg(feature = "rust-app")]
 pub mod rust_protocol;
 #[cfg(all(feature = "rust-app", target_os = "android"))]

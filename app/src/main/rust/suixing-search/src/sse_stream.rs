@@ -30,6 +30,8 @@ const KIND_COMPATIBILITY: u32 = 2;
 const KIND_ERROR: u32 = 3;
 const KIND_NORMALIZE_LINE: u32 = 4;
 const KIND_DELTA: u32 = 5;
+const KIND_TURN_EVENT: u32 = 6;
+const OPT_STRING_NONE: u32 = u32::MAX;
 
 #[repr(C)]
 pub struct SseBuffer {
@@ -669,6 +671,246 @@ fn compact_delta(chunk: &Value, protocol: u8) -> Option<(&str, &str)> {
     }
 }
 
+struct TurnCallDelta<'a> {
+    mode: u32,
+    index: i32,
+    item_id: Option<&'a str>,
+    id: Option<&'a str>,
+    name: Option<&'a str>,
+    arguments: Option<&'a str>,
+}
+
+struct TurnEvent<'a> {
+    text: Option<&'a str>,
+    reasoning: Option<&'a str>,
+    stop_if_null: bool,
+    calls: Vec<TurnCallDelta<'a>>,
+}
+
+fn opt_string_field<'a>(value: Option<&'a Value>) -> Option<Option<&'a str>> {
+    match value {
+        None | Some(Value::Null) => Some(None),
+        Some(Value::String(s)) => Some(Some(s.as_str())),
+        _ => None,
+    }
+}
+
+fn opt_int_or_zero(value: Option<&Value>) -> Option<i32> {
+    match value {
+        None | Some(Value::Null) => Some(0),
+        Some(Value::Number(num)) => {
+            if let Some(int) = num.as_i64() {
+                Some(i32::try_from(int).unwrap_or(0))
+            } else {
+                Some(0)
+            }
+        }
+        Some(Value::String(s)) => Some(s.parse::<i32>().unwrap_or(0)),
+        Some(Value::Bool(_)) => Some(0),
+        Some(Value::Array(_)) | Some(Value::Object(_)) => None,
+    }
+}
+
+fn compact_turn_event(chunk: &Value, protocol: u8) -> Option<TurnEvent<'_>> {
+    if chunk.get("error").is_some() || chunk.get("usage").is_some() {
+        return None;
+    }
+    match protocol {
+        1 => {
+            if chunk.get("reasoning_content").is_some() || chunk.get("reasoning").is_some() {
+                return None;
+            }
+            let choice = chunk.get("choices")?.as_array()?.first()?.as_object()?;
+            if choice
+                .get("finish_reason")
+                .is_some_and(|value| !value.is_null())
+                || ["message", "reasoning_content", "reasoning"]
+                    .iter()
+                    .any(|key| choice.contains_key(*key))
+            {
+                return None;
+            }
+            let delta = choice.get("delta")?.as_object()?;
+            let raw_calls = delta.get("tool_calls")?.as_array()?;
+            if raw_calls.is_empty() {
+                return None;
+            }
+            let text = opt_string_field(delta.get("content"))?;
+            let primary = opt_string_field(delta.get("reasoning_content"))?;
+            let secondary = opt_string_field(delta.get("reasoning"))?;
+            let reasoning = match primary {
+                Some(p) if !p.trim_matches(kotlin_whitespace).is_empty() => Some(p),
+                _ => secondary,
+            };
+            let mut calls = Vec::with_capacity(raw_calls.len());
+            for element in raw_calls {
+                let Some(item) = element.as_object() else {
+                    continue;
+                };
+                let Some(function) = item.get("function").and_then(Value::as_object) else {
+                    continue;
+                };
+                let index = opt_int_or_zero(item.get("index"))?;
+                let id = opt_string_field(item.get("id"))?;
+                let name = opt_string_field(function.get("name"))?;
+                let arguments = opt_string_field(function.get("arguments"))?;
+                calls.push(TurnCallDelta {
+                    mode: 0,
+                    index,
+                    item_id: None,
+                    id,
+                    name,
+                    arguments,
+                });
+            }
+            if calls.is_empty() {
+                return None;
+            }
+            Some(TurnEvent {
+                text,
+                reasoning,
+                stop_if_null: false,
+                calls,
+            })
+        }
+        2 => match chunk.get("type")?.as_str()? {
+            "content_block_delta" => {
+                let delta = chunk.get("delta")?.as_object()?;
+                if delta.get("type")?.as_str()? != "input_json_delta" {
+                    return None;
+                }
+                let index = opt_int_or_zero(chunk.get("index"))?;
+                let arguments = opt_string_field(delta.get("partial_json"))?;
+                Some(TurnEvent {
+                    text: None,
+                    reasoning: None,
+                    stop_if_null: false,
+                    calls: vec![TurnCallDelta {
+                        mode: 0,
+                        index,
+                        item_id: None,
+                        id: None,
+                        name: None,
+                        arguments,
+                    }],
+                })
+            }
+            "content_block_start" => {
+                let block = chunk.get("content_block")?.as_object()?;
+                if block.get("type")?.as_str()? != "tool_use" {
+                    return None;
+                }
+                match block.get("input") {
+                    None | Some(Value::Null) => {}
+                    Some(Value::Object(map)) if map.is_empty() => {}
+                    _ => return None,
+                }
+                let text = opt_string_field(block.get("text"))?;
+                let index = opt_int_or_zero(chunk.get("index"))?;
+                let id = opt_string_field(block.get("id"))?;
+                let name = opt_string_field(block.get("name"))?;
+                Some(TurnEvent {
+                    text,
+                    reasoning: None,
+                    stop_if_null: false,
+                    calls: vec![TurnCallDelta {
+                        mode: 0,
+                        index,
+                        item_id: None,
+                        id,
+                        name,
+                        arguments: None,
+                    }],
+                })
+            }
+            "message_stop" => Some(TurnEvent {
+                text: None,
+                reasoning: None,
+                stop_if_null: true,
+                calls: Vec::new(),
+            }),
+            _ => None,
+        },
+        3 => match chunk.get("type")?.as_str()? {
+            "response.output_item.added" => {
+                let item = chunk.get("item")?.as_object()?;
+                if item.get("type")?.as_str()? != "function_call" {
+                    return None;
+                }
+                let raw_id = opt_string_field(item.get("id"))?;
+                let raw_call_id = opt_string_field(item.get("call_id"))?;
+                let item_id = raw_id.or(raw_call_id)?;
+                let id = raw_call_id.or(Some(item_id));
+                let name = opt_string_field(item.get("name"))?;
+                let arguments = opt_string_field(item.get("arguments"))?;
+                Some(TurnEvent {
+                    text: None,
+                    reasoning: None,
+                    stop_if_null: false,
+                    calls: vec![TurnCallDelta {
+                        mode: 1,
+                        index: 0,
+                        item_id: Some(item_id),
+                        id,
+                        name,
+                        arguments,
+                    }],
+                })
+            }
+            "response.function_call_arguments.delta" => {
+                let item_id = opt_string_field(chunk.get("item_id"))??;
+                let arguments = opt_string_field(chunk.get("delta"))?;
+                Some(TurnEvent {
+                    text: None,
+                    reasoning: None,
+                    stop_if_null: false,
+                    calls: vec![TurnCallDelta {
+                        mode: 2,
+                        index: 0,
+                        item_id: Some(item_id),
+                        id: None,
+                        name: None,
+                        arguments,
+                    }],
+                })
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn put_opt_string(output: &mut Vec<u8>, value: Option<&str>) {
+    match value {
+        None => output.extend_from_slice(&OPT_STRING_NONE.to_le_bytes()),
+        Some(text) => put_string(output, text, text.encode_utf16().count()),
+    }
+}
+
+fn encode_turn_event(event: TurnEvent<'_>) -> Option<Vec<u8>> {
+    let mut body = response_buffer(64);
+    let flags_mask = u32::from(event.stop_if_null);
+    body.extend_from_slice(&flags_mask.to_le_bytes());
+    put_opt_string(&mut body, event.text);
+    put_opt_string(&mut body, event.reasoning);
+    if event.calls.len() > 1024 {
+        return None;
+    }
+    body.extend_from_slice(&(event.calls.len() as u32).to_le_bytes());
+    for call in event.calls {
+        body.extend_from_slice(&call.mode.to_le_bytes());
+        body.extend_from_slice(&call.index.to_le_bytes());
+        put_opt_string(&mut body, call.item_id);
+        put_opt_string(&mut body, call.id);
+        put_opt_string(&mut body, call.name);
+        put_opt_string(&mut body, call.arguments);
+        if body.len() > MAX_TREE_BYTES + HEADER_BYTES {
+            return None;
+        }
+    }
+    Some(body)
+}
+
 fn decode_event(payload: &str, cancelled: &AtomicBool, protocol: u8) -> Result<Option<Event>, i32> {
     let Some((value, tokens)) = parse_json(payload, cancelled)? else {
         return Ok(None);
@@ -684,6 +926,14 @@ fn decode_event(payload: &str, cancelled: &AtomicBool, protocol: u8) -> Result<O
         put_string(&mut body, reasoning, reasoning_units);
         return Ok(Some(Event {
             kind: KIND_DELTA,
+            body,
+        }));
+    }
+    if let Some(turn_event) = compact_turn_event(&value, protocol)
+        && let Some(body) = encode_turn_event(turn_event)
+    {
+        return Ok(Some(Event {
+            kind: KIND_TURN_EVENT,
             body,
         }));
     }
@@ -816,6 +1066,42 @@ mod delta_tests {
                     .unwrap()
                     .kind,
                 KIND_TREE
+            );
+        }
+    }
+
+    #[test]
+    fn projects_tool_call_deltas_across_all_three_protocols() {
+        let cases = [
+            (
+                1,
+                r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"edit_file","arguments":"{\"a\":1}"}}]}}]}"#,
+            ),
+            (
+                2,
+                r#"{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"run_shell","input":{}}}"#,
+            ),
+            (
+                2,
+                r#"{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"cmd\":\"ls\"}"}}"#,
+            ),
+            (2, r#"{"type":"message_stop"}"#),
+            (
+                3,
+                r#"{"type":"response.output_item.added","item":{"type":"function_call","id":"item_1","call_id":"c1","name":"echo","arguments":""}}"#,
+            ),
+            (
+                3,
+                r#"{"type":"response.function_call_arguments.delta","item_id":"item_1","delta":"{\"x\":2}"}"#,
+            ),
+        ];
+        for (protocol, json) in cases {
+            assert_eq!(
+                decode_event(json, &AtomicBool::new(false), protocol)
+                    .unwrap()
+                    .unwrap()
+                    .kind,
+                KIND_TURN_EVENT
             );
         }
     }

@@ -183,7 +183,9 @@ internal fun ContextRing(
     // activity and finishes it. Same pair the composer's own cards use.
     BackHandler(enabled = open) { open = false }
     val density = LocalDensity.current
-    val ringPopupMarginPx = with(density) { RING_POPUP_EDGE.toPx() }
+    val ringPopupMarginPx = remember(density) { with(density) { RING_POPUP_EDGE.toPx() } }
+    val trackStroke = remember(density) { Stroke(width = with(density) { 2.dp.toPx() }) }
+    val arcStroke = remember(density) { Stroke(width = with(density) { 2.dp.toPx() }, cap = StrokeCap.Round) }
     // The number in the middle, as a whole percent: the arc is a shape and the number is the
     // figure behind it. A known window still shows zero; an unfinished estimate shows an ellipsis.
     val percent = (fraction * 100).roundToInt()
@@ -203,7 +205,7 @@ internal fun ContextRing(
         contentAlignment = Alignment.Center,
     ) {
         Canvas(Modifier.size(22.dp)) {
-            val stroke = 2.dp.toPx()
+            val stroke = trackStroke.width
             val ringSize = Size(size.width - stroke, size.height - stroke)
             val topLeft = Offset(stroke / 2f, stroke / 2f)
             drawArc(
@@ -213,7 +215,7 @@ internal fun ContextRing(
                 useCenter = false,
                 topLeft = topLeft,
                 size = ringSize,
-                style = Stroke(width = stroke),
+                style = trackStroke,
             )
             if (known && fraction > 0f) {
                 drawArc(
@@ -224,7 +226,7 @@ internal fun ContextRing(
                     useCenter = false,
                     topLeft = topLeft,
                     size = ringSize,
-                    style = Stroke(width = stroke, cap = StrokeCap.Round),
+                    style = arcStroke,
                 )
             }
         }

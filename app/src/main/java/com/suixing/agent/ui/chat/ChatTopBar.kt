@@ -43,6 +43,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.IntSize
+import com.suixing.agent.ui.components.PopupListPadding
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.PopupPositionProvider
@@ -57,6 +58,8 @@ import com.suixing.agent.ui.components.MenuItemRow
 import com.suixing.agent.ui.components.PressPill
 
 private enum class ChatOverflow { Open, Dismissed, Navigating }
+
+private val TopBarCapsuleShape = RoundedCornerShape(50)
 
 /**
  * The chat header: drawer handle on the left, the conversation's name in the middle,
@@ -114,17 +117,16 @@ internal fun ChatTopBar(
         // Box, not of the Row: the Row keeps exactly three children whether the card is
         // open or closed, so the buttons cannot move when the menu appears.
         Box {
-            val capsuleShape = RoundedCornerShape(50)
             Surface(
                 modifier = Modifier
                     .height(40.dp)
                     .shadow(
                         elevation = 8.dp,
-                        shape = capsuleShape,
+                        shape = TopBarCapsuleShape,
                         ambientColor = Color.Black.copy(alpha = 0.12f),
                         spotColor = Color.Black.copy(alpha = 0.12f),
                     ),
-                shape = capsuleShape,
+                shape = TopBarCapsuleShape,
                 // 与左侧抽屉按钮（FlatPainterButton → handleDisc）同一个色 token：
                 // MIUIX 模式下统一使用 surfaceContainer（浅色纯白、深色抬升灰），避免左右灰白脱节。
                 color = if (com.suixing.agent.ui.theme.LocalUseMiuix.current) {
@@ -190,6 +192,7 @@ internal fun ChatTopBar(
                 // card stretches to the popup window's full width.
                 modifier = Modifier.width(180.dp),
                 focusable = false,
+                contentPadding = PopupListPadding,
                 compactMotion = true,
             ) {
                 val iconInset = Modifier.offset(x = (-2).dp)

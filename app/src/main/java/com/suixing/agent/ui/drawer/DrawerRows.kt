@@ -20,12 +20,10 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.structuralEqualityPolicy
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -43,6 +41,7 @@ import androidx.compose.ui.window.Popup
 import com.suixing.agent.R
 import com.suixing.agent.data.Conversation
 import com.suixing.agent.ui.components.MenuCard
+import com.suixing.agent.ui.components.PopupListPadding
 import com.suixing.agent.ui.components.CompletionDot
 import kotlin.math.roundToInt
 import kotlinx.coroutines.launch
@@ -146,9 +145,18 @@ private fun Modifier.drawerRowTap(
         }
 }
 
+private val ConversationSpinnerModifier = Modifier.size(14.dp)
+private val ConversationRowSurfaceBaseModifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)
+private val ConversationRowInnerModifier = Modifier.minimumInteractiveComponentSize().padding(start = 14.dp, end = 2.dp)
+private val DrawerStatusGapModifier = Modifier.width(2.dp)
+private val ConversationPinIconModifier = Modifier.size(14.dp)
+private val DrawerPinGapModifier = Modifier.width(4.dp)
+private val ConversationTrailingSlotModifier = Modifier.minimumInteractiveComponentSize().size(36.dp)
+private val ConversationGripModifier = Modifier.size(18.dp)
+
 @Composable
 private fun ConversationRunningSpinner(runningAnimationActive: () -> Boolean) {
-    RunningSpinner(Modifier.size(14.dp), animated = runningAnimationActive())
+    RunningSpinner(ConversationSpinnerModifier, animated = runningAnimationActive())
 }
 
 @Composable
@@ -181,32 +189,25 @@ internal fun ConversationRow(
     //   空盒子，于是面板左缘落在行右缘（用户：「在哪里长按，弹窗都靠近左侧」）；
     // · 垂直——下面是列表底部时朝上翻，翻多少取决于这一行有多高。
     val density = LocalDensity.current
-    val screenHeightPx = with(density) { LocalConfiguration.current.screenHeightDp.dp.toPx() }
-    val gapPx = with(density) { 4.dp.toPx() }
-    val menuHeightPx = with(density) { DrawerMenuHeight.toPx() }
-    // 导航栏与安全区不落在 screenHeightDp 里，判断「下面还放得下吗」时留一截余量。
-    val bottomInsetPx = with(density) { 72.dp.toPx() }
-    var rowBottomPx by remember { mutableFloatStateOf(0f) }
+    val screenHeightDp = LocalConfiguration.current.screenHeightDp
+    var openUp by remember { mutableStateOf(false) }
     var rowHeightPx by remember { mutableFloatStateOf(0f) }
-    // Position changes keep the same menu composition until its opening direction changes.
-    val openUp by remember(menuHeightPx, gapPx, screenHeightPx, bottomInsetPx) {
-        derivedStateOf(structuralEqualityPolicy()) {
-            rowBottomPx + menuHeightPx + gapPx > screenHeightPx - bottomInsetPx
-        }
-    }
+    val gapPx = with(density) { 4.dp.toPx() }
     // 短按打开、长按出菜单：一行上只挂这一个手势。菜单里的每一项都走抽屉里已经有的那几条路
     // （删除仍旧进 pendingDelete 那个二次确认）。Surface(onClick) 不支持长按，所以点击交给
     // combinedClickable，Surface 只负责形状与底色；clip 是为了让水波纹跟着圆角走。
     Box(
         modifier = if (menuOpen) modifier.onGloballyPositioned { coordinates ->
-            rowBottomPx = coordinates.boundsInWindow().bottom
+            val rowBottomPx = coordinates.boundsInWindow().bottom
             rowHeightPx = coordinates.size.height.toFloat()
+            val menuThreshold = with(density) {
+                (screenHeightDp.dp - 72.dp - DrawerMenuHeight - 4.dp).toPx()
+            }
+            openUp = rowBottomPx > menuThreshold
         } else modifier,
     ) {
         Surface(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(vertical = 2.dp)
+            modifier = ConversationRowSurfaceBaseModifier
                 .clip(MaterialTheme.shapes.medium)
                 // 排序模式下这一行没有长按：把手上的拖动和行上的长按是同一只手指上的两个
                 // handler，按住把手超过 500ms 会先被判成长按（用户：「拖把手容易误触菜单」）。
@@ -225,10 +226,7 @@ internal fun ConversationRow(
             },
         ) {
             Row(
-                modifier = Modifier
-                    // Row height must not depend on whether its trailing button is visible.
-                    .minimumInteractiveComponentSize()
-                    .padding(start = 14.dp, end = 2.dp),
+                modifier = ConversationRowInnerModifier,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 if (running) {
@@ -237,10 +235,10 @@ internal fun ConversationRow(
                     // 「它正在动」，而这一行要回答的正是「现在有没有人在跑」。
                     // 14dp 的环比原来的 7dp 点宽，间距收窄到 2dp，标题的左缘不动。
                     ConversationRunningSpinner(runningAnimationActive)
-                    Spacer(Modifier.width(2.dp))
+                    Spacer(DrawerStatusGapModifier)
                 } else if (completedUnread) {
                     CompletionDot()
-                    Spacer(Modifier.width(2.dp))
+                    Spacer(DrawerStatusGapModifier)
                 }
                 // 置顶标记：仓库里**没有** ic_pin，按约定复用既有的 ic_star（不新造 drawable）。
                 // 放标题左边，与行尾的菜单/排序把手区分开。
@@ -252,9 +250,9 @@ internal fun ConversationRow(
                         ),
                         contentDescription = "已置顶",
                         tint = scheme.primary,
-                        modifier = Modifier.size(14.dp),
+                        modifier = ConversationPinIconModifier,
                     )
-                    Spacer(Modifier.width(4.dp))
+                    Spacer(DrawerPinGapModifier)
                 }
                 Text(
                     text = conversation.title,
@@ -267,9 +265,7 @@ internal fun ConversationRow(
                 // 只有排序模式显示把手；所有行的最小高度由共同的 Row 保证。
                 if (sortMode) {
                     Box(
-                        modifier = Modifier
-                            .minimumInteractiveComponentSize()
-                            .size(36.dp)
+                        modifier = ConversationTrailingSlotModifier
                             // 把手上的短按不打开会话：它是拖动的起手处，轻轻一点不该跳进会话。
                             .clickable(
                                 interactionSource = remember { MutableInteractionSource() },
@@ -281,16 +277,14 @@ internal fun ConversationRow(
                     ) {
                         DrawerGripIcon(
                             tint = scheme.onSurfaceVariant,
-                            modifier = Modifier.size(18.dp),
+                            modifier = ConversationGripModifier,
                         )
                     }
                 } else if (selected) {
                     // 只有**高亮选中的那一条**行尾放三点：常驻删除图标已按用户要求去掉，
                     // 删除走长按菜单；选中行点三点直接开那张菜单。
                     Box(
-                        modifier = Modifier
-                            .minimumInteractiveComponentSize()
-                            .size(36.dp)
+                        modifier = ConversationTrailingSlotModifier
                             .clickable(
                                 interactionSource = remember { MutableInteractionSource() },
                                 indication = null,
@@ -345,6 +339,7 @@ internal fun ConversationRow(
                 focusable = false,
                 // 与模型选择浮层同一底色（用户：把会话列表改成和模型列表一致）。
                 containerColor = MaterialTheme.colorScheme.surface,
+                contentPadding = PopupListPadding,
                 compactMotion = true,
             ) {
                 DrawerMenuAction("改名", iconRes = R.drawable.ic_square_pen, onClick = onRename)

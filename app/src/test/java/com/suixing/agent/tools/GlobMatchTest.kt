@@ -96,4 +96,42 @@ class GlobMatchTest {
         assertTrue(Glob.pathMatches("src/*.kt", File(root, "src/a.kt"), root))
         assertFalse(Glob.pathMatches("proj/src/*.kt", File(root, "src/a.kt"), root))
     }
+
+    @Test
+    fun `nameMatches treats regex metacharacters literally and preserves edge cases`() {
+        assertTrue(Glob.nameMatches("", ""))
+        assertFalse(Glob.nameMatches("", "a"))
+        assertTrue(Glob.nameMatches("***", "anything.kt"))
+        assertTrue(Glob.nameMatches("foo[1]+(bar).kt", "FOO[1]+(bar).KT"))
+        assertFalse(Glob.nameMatches("foo[1].kt", "foo1.kt"))
+        assertTrue(Glob.nameMatches("中文*.kt", "中文Test.kt"))
+        assertFalse(Glob.nameMatches("a*b", "a\nb"))
+        assertTrue(Glob.nameMatches("foo?.kt", "foox.kt"))
+        assertFalse(Glob.nameMatches("foo?.kt", "foo.kt"))
+    }
+
+    @Test
+    fun `directoryMatcher filters mismatched prefixes while allowing ancestors`() {
+        val root = File("/workspace/proj")
+        val descend = Glob.directoryMatcher("SRC/main/*.kt", root)
+        assertTrue(descend(File(root, "src")))
+        assertTrue(descend(File(root, "SRC/MAIN")))
+        assertTrue(descend(File(root, "src/main/sub")))
+        assertFalse(descend(File(root, "src/test")))
+        assertFalse(descend(File(root, "build")))
+    }
+
+    @Test
+    fun `pathMatcher preserves mixed double star and single star semantics`() {
+        val root = File("build/tmp/glob-multi")
+        val nested = Glob.pathMatcher("src/**/a/*/c?.kt", root)
+        assertFalse(nested(File(root, "src/a/x/c1.kt")))
+        assertTrue(nested(File(root, "src/sub/a/mid/c2.kt")))
+        assertFalse(nested(File(root, "src/sub/a/x/y/c1.kt")))
+        assertFalse(nested(File(root, "src/sub/a/x/c.kt")))
+
+        val trailing = Glob.pathMatcher("src/a/**", root)
+        assertTrue(trailing(File(root, "src/a/deep/file.txt")))
+        assertFalse(trailing(File(root, "other/a/file.txt")))
+    }
 }

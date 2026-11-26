@@ -58,12 +58,36 @@ internal class FileMutationObservation private constructor(
     private data class Snapshot(val files: Map<String, State>, val completeRoots: Set<String>, val limited: Boolean)
     private val id = UUID.randomUUID().toString()
     @Volatile private var overlapping = false
+    private val nativeHandle = java.util.concurrent.atomic.AtomicLong(0L)
     private var before: Snapshot = Snapshot(emptyMap(), emptySet(), true)
 
     private var finished: ObservedFileChanges? = null
-    fun abandon() { synchronized(active) { active.remove(id) } }
+    fun abandon() {
+        nativeHandle.getAndSet(0L).takeIf { it > 0L }?.let(NativeFileObservation::release)
+        synchronized(active) { active.remove(id) }
+    }
     @Synchronized fun finish(): ObservedFileChanges {
         finished?.let { return it }
+        val handle = nativeHandle.getAndSet(0L)
+        if (handle > 0L) {
+            val result = try {
+                NativeFileObservation.finish(handle, overlapping)
+                    ?: ObservedFileChanges(emptyList(), "文件变更统计未知：无法完成文件观测")
+            } catch (error: Throwable) {
+                abandon()
+                throw error
+            }
+            return synchronized(active) {
+                val finalResult = if (overlapping) {
+                    ObservedFileChanges(emptyList(), "文件变更归属未知：观测期间有其它文件操作")
+                } else {
+                    result
+                }
+                active.remove(id)
+                finished = finalResult
+                finalResult
+            }
+        }
         val after = try { snapshot() } catch (_: Exception) { null }
             catch (error: Throwable) { abandon(); throw error }
         return synchronized(active) {
@@ -210,8 +234,14 @@ internal class FileMutationObservation private constructor(
                 active[observation.id] = observation
             }
             try {
-                observation.before = observation.snapshot().let { snapshot ->
-                    if (canonical.isEmpty() || requested.size != canonical.size) snapshot.copy(limited = true) else snapshot
+                val forceLimited = canonical.isEmpty() || requested.size != canonical.size
+                val handle = NativeFileObservation.begin(canonical, maxEntries, forceLimited)
+                if (handle > 0L) {
+                    observation.nativeHandle.set(handle)
+                } else {
+                    observation.before = observation.snapshot().let { snapshot ->
+                        if (forceLimited) snapshot.copy(limited = true) else snapshot
+                    }
                 }
             } catch (error: Throwable) { observation.abandon(); throw error }
             return observation
@@ -219,9 +249,11 @@ internal class FileMutationObservation private constructor(
     }
 }
 
+private val COMMAND_LITERAL_RE = Regex("(?:\"([^\"]+)\"|'([^']+)'|([^\\s;|&<>]+))")
+
 /** Literals select observation scope only; they never count as evidence that a file changed. */
 internal fun fileObservationRoots(workspace: File?, command: String, explicit: List<File> = emptyList(), cwd: File? = null): List<File> {
-    val literals = Regex("(?:\"([^\"]+)\"|'([^']+)'|([^\\s;|&<>]+))").findAll(command.take(64_000)).mapNotNull { match ->
+    val literals = COMMAND_LITERAL_RE.findAll(command.take(64_000)).mapNotNull { match ->
         val word = match.groupValues.drop(1).firstOrNull { it.isNotEmpty() }.orEmpty()
         word.takeIf { it.startsWith('/') && '$' !in it && '`' !in it && '*' !in it && '?' !in it && !it.startsWith("/proc/") && !it.startsWith("/sys/") && !it.startsWith("/dev/") }
             ?.let(::File)

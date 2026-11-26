@@ -578,9 +578,7 @@ internal fun scanSkills(dir: File, includeBody: Boolean = true): List<Skill> {
     for (child in dir.listFiles().orEmpty().sortedBy { it.name.lowercase() }) {
         when {
             child.isDirectory -> {
-                val file = SKILL_FILE_NAMES
-                    .map { File(child, it) }
-                    .firstOrNull { it.isFile }
+                val file = findSkillEntryFile(child)
                 if (file != null) out += parseSkill(child, file, includeBody)
             }
 
@@ -590,38 +588,62 @@ internal fun scanSkills(dir: File, includeBody: Boolean = true): List<Skill> {
     return out
 }
 
+private fun findSkillEntryFile(dir: File): File? {
+    for (candidate in SKILL_FILE_NAMES) {
+        val file = File(dir, candidate)
+        if (file.isFile) return file
+    }
+    return null
+}
+
 /** Frontmatter and the first body line are sufficient for metadata fallbacks. */
 private fun skillHeaderText(file: File): String = file.bufferedReader().use { reader ->
-    val text = StringBuilder()
+    val text = StringBuilder(1024)
     var first = true
     var frontmatter = false
     var headerEnded = false
     while (text.length < 32_768) {
-        // readLine() itself can allocate a multi-megabyte malformed header line.
-        // Bound characters before allocating either the line or the metadata prefix.
-        val remaining = 32_768 - text.length
-        val raw = buildString {
-            while (length < remaining) {
-                val next = reader.read()
-                if (next < 0) break
-                append(next.toChar())
-                if (next == '\n'.code) break
-            }
+        val lineStart = text.length
+        while (text.length < 32_768) {
+            val next = reader.read()
+            if (next < 0) break
+            text.append(next.toChar())
+            if (next == '\n'.code) break
         }
-        if (raw.isEmpty()) break
-        text.append(raw)
-        val line = raw.trimEnd('\n', '\r')
-        if (first && line.isBlank()) continue
+        val lineEnd = text.length
+        if (lineEnd == lineStart) break
+        var trimmedEnd = lineEnd
+        while (trimmedEnd > lineStart && (text[trimmedEnd - 1] == '\n' || text[trimmedEnd - 1] == '\r')) {
+            trimmedEnd--
+        }
+        if (first && isRangeBlank(text, lineStart, trimmedEnd)) continue
         if (first) {
             first = false
-            frontmatter = line.trimStart().startsWith("---")
-            if (!frontmatter && line.isNotBlank()) break
+            val nonWs = firstNonWs(text, lineStart, trimmedEnd)
+            frontmatter = nonWs + 3 <= trimmedEnd &&
+                text[nonWs] == '-' && text[nonWs + 1] == '-' && text[nonWs + 2] == '-'
+            if (!frontmatter && !isRangeBlank(text, lineStart, trimmedEnd)) break
         } else if (frontmatter && !headerEnded) {
-            if (line.startsWith("---")) headerEnded = true
-        } else if (line.isNotBlank()) break
+            if (lineStart + 3 <= trimmedEnd &&
+                text[lineStart] == '-' && text[lineStart + 1] == '-' && text[lineStart + 2] == '-'
+            ) {
+                headerEnded = true
+            }
+        } else if (!isRangeBlank(text, lineStart, trimmedEnd)) {
+            break
+        }
     }
     text.toString()
 }
+
+private fun firstNonWs(text: CharSequence, start: Int, end: Int): Int {
+    var i = start
+    while (i < end && text[i].isWhitespace()) i++
+    return i
+}
+
+private fun isRangeBlank(text: CharSequence, start: Int, end: Int): Boolean =
+    firstNonWs(text, start, end) >= end
 
 /**
  * Splits optional YAML frontmatter from the body. Deliberately not a YAML parser:

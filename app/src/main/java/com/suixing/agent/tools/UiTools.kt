@@ -497,7 +497,7 @@ class UiTools(
         val dir = File(context.filesDir, "shots").apply { mkdirs() }
         val file = File(dir, "shot-${System.currentTimeMillis()}.jpg")
         file.writeBytes(bytes)
-        dir.listFiles()?.sortedByDescending { it.lastModified() }?.drop(SHOTS_KEPT)?.forEach { it.delete() }
+        com.suixing.agent.agent.pruneOldSpills(dir, SHOTS_KEPT)
         file
     }.getOrNull()
 
@@ -512,7 +512,7 @@ class UiTools(
         } else {
             decoded
         }
-        val out = ByteArrayOutputStream()
+        val out = ByteArrayOutputStream(64 * 1024)
         check(scaled.compress(Bitmap.CompressFormat.JPEG, quality, out)) { "JPEG compression failed" }
         out.toByteArray()
         } finally {

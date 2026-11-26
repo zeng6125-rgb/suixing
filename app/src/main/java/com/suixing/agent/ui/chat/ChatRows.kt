@@ -636,18 +636,27 @@ internal fun TinyAction(icon: ImageVector, label: String, onClick: () -> Unit) =
 internal enum class MetricCard { TIME, USAGE }
 
 /** One icon + value pair of [TurnMetrics], tappable: it opens that number's detail card. */
+private val MetricIconModifier = Modifier.size(15.dp)
+private val ReplyFooterActionsModifier = Modifier.padding(top = 2.dp, start = 2.dp)
+
 @Composable
 internal fun MetricButton(icon: ImageVector, text: String, label: String, onClick: () -> Unit) {
-    Row(
-        modifier = Modifier
+    val shape = MaterialTheme.shapes.small
+    val interactionSource = remember { MutableInteractionSource() }
+    val rippleIndication = ripple()
+    val buttonModifier = remember(shape, interactionSource, rippleIndication, onClick) {
+        Modifier
             .height(40.dp)
-            .clip(MaterialTheme.shapes.small)
+            .clip(shape)
             .clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = ripple(),
+                interactionSource = interactionSource,
+                indication = rippleIndication,
                 onClick = onClick,
             )
-            .padding(horizontal = 6.dp),
+            .padding(horizontal = 6.dp)
+    }
+    Row(
+        modifier = buttonModifier,
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(4.dp),
     ) {
@@ -657,7 +666,7 @@ internal fun MetricButton(icon: ImageVector, text: String, label: String, onClic
             tint = MaterialTheme.colorScheme.onSurfaceVariant,
             // 15dp, the same as the copy and edit icons beside it: at 14dp these two read as a
             // size smaller than the controls they sit next to.
-            modifier = Modifier.size(15.dp),
+            modifier = MetricIconModifier,
         )
         Text(
             text = text,
@@ -808,15 +817,19 @@ internal fun AssistantRow(
     // 没有容器之后轮次之间的间隔只剩列表自己的 item 间距，先试 0 看会不会糊成一片。
     // 卡片模式保持 16 / 10 —— 那是卡片内的边距，去掉文字就贴住卡片边了。
     val horizontalPad = if (card) 16.dp else flatPad
+    val cardWidthModifier = remember(bubbleMaxWidth) {
+        Modifier.widthIn(max = bubbleMaxWidth).fillMaxWidth()
+    }
+    val bodyPaddingModifier = remember(horizontalPad, card) {
+        Modifier.padding(
+            start = horizontalPad,
+            end = horizontalPad,
+            top = if (card) 16.dp else 0.dp,
+            bottom = if (card) 10.dp else 0.dp,
+        )
+    }
     val cardBody: @Composable () -> Unit = {
-        Column(
-            Modifier.padding(
-                start = horizontalPad,
-                end = horizontalPad,
-                top = if (card) 16.dp else 0.dp,
-                bottom = if (card) 10.dp else 0.dp,
-            ),
-        ) {
+        Column(bodyPaddingModifier) {
             // The avatar sits in the card's header rather than beside it: the reply is one
             // object, and an avatar floating outside the card made it two.
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -979,7 +992,7 @@ internal fun AssistantRow(
                         // `padding(top = 2.dp, start = 2.dp)`，于是「复制/修改」比「重新回答」
                         // 和「回答切换箭头」低了 2dp、右了 2dp（用户：「重新回答和前面两个没有对齐」）。
                         // 放到行上，整行四个元素共用同一个基准。
-                        modifier = Modifier.padding(top = 2.dp, start = 2.dp),
+                        modifier = ReplyFooterActionsModifier,
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         // **动作在左、数据在右**（用户：「复制和修改回复的icon移至左侧，如果是最
@@ -1023,19 +1036,23 @@ internal fun AssistantRow(
     //   卡片：圆角 + surfaceContainerLow 底色 + 1dp 描边（细线代替阴影，长对话保持平）
     //   扁平：什么都不画，正文直接落在页面上
     // 宽度上限（bubbleMaxWidth）两边都保留，所以「气泡宽度」这个设置在新样式下仍然有效。
-    Column(Modifier.widthIn(max = bubbleMaxWidth).fillMaxWidth()) {
+    Column(cardWidthModifier) {
         if (card) {
             val useMiuix = com.suixing.agent.ui.theme.LocalUseMiuix.current
-            val miuixShape = RoundedCornerShape(
-                com.suixing.agent.ui.theme.miuixScaledCorner(16.dp, com.suixing.agent.ui.theme.LocalMiuixCornerScale.current),
-            )
+            val cardShape = if (useMiuix) {
+                val miuixCorner = com.suixing.agent.ui.theme.miuixScaledCorner(
+                    16.dp,
+                    com.suixing.agent.ui.theme.LocalMiuixCornerScale.current,
+                )
+                remember(miuixCorner) { RoundedCornerShape(miuixCorner) }
+            } else {
+                BubbleShape
+            }
             Surface(
                 // 外观 → 气泡宽度 first, then fillMaxWidth: the cap has to be the outer
                 // constraint, or the inner fill would win and the card could never narrow.
-                modifier = Modifier
-                    .widthIn(max = bubbleMaxWidth)
-                    .fillMaxWidth(),
-                shape = if (useMiuix) miuixShape else BubbleShape,
+                modifier = cardWidthModifier,
+                shape = cardShape,
                 color = if (useMiuix) {
                     MaterialTheme.colorScheme.surfaceContainer
                 } else {
@@ -1053,11 +1070,7 @@ internal fun AssistantRow(
                 },
             ) { cardBody() }
         } else {
-            Box(
-                Modifier
-                    .widthIn(max = bubbleMaxWidth)
-                    .fillMaxWidth(),
-            ) { cardBody() }
+            Box(cardWidthModifier) { cardBody() }
         }
     }
 }

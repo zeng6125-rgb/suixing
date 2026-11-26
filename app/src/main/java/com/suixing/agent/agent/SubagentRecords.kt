@@ -5,12 +5,12 @@ import com.suixing.agent.core.encodeCoreBytes
 import android.util.AtomicFile
 import androidx.compose.runtime.Immutable
 import com.suixing.agent.core.Core
+import com.suixing.agent.core.NativeCore
 import com.suixing.agent.data.ChildRunConfig
 import com.suixing.agent.data.StoredMessage
 import com.suixing.agent.data.TranscriptRedaction
 import java.io.File
 import java.io.IOException
-import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -579,7 +579,7 @@ internal object SubagentRecords {
         }
 
     private fun parentDirectory(chatId: String, filesDir: File = Core.appContext.filesDir): File {
-        val key = MessageDigest.getInstance("SHA-256").digest(chatId.toByteArray(Charsets.UTF_8))
+        val key = NativeCore.sha256Digest(chatId.toByteArray(Charsets.UTF_8))
             .toHexString()
         return File(filesDir, "subagent_records/$key")
     }

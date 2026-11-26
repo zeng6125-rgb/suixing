@@ -27,6 +27,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.PaddingValues
+import com.suixing.agent.ui.components.PopupListPadding
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -300,10 +301,13 @@ internal fun BlinkingCursor() {
             .graphicsLayer { alpha = cursorAlpha.floatValue }
             .background(
                 color = MaterialTheme.colorScheme.primary,
-                shape = RoundedCornerShape(1.dp),
+                shape = BlinkingCursorShape,
             ),
     )
 }
+
+private val BlinkingCursorShape = RoundedCornerShape(1.dp)
+private val ComposerShadowBlack25 = Color.Black.copy(alpha = 0.25f)
 
 /**
  * The live run's progress line: the engine's own sentence, plus how long the run has been
@@ -356,19 +360,22 @@ internal fun TimeLabel(timestamp: Long) {
     // The string only changes when the clock crosses the 24h boundary, not on every
     // recomposition of a history row. The formatter's Date/buffer still allocates.
     val text = remember(timestamp) { formatTime(timestamp) }
+    val labelSmall = MaterialTheme.typography.labelSmall
+    val timeStyle = remember(labelSmall) { labelSmall.copy(lineHeight = 12.sp) }
     Text(
         text = text,
         modifier = Modifier.fillMaxWidth(),
         // The label's distance from its bubble is decided by the caller (3dp inside the
         // item's Column); this only tightens the text's own line box, so the glyphs sit
         // closer to the top of their slot than labelSmall's 16sp box would put them.
-        style = MaterialTheme.typography.labelSmall.copy(lineHeight = 12.sp),
+        style = timeStyle,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         textAlign = TextAlign.Center,
     )
 }
 
 private val ComposerPillShape = RoundedCornerShape(24.dp)
+private val FileReferenceLabelProvider: (String) -> String = ::fileReferenceLabel
 
 @Composable
 internal fun Composer(
@@ -524,7 +531,10 @@ internal fun Composer(
         fieldTextStyle.copy(color = scheme.onSurfaceVariant)
     }
     val fieldLines = remember { androidx.compose.runtime.mutableIntStateOf(1) }
-    val fieldLineHeightPx = with(LocalDensity.current) { fieldTextStyle.lineHeight.toPx() }
+    val densityNow = LocalDensity.current
+    val fieldLineHeightPx = remember(densityNow, fieldTextStyle) {
+        with(densityNow) { fieldTextStyle.lineHeight.toPx() }
+    }
     val fieldTextMeasurer = androidx.compose.ui.text.rememberTextMeasurer()
     val fieldBaselinePx = remember(fieldTextMeasurer, fieldTextStyle) {
         fieldTextMeasurer.measure("Ag国", style = fieldTextStyle, maxLines = 1).firstBaseline
@@ -629,14 +639,17 @@ internal fun Composer(
     // Nothing here paints a background: the transcript scrolls right down to the gesture
     // bar behind the pill, so the composer reads as something floating over the
     // conversation rather than an opaque strip that cuts it off.
-    Box(
-        modifier = Modifier
+    val composerOuterModifier = remember(density, onHeightChanged) {
+        Modifier
             .fillMaxWidth()
             .padding(horizontal = 16.dp)
             // The air under the pill, named: the list's own padding is this plus the strip
             // above, and it is measured here, inside the padding (see COMPOSER_BOTTOM_PAD).
             .padding(top = 6.dp, bottom = COMPOSER_BOTTOM_PAD)
-            .onSizeChanged { size -> onHeightChanged(with(density) { size.height.toDp() }) },
+            .onSizeChanged { size -> onHeightChanged(with(density) { size.height.toDp() }) }
+    }
+    Box(
+        modifier = composerOuterModifier,
     ) {
         Layout(content = {
             // 「回到最新」按钮**不在这里**（用户报的「往上滑一点点就跳」）：它原来在本列里占
@@ -705,27 +718,33 @@ internal fun Composer(
             }
             // Opaque surface with one real soft shadow: the drawn concentric rings read
             // as a halo, and 86% alpha let the transcript bleed through the pill.
-            Box(
-                modifier = Modifier
+            val pillOuterModifier = remember {
+                Modifier
                     .fillMaxWidth()
                     // 候选卡片的宽度和锚点都来自这里：窗口量不到父布局，只能量 pill。
                     .onSizeChanged { pillWidthPx = it.width }
                     .shadow(
                         elevation = 8.dp,
                         shape = ComposerPillShape,
-                        ambientColor = Color.Black.copy(alpha = 0.25f),
-                        spotColor = Color.Black.copy(alpha = 0.25f),
-                    ),
+                        ambientColor = ComposerShadowBlack25,
+                        spotColor = ComposerShadowBlack25,
+                    )
+            }
+            val onPickSlash: (String) -> Unit = remember(onInput, goalFocus) {
+                { name ->
+                    onInput("/$name ")
+                    goalFocus.requestFocus()
+                }
+            }
+            Box(
+                modifier = pillOuterModifier,
             ) {
             // 候选浮层：独立窗口，画在会话上面，不占布局 —— 敲 `/` 时输入框和转录都不动。
             // focus-less 与这里其它浮层一致：可获焦的窗口会把键盘从输入框手里抢走。
             SlashSuggestionPopup(
                 visible = suggestions.isNotEmpty(),
                 items = suggestions,
-                onPick = { name ->
-                    onInput("/$name ")
-                    goalFocus.requestFocus()
-                },
+                onPick = onPickSlash,
                 popupPositionProvider = slashPopup,
                 width = slashWidth,
             )
@@ -752,7 +771,7 @@ internal fun Composer(
                 },
                 popupPositionProvider = slashPopup,
                 width = slashWidth,
-                labelForItem = { fileReferenceLabel(it) },
+                labelForItem = FileReferenceLabelProvider,
             )
             Surface(
                 modifier = Modifier.fillMaxWidth(),
@@ -781,78 +800,98 @@ internal fun Composer(
                 val closeSheetMenu: () -> Unit = remember { { sheetOpen = false } }
                 val compactControls = windowWidth < 360.dp || density.fontScale >= 1.3f || settings.fontScale >= 3
                 val hasText = input.isNotBlank()
+                val cursorBrush = remember(scheme.primary) { SolidColor(scheme.primary) }
+                val keyboardOptions = remember(settings.enterKeySends) {
+                    KeyboardOptions(
+                        imeAction = if (settings.enterKeySends) {
+                            ImeAction.Send
+                        } else {
+                            ImeAction.Default
+                        },
+                    )
+                }
+                val keyboardActions = remember(
+                    running,
+                    attachments,
+                    latestInput,
+                    onSteer,
+                    onSend,
+                    dismissKeyboard,
+                ) {
+                    KeyboardActions(
+                        onSend = {
+                            val text = latestInput.value.trim()
+                            val primaryAction = primaryChatAction(
+                                running,
+                                text.isNotEmpty(),
+                                attachments.isNotEmpty(),
+                            )
+                            // A picture with no caption is still something to send: only an
+                            // entirely empty composer does nothing here.
+                            if (primaryAction == PrimaryChatAction.DISABLED || primaryAction == PrimaryChatAction.STOP) return@KeyboardActions
+                            if (primaryAction == PrimaryChatAction.STEER) {
+                                // The attachment rides along: 排队 mode turns this into the next
+                                // turn, 立即 mode into a steer, and either way a picture the user
+                                // attached belongs to the line.
+                                //
+                                // The field is cleared by the **view model**, not here — see
+                                // ChatViewModel.steer, which clears on both accepted paths. This
+                                // used to clear as well, and that second writer is why the text and
+                                // the picture kept coming back: `setDraft`'s defaults come from
+                                // *this composition's* captured draft, so `onInput("")` wrote the old
+                                // uri/name straight back into `_drafts`, and the collector pushed it
+                                // onto the screen a frame later.
+                                //
+                                // A refusal (the run ended between the last frame and this tap)
+                                // falls through to an ordinary send, so the line is never left
+                                // sitting in the box with nothing happening.
+                                withAttachment(attachments, text)
+                                    .let { (body, images) -> if (!onSteer(body, images)) onSend() }
+                            } else {
+                                onSend()
+                            }
+                            dismissKeyboard()
+                        },
+                    )
+                }
+                val fieldModifier = remember(goalFocus, fieldLineHeightPx, fieldBaselinePx, fieldLines, onFocused) {
+                    Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 48.dp)
+                        .clipToBounds()
+                        .focusRequester(goalFocus)
+                        .padding(start = 20.dp, top = 14.dp, end = 20.dp, bottom = 4.dp)
+                        .composerFieldHeight(fieldLineHeightPx, fieldBaselinePx) { fieldLines.intValue }
+                        // Accessible label is independent of the changing placeholder.
+                        .semantics { contentDescription = "消息输入框" }
+                        .onFocusChanged { focus ->
+                            if (focus.isFocused) onFocused()
+                        }
+                }
+                val onFieldChange: (TextFieldValue) -> Unit = remember(onInput, latestInput) {
+                    { next ->
+                        field = next
+                        if (next.text != latestInput.value) onInput(next.text)
+                    }
+                }
                 Layout(content = {
                     // Row 1: the field itself, transparent on the capsule — no border,
                     // no container, just text with room to breathe above the controls.
                     BasicTextField(
                         value = field,
-                        onValueChange = { next ->
-                            field = next
-                            if (next.text != input) onInput(next.text)
-                        },
+                        onValueChange = onFieldChange,
                         visualTransformation = commandTint,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .heightIn(min = 48.dp)
-                            .clipToBounds()
-                            .focusRequester(goalFocus)
-                            .padding(start = 20.dp, top = 14.dp, end = 20.dp, bottom = 4.dp)
-                            .composerFieldHeight(fieldLineHeightPx, fieldBaselinePx) { fieldLines.intValue }
-                            // Accessible label is independent of the changing placeholder.
-                            .semantics { contentDescription = "消息输入框" }
-                            .onFocusChanged { focus ->
-                                if (focus.isFocused) onFocused()
-                            },
+                        modifier = fieldModifier,
                         textStyle = fieldStyle,
-                        onTextLayout = { fieldLines.intValue = it.lineCount.coerceIn(1, 5) },
-                        cursorBrush = SolidColor(scheme.primary),
+                        onTextLayout = remember(fieldLines) { { fieldLines.intValue = it.lineCount.coerceIn(1, 5) } },
+                        cursorBrush = cursorBrush,
                         maxLines = 5,
                         // Enter sends — and while a run is live it sends the line to that
                         // run instead of starting a second one. 「回车键发送」 turned off makes
                         // the key a newline instead: the field is already multi-line, and the
                         // action button under it is then the only way to submit.
-                        keyboardOptions = KeyboardOptions(
-                            imeAction = if (settings.enterKeySends) {
-                                ImeAction.Send
-                            } else {
-                                ImeAction.Default
-                            },
-                        ),
-                        keyboardActions = KeyboardActions(
-                            onSend = {
-                                val text = latestInput.value.trim()
-                                val primaryAction = primaryChatAction(
-                                    running,
-                                    text.isNotEmpty(),
-                                    attachments.isNotEmpty(),
-                                )
-                                // A picture with no caption is still something to send: only an
-                                // entirely empty composer does nothing here.
-                                if (primaryAction == PrimaryChatAction.DISABLED || primaryAction == PrimaryChatAction.STOP) return@KeyboardActions
-                                if (primaryAction == PrimaryChatAction.STEER) {
-                                    // The attachment rides along: 排队 mode turns this into the next
-                                    // turn, 立即 mode into a steer, and either way a picture the user
-                                    // attached belongs to the line.
-                                    //
-                                    // The field is cleared by the **view model**, not here — see
-                                    // ChatViewModel.steer, which clears on both accepted paths. This
-                                    // used to clear as well, and that second writer is why the text and
-                                    // the picture kept coming back: `setDraft`'s defaults come from
-                                    // *this composition's* captured draft, so `onInput("")` wrote the old
-                                    // uri/name straight back into `_drafts`, and the collector pushed it
-                                    // onto the screen a frame later.
-                                    //
-                                    // A refusal (the run ended between the last frame and this tap)
-                                    // falls through to an ordinary send, so the line is never left
-                                    // sitting in the box with nothing happening.
-                                    withAttachment(attachments, text)
-                                        .let { (body, images) -> if (!onSteer(body, images)) onSend() }
-                                } else {
-                                    onSend()
-                                }
-                                dismissKeyboard()
-                            },
-                        ),
+                        keyboardOptions = keyboardOptions,
+                        keyboardActions = keyboardActions,
                         decorationBox = { inner ->
                             Box {
                                 if (field.text.isEmpty()) {
@@ -1109,6 +1148,7 @@ private fun ComposerControlsArea(
     dismissKeyboard: () -> Unit,
 ) {
     val scheme = MaterialTheme.colorScheme
+    val useMiuix = com.suixing.agent.ui.theme.LocalUseMiuix.current
     val leadingControls: @Composable () -> Unit = {
         Box {
             IconButton(
@@ -1119,9 +1159,7 @@ private fun ComposerControlsArea(
                     imageVector = com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_plus),
                     contentDescription = "添加图片或文件",
                     tint = scheme.onSurfaceVariant,
-                    modifier = Modifier.size(
-                        if (com.suixing.agent.ui.theme.LocalUseMiuix.current) 18.dp else 22.dp,
-                    ),
+                    modifier = Modifier.size(if (useMiuix) 18.dp else 22.dp),
                 )
             }
             MenuCard(
@@ -1133,6 +1171,7 @@ private fun ComposerControlsArea(
                 popupPositionProvider = menuPopup,
                 focusable = false,
                 modifier = Modifier.widthIn(max = popupCap(200.dp, windowWidth)),
+                contentPadding = PopupListPadding,
                 compactMotion = true,
             ) {
                 MenuItemRow(
@@ -1208,6 +1247,7 @@ private fun ComposerControlsArea(
                 popupPositionProvider = menuPopup,
                 focusable = false,
                 modifier = Modifier.widthIn(max = popupCap(220.dp, windowWidth)),
+                contentPadding = PopupListPadding,
                 compactMotion = true,
             ) {
                 ApprovalMode.entries.forEach { mode ->
@@ -1289,9 +1329,7 @@ private fun ComposerControlsArea(
                     com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_mic),
                     contentDescription = if (running) "语音输入，正在生成时不可录音" else "语音输入",
                     tint = scheme.onSurfaceVariant,
-                    modifier = Modifier.size(
-                        if (com.suixing.agent.ui.theme.LocalUseMiuix.current) 20.dp else 18.dp,
-                    ),
+                    modifier = Modifier.size(if (useMiuix) 20.dp else 18.dp),
                 )
             }
         }
@@ -1300,6 +1338,31 @@ private fun ComposerControlsArea(
         val steers = primaryAction == PrimaryChatAction.STEER
         val stopping = primaryAction == PrimaryChatAction.STOP
         val sendable = primaryAction != PrimaryChatAction.DISABLED
+        val primaryClick = remember(
+            primaryAction,
+            attachments,
+            latestInput,
+            onSteer,
+            onSend,
+            onStop,
+            dismissKeyboard,
+        ) {
+            {
+                when (primaryAction) {
+                    PrimaryChatAction.STEER -> {
+                        withAttachment(attachments, latestInput.value.trim())
+                            .let { (body, images) -> if (!onSteer(body, images)) onSend() }
+                        dismissKeyboard()
+                    }
+                    PrimaryChatAction.STOP -> onStop()
+                    PrimaryChatAction.DISABLED -> Unit
+                    PrimaryChatAction.SEND -> {
+                        onSend()
+                        dismissKeyboard()
+                    }
+                }
+            }
+        }
         CircleActionButton(
             icon = if (stopping) {
                 com.suixing.agent.ui.components.suixingIcon(R.drawable.ic_stop_filled)
@@ -1314,21 +1377,7 @@ private fun ComposerControlsArea(
                 running -> "停止"
                 else -> "发送"
             },
-            onClick = {
-                when (primaryAction) {
-                    PrimaryChatAction.STEER -> {
-                        withAttachment(attachments, latestInput.value.trim())
-                            .let { (body, images) -> if (!onSteer(body, images)) onSend() }
-                        dismissKeyboard()
-                    }
-                    PrimaryChatAction.STOP -> onStop()
-                    PrimaryChatAction.DISABLED -> Unit
-                    PrimaryChatAction.SEND -> {
-                        onSend()
-                        dismissKeyboard()
-                    }
-                }
-            },
+            onClick = primaryClick,
             enabled = sendable,
             size = 40.dp,
             containerColor = if (running || hasSomething) {
@@ -1343,7 +1392,7 @@ private fun ComposerControlsArea(
             },
             shadowElevation = 0.dp,
             iconSize = if (stopping) {
-                if (com.suixing.agent.ui.theme.LocalUseMiuix.current) 20.dp else 18.dp
+                if (useMiuix) 20.dp else 18.dp
             } else {
                 22.dp
             },

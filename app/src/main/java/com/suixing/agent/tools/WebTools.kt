@@ -284,6 +284,7 @@ private suspend fun fetch(args: JsonObject): ToolResult {
     }
 
     private fun parseDuckDuckGo(html: String, count: Int): List<String> {
+        NativeWebHtml.parseDuckDuckGo(html, count)?.let { return it }
         val linkPattern = DDG_LINK
         val snippetPattern = DDG_SNIPPET
         val links = linkPattern.findAll(html).toList()
@@ -410,6 +411,7 @@ private val RE_ENTITY = Regex("&(#x?[0-9A-Fa-f]+|[A-Za-z][A-Za-z0-9]*);")
 
 /** Turns a page into something worth spending context on. */
 internal fun htmlToText(html: String): String {
+    NativeWebHtml.htmlToText(html)?.let { return it }
     var text = html
     // 这些正则原来是**每次转换都现场编译**一遍（每抓一个页面一次）。提到文件级，行为不变。
     text = text.replace(RE_SCRIPT, " ")
@@ -437,6 +439,7 @@ private val NAMED_ENTITIES = mapOf(
 
 internal fun decodeEntities(text: String): String {
     if (!text.contains('&')) return text
+    NativeWebHtml.decodeEntities(text)?.let { return it }
     return RE_ENTITY.replace(text) { match ->
         val body = match.groupValues[1]
         when {

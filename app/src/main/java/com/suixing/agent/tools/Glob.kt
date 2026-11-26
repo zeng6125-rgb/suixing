@@ -29,11 +29,66 @@ internal object Glob {
 
     /** 只针对文件名的 glob：没有目录层级，`*` 匹配任意字符。大小写不敏感（同 `find -iname` 的直觉）。 */
     fun nameMatches(pattern: String, name: String): Boolean {
+        if (isAsciiSimpleGlob(pattern) && isPlainAsciiLine(name)) {
+            return matchesAsciiGlobName(pattern, name)
+        }
         val rx = nameCache[pattern] ?: buildNameRegex(pattern)?.also {
             if (nameCache.size >= CACHE_MAX) nameCache.clear()
             nameCache[pattern] = it
         } ?: return false
         return rx.matches(name)
+    }
+
+    private fun isAsciiSimpleGlob(pattern: String): Boolean {
+        for (i in 0 until pattern.length) {
+            val c = pattern[i]
+            if (c.code >= 128 || c == '\\' || c == '{' || c == '}' || c == '\n' || c == '\r') return false
+        }
+        return true
+    }
+
+    private fun isPlainAsciiLine(name: String): Boolean {
+        for (i in 0 until name.length) {
+            val c = name[i]
+            if (c.code >= 128 || c == '\n' || c == '\r') return false
+        }
+        return true
+    }
+
+    private fun matchesAsciiGlobName(pattern: String, name: String): Boolean {
+        var pi = 0
+        var si = 0
+        var starIdx = -1
+        var matchIdx = 0
+        val plen = pattern.length
+        val slen = name.length
+        while (si < slen) {
+            val pc = if (pi < plen) pattern[pi] else '\u0000'
+            when {
+                pi < plen && pc == '*' -> {
+                    starIdx = pi++
+                    matchIdx = si
+                }
+                pi < plen && (pc == '?' || asciiEqIgnoreCase(pc, name[si])) -> {
+                    pi++
+                    si++
+                }
+                starIdx != -1 -> {
+                    pi = starIdx + 1
+                    si = ++matchIdx
+                }
+                else -> return false
+            }
+        }
+        while (pi < plen && pattern[pi] == '*') pi++
+        return pi == plen
+    }
+
+    private fun asciiEqIgnoreCase(a: Char, b: Char): Boolean {
+        if (a == b) return true
+        val la = if (a in 'A'..'Z') a.code + 32 else a.code
+        val lb = if (b in 'A'..'Z') b.code + 32 else b.code
+        return la == lb
     }
 
     private fun buildNameRegex(pattern: String): Regex? {
@@ -56,14 +111,36 @@ internal object Glob {
         return pathMatcher(pattern, root)(file)
     }
 
+    private fun cachedPathRegex(pattern: String): Regex? =
+        pathCache[pattern] ?: buildPathRegex(pattern)?.also {
+            if (pathCache.size >= CACHE_MAX) pathCache.clear()
+            pathCache[pattern] = it
+        }
+
     /** Compile once and normalize the root once for a whole search. */
     fun pathMatcher(pattern: String, root: File): (File) -> Boolean {
         if (!pattern.contains('/')) return { nameMatches(pattern, it.name) }
-        val rx = pathCache[pattern] ?: buildPathRegex(pattern)?.also {
-            if (pathCache.size >= CACHE_MAX) pathCache.clear()
-            pathCache[pattern] = it
-        } ?: return { false }
         val base = root.absolutePath.replace('\\', '/').trimEnd('/') + "/"
+        val trimmed = pattern.trimStart('/')
+        if (isSimpleAsciiPathGlob(trimmed)) {
+            var compiled: Regex? = null
+            var compiledDone = false
+            return { file ->
+                val rawPath = file.absolutePath
+                val start = relativeStartAfterBase(rawPath, base)
+                if (isAsciiPathSlice(rawPath, start)) {
+                    matchesAsciiPathGlob(trimmed, rawPath, start)
+                } else {
+                    if (!compiledDone) {
+                        compiled = cachedPathRegex(pattern)
+                        compiledDone = true
+                    }
+                    val rx = compiled
+                    if (rx == null) false else rx.matches(rawPath.replace('\\', '/').removePrefix(base))
+                }
+            }
+        }
+        val rx = cachedPathRegex(pattern) ?: return { false }
         return { file -> rx.matches(file.absolutePath.replace('\\', '/').removePrefix(base)) }
     }
 
@@ -73,10 +150,25 @@ internal object Glob {
             ?.takeWhile { it.isNotEmpty() && '*' !in it && '?' !in it }.orEmpty()
         if (prefix.isEmpty()) return { true }
         val base = root.absolutePath.replace('\\', '/').trimEnd('/') + "/"
-        return { dir ->
-            val parts = dir.absolutePath.replace('\\', '/').removePrefix(base).split('/')
-            parts.zip(prefix).all { (part, expected) -> part.equals(expected, ignoreCase = true) }
+        return { dir -> matchesNormalizedPrefix(dir.absolutePath, base, prefix) }
+    }
+
+    private fun matchesNormalizedPrefix(rawPath: String, base: String, prefix: List<String>): Boolean {
+        val normalized = if (rawPath.indexOf('\\') >= 0) rawPath.replace('\\', '/') else rawPath
+        var pos = if (normalized.startsWith(base)) base.length else 0
+        val len = normalized.length
+        for (expected in prefix) {
+            if (pos > len) return true
+            val slash = normalized.indexOf('/', pos)
+            val segEnd = if (slash < 0) len else slash
+            val segLen = segEnd - pos
+            if (segLen != expected.length || !normalized.regionMatches(pos, expected, 0, segLen, ignoreCase = true)) {
+                return false
+            }
+            if (slash < 0) return true
+            pos = slash + 1
         }
+        return true
     }
 
     private fun buildPathRegex(pattern: String): Regex? {
@@ -118,4 +210,166 @@ internal object Glob {
     private val SPECIAL = setOf('.', '(', ')', '+', '|', '^', '$', '@', '%', '[', ']')
 
     private const val BACKSLASH = '\\'
+
+    private fun isSimpleAsciiPathGlob(pattern: String): Boolean {
+        for (i in 0 until pattern.length) {
+            val c = pattern[i]
+            if (c.code >= 128 || c == BACKSLASH || c == '{' || c == '}' || c == '\r' || c == '\n') {
+                return false
+            }
+        }
+        return true
+    }
+
+    private fun isAsciiPathSlice(rawPath: String, start: Int): Boolean {
+        for (i in start until rawPath.length) {
+            val c = rawPath[i]
+            if (c.code >= 128 || c == '\r' || c == '\n') return false
+        }
+        return true
+    }
+
+    private fun relativeStartAfterBase(rawPath: String, base: String): Int {
+        if (rawPath.length < base.length) return 0
+        for (i in 0 until base.length) {
+            val rc = rawPath[i]
+            val normalized = if (rc == BACKSLASH) '/' else rc
+            if (normalized != base[i]) return 0
+        }
+        return base.length
+    }
+
+    private fun asciiLower(c: Char): Char =
+        if (c in 'A'..'Z') (c.code + 32).toChar() else c
+
+    private fun pathCharAt(rawPath: String, index: Int): Char {
+        val c = rawPath[index]
+        return if (c == BACKSLASH) '/' else c
+    }
+
+    /**
+     * Zero-allocation matcher for ASCII path globs (`*`, `**`, `?`), preserving exact
+     * [buildPathRegex] semantics (`**` -> `.*`, `*` -> `[^/]*`, `?` -> `[^/]`, ASCII ignore-case)
+     * without allocating regex objects or slash-normalized string copies.
+     */
+    private fun matchesAsciiPathGlob(pattern: String, rawPath: String, startPos: Int): Boolean {
+        val pLen = pattern.length
+        val tLen = rawPath.length
+        val firstDbl = pattern.indexOf("**")
+        if (firstDbl < 0) {
+            return matchSingleStarAnchored(pattern, 0, pLen, rawPath, startPos, tLen)
+        }
+        var tCursor = if (firstDbl == 0) {
+            startPos
+        } else {
+            matchSingleStarPrefix(pattern, 0, firstDbl, rawPath, startPos, tLen)
+        }
+        if (tCursor < 0) return false
+        var chunkStart = firstDbl + 2
+        while (true) {
+            val nextDbl = pattern.indexOf("**", chunkStart)
+            if (nextDbl < 0) break
+            if (nextDbl > chunkStart) {
+                var matchedEnd = -1
+                var tryStart = tCursor
+                while (tryStart <= tLen) {
+                    val end = matchSingleStarPrefix(pattern, chunkStart, nextDbl, rawPath, tryStart, tLen)
+                    if (end >= 0) {
+                        matchedEnd = end
+                        break
+                    }
+                    tryStart++
+                }
+                if (matchedEnd < 0) return false
+                tCursor = matchedEnd
+            }
+            chunkStart = nextDbl + 2
+        }
+        if (chunkStart == pLen) return true
+        for (tryStart in tCursor..tLen) {
+            if (matchSingleStarAnchored(pattern, chunkStart, pLen, rawPath, tryStart, tLen)) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private fun matchSingleStarPrefix(
+        pattern: String,
+        pStart: Int,
+        pEnd: Int,
+        rawPath: String,
+        tStart: Int,
+        tEnd: Int,
+    ): Int {
+        var pi = pStart
+        var ti = tStart
+        var starPi = -1
+        var starTi = 0
+        while (pi < pEnd) {
+            val pc = pattern[pi]
+            if (pc == '*') {
+                starPi = ++pi
+                starTi = ti
+            } else if (ti < tEnd) {
+                val tc = pathCharAt(rawPath, ti)
+                val matches = if (pc == '?') tc != '/' else asciiLower(pc) == asciiLower(tc)
+                if (matches) {
+                    pi++
+                    ti++
+                } else if (starPi != -1 && starTi < tEnd && pathCharAt(rawPath, starTi) != '/') {
+                    starTi++
+                    ti = starTi
+                    pi = starPi
+                } else {
+                    return -1
+                }
+            } else {
+                return -1
+            }
+        }
+        return ti
+    }
+
+    private fun matchSingleStarAnchored(
+        pattern: String,
+        pStart: Int,
+        pEnd: Int,
+        rawPath: String,
+        tStart: Int,
+        tEnd: Int,
+    ): Boolean {
+        var pi = pStart
+        var ti = tStart
+        var starPi = -1
+        var starTi = 0
+        while (ti < tEnd) {
+            if (pi < pEnd && pattern[pi] == '*') {
+                starPi = ++pi
+                starTi = ti
+            } else if (pi < pEnd) {
+                val pc = pattern[pi]
+                val tc = pathCharAt(rawPath, ti)
+                val matches = if (pc == '?') tc != '/' else asciiLower(pc) == asciiLower(tc)
+                if (matches) {
+                    pi++
+                    ti++
+                } else if (starPi != -1 && starTi < tEnd && pathCharAt(rawPath, starTi) != '/') {
+                    starTi++
+                    ti = starTi
+                    pi = starPi
+                } else {
+                    return false
+                }
+            } else if (starPi != -1 && starTi < tEnd && pathCharAt(rawPath, starTi) != '/') {
+                starTi++
+                ti = starTi
+                pi = starPi
+            } else {
+                return false
+            }
+        }
+        while (pi < pEnd && pattern[pi] == '*') pi++
+        return pi == pEnd
+    }
 }

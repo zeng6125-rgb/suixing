@@ -159,32 +159,37 @@ class Speaker(context: Context) {
     /**
      * Markdown reads terribly out loud: strip the syntax but keep the words.
      */
-    private fun cleanForSpeech(text: String): String {
-        var clean = text
-        for ((pattern, replacement) in SPEECH_RULES) clean = clean.replace(pattern, replacement)
-        return clean.trim().take(MAX_SPEECH_CHARS)
-    }
+    private fun cleanForSpeech(text: String): String = cleanMarkdownForSpeech(text)
 
     private companion object {
-        val SPEECH_RULES = listOf(
-            Regex("```[\\s\\S]*?```") to " 代码块省略 ",
-            Regex("`([^`]*)`") to "$1",
-            Regex("!\\[[^\\]]*\\]\\([^)]*\\)") to " ",
-            Regex("\\[([^\\]]*)\\]\\([^)]*\\)") to "$1",
-            Regex("(?m)^\\s{0,3}#{1,6}\\s*") to "",
-            Regex("(?m)^\\s*[-*+]\\s+") to "",
-            Regex("(?m)^\\s*\\d+\\.\\s+") to "",
-            Regex("\\*\\*([^*]*)\\*\\*") to "$1",
-            Regex("(?<!\\*)\\*([^*\\n]+)\\*(?!\\*)") to "$1",
-            Regex("~~([^~]*)~~") to "$1",
-            Regex("(?m)^\\s*\\|.*\\|\\s*$") to " 表格省略 ",
-            Regex("(?m)^\\s*>\\s?") to "",
-            Regex("https?://\\S+") to " 链接 ",
-            Regex("[ \\t]+") to " ",
-            Regex("\\n{2,}") to "\n",
-        )
         const val IDLE_RELEASE_MS = 60_000L
         const val MAX_PENDING = 8
-        const val MAX_SPEECH_CHARS = 4000
     }
 }
+
+internal fun cleanMarkdownForSpeech(text: String): String {
+    NativeSpeechClean.clean(text)?.let { return it }
+    var clean = text
+    for ((pattern, replacement) in SPEECH_RULES) clean = clean.replace(pattern, replacement)
+    return clean.trim().take(MAX_SPEECH_CHARS)
+}
+
+private const val MAX_SPEECH_CHARS = 4000
+
+private val SPEECH_RULES = listOf(
+    Regex("```[\\s\\S]*?```") to " 代码块省略 ",
+    Regex("`([^`]*)`") to "$1",
+    Regex("!\\[[^\\]]*\\]\\([^)]*\\)") to " ",
+    Regex("\\[([^\\]]*)\\]\\([^)]*\\)") to "$1",
+    Regex("(?m)^\\s{0,3}#{1,6}\\s*") to "",
+    Regex("(?m)^\\s*[-*+]\\s+") to "",
+    Regex("(?m)^\\s*\\d+\\.\\s+") to "",
+    Regex("\\*\\*([^*]*)\\*\\*") to "$1",
+    Regex("(?<!\\*)\\*([^*\\n]+)\\*(?!\\*)") to "$1",
+    Regex("~~([^~]*)~~") to "$1",
+    Regex("(?m)^\\s*\\|.*\\|\\s*$") to " 表格省略 ",
+    Regex("(?m)^\\s*>\\s?") to "",
+    Regex("https?://\\S+") to " 链接 ",
+    Regex("[ \\t]+") to " ",
+    Regex("\\n{2,}") to "\n",
+)

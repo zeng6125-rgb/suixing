@@ -23,6 +23,22 @@ internal object NativeSseStreamJni {
     external fun nativeFeed(handle: Long, bytes: ByteArray, offset: Int, length: Int, mode: Int): ByteArray
 }
 
+internal class NativeTurnCall(
+    val mode: Int,
+    val index: Int,
+    val itemId: String?,
+    val id: String?,
+    val name: String?,
+    val arguments: String?,
+)
+
+internal class NativeTurnEvent(
+    val text: String?,
+    val reasoning: String?,
+    val stopIfNull: Boolean,
+    val calls: List<NativeTurnCall>,
+)
+
 internal data class NativeSseEvent(
     val consumed: Int,
     val chunk: JsonObject? = null,
@@ -31,6 +47,7 @@ internal data class NativeSseEvent(
     val eof: Boolean = false,
     val text: String? = null,
     val reasoning: String? = null,
+    val turnEvent: NativeTurnEvent? = null,
 )
 
 /** Rust projects text and reasoning deltas and decodes other events for StreamTurn. */
@@ -93,10 +110,45 @@ internal class NativeSseStream private constructor(id: Long) : Closeable {
                     Decoded(base, ByteArray(length).also { input.get(it) })
                 }
                 5 -> Decoded(base.copy(text = NativeJsonTree.string(input), reasoning = NativeJsonTree.string(input)))
+                6 -> Decoded(base.copy(turnEvent = turnEvent(input)))
                 else -> throw LlmException("原生流式响应事件类型无效")
             }
             valid(!input.hasRemaining())
             return decoded
+        }
+
+        private fun optString(input: ByteBuffer): String? {
+            val length = NativeJsonTree.integer(input)
+            if (length == -1) return null
+            valid(length in 0..MAX_FRAME_UNITS && input.remaining() >= length * 2L)
+            return CharArray(length) { input.short.toInt().and(0xffff).toChar() }.concatToString()
+        }
+
+        private fun turnEvent(input: ByteBuffer): NativeTurnEvent {
+            val mask = NativeJsonTree.integer(input)
+            val text = optString(input)
+            val reasoning = optString(input)
+            val callCount = NativeJsonTree.integer(input)
+            valid(callCount in 0..1024)
+            val calls = if (callCount == 0) emptyList() else List(callCount) {
+                val mode = NativeJsonTree.integer(input)
+                val index = NativeJsonTree.integer(input)
+                valid(mode in 0..2)
+                NativeTurnCall(
+                    mode = mode,
+                    index = index,
+                    itemId = optString(input),
+                    id = optString(input),
+                    name = optString(input),
+                    arguments = optString(input),
+                )
+            }
+            return NativeTurnEvent(
+                text = text,
+                reasoning = reasoning,
+                stopIfNull = (mask and 1) != 0,
+                calls = calls,
+            )
         }
         internal fun decodeObject(bytes: ByteArray): JsonObject =
             decode(bytes, 0).event.chunk ?: throw LlmException("原生 JSON 响应不是对象")
