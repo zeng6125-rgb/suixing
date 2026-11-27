@@ -239,6 +239,7 @@ class ToolPreparingCompositionTest {
                     LocalLayoutDirection provides LayoutDirection.Ltr,
                     LocalViewConfiguration provides viewConfiguration,
                     LocalClipboardManager provides clipboard,
+                    detachedGraphicsResourceCache(),
                     LocalInSelectable provides true,
                     LocalChatReadOnly provides true,
                 ) {

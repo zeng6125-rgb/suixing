@@ -8,7 +8,9 @@ val rustAbi = providers.gradleProperty("rustAbi").orNull
 
 android {
     namespace = "com.suixing.agent"
-    compileSdk = 37
+    compileSdk {
+        version = release(37) { minorApiLevel = 2 }
+    }
     ndkVersion = "28.2.13676358"
 
     defaultConfig {
@@ -136,9 +138,10 @@ dependencies {
     implementation("androidx.compose.ui:ui-graphics")
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material3:material3")
-    implementation("top.yukonga.miuix.kmp:miuix-ui-android:0.9.4")
-    implementation("top.yukonga.miuix.kmp:miuix-preference-android:0.9.4")
-    implementation("top.yukonga.miuix.kmp:miuix-icons-android:0.9.4")
+    val miuixVersion = "0.9.5-rc02"
+    implementation("top.yukonga.miuix.kmp:miuix-ui-android:$miuixVersion")
+    implementation("top.yukonga.miuix.kmp:miuix-preference-android:$miuixVersion")
+    implementation("top.yukonga.miuix.kmp:miuix-icons-android:$miuixVersion")
     // 不再需要 material-icons-extended（issue #57 P1-b）：全仓只用到 5 个图标，
     // 已全部换成本仓 `res/drawable/ic_*.xml` 的 Lucide 图形（ic_rotate_cw / ic_eye /
     // ic_eye_off / ic_circle_check / ic_circle）。那个 AAR 的 classes.jar 是 36MB / 11,105 个

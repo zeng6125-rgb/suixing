@@ -148,4 +148,4 @@ PRoot 版权包括 STMicroelectronics 和上游贡献者；talloc 版权包括 A
 
 ## Miuix UI 组件库
 
-Android 客户端的「MIUIX」内置主题接入了官方第三方库 [`top.yukonga.miuix.kmp`](https://github.com/compose-miuix-ui/miuix)（`miuix-ui-android`、`miuix-preference-android` 与 `miuix-icons-android`，版本 `0.9.4`，连带传递 `miuix-core-android`、`miuix-squircle-android`、`miuix-shader-android` 等模块）。上游项目以 Apache-2.0 许可发布（Copyright compose-miuix-ui Contributors）。
+Android 客户端的「MIUIX」内置主题接入了官方第三方库 [`top.yukonga.miuix.kmp`](https://github.com/compose-miuix-ui/miuix)（`miuix-ui-android`、`miuix-preference-android` 与 `miuix-icons-android`，版本 `0.9.5-rc02`，连带传递 `miuix-core-android`、`miuix-squircle-android`、`miuix-material-android` 等模块）。上游项目以 Apache-2.0 许可发布（Copyright compose-miuix-ui Contributors）。

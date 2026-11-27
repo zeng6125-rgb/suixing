@@ -695,8 +695,8 @@ fun SuixingApp() {
                             scaleY = scaleX
                             transformOrigin = TransformOrigin(0.5f, 0.5f)
                             shadowElevation = if (progress > 0f) 16.dp.toPx() else 0f
-                            spotShadowColor = Color.Black.copy(alpha = 0.24f * progress)
-                            ambientShadowColor = Color.Black.copy(alpha = 0.24f * progress)
+                            spotShadowColor = Color.Black.copy(alpha = 0.26f * progress)
+                            ambientShadowColor = Color.Transparent
                             val rounding = drawerHomeCornerFraction(progress)
                             shape = when {
                                 rounding <= 0f -> RectangleShape

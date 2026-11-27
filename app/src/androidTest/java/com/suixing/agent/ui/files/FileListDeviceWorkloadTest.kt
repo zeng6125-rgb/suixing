@@ -4,13 +4,18 @@ import android.app.UiAutomation
 import android.graphics.Rect
 import android.os.Bundle
 import android.os.SystemClock
+import android.view.KeyEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.suixing.agent.MainActivity
+import com.suixing.agent.core.Core
+import com.suixing.agent.ui.theme.UI_THEME_MIUIX
 import java.io.File
 import java.nio.file.Files
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.runBlocking
 import org.junit.Assume.assumeTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -21,6 +26,54 @@ class FileListDeviceWorkloadTest {
     private val instrumentation get() = InstrumentationRegistry.getInstrumentation()
     private val automation by lazy {
         instrumentation.getUiAutomation(UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES)
+    }
+
+    @Test
+    fun miuixRootMenuOpensInTheFilesWindowAndBackClosesItFirst() {
+        assumeTrue(InstrumentationRegistry.getArguments().getString("jagentFileRootMenu") == "1")
+        val context = instrumentation.targetContext
+        check(context.packageName == "com.suixing.agent.perf") { "Use the isolated Release performance app." }
+        val workspace = checkNotNull(context.getExternalFilesDir(null))
+        val directory = Files.createTempDirectory(workspace.toPath(), "!jagent-menu-").toFile()
+        val marker = "menu-workload.txt"
+        val previousSettings = runBlocking { Core.settings.flow.first() }
+        try {
+            File(directory, marker).writeText("jagent-workload")
+            check(runBlocking { Core.settings.update { it.copy(onboardingSeen = true, uiTheme = UI_THEME_MIUIX) } })
+            ActivityScenario.launch(MainActivity::class.java).use {
+                await("打开侧边栏", click = true)
+                await("文件", click = true)
+                await(directory.name, click = true)
+                await(marker)
+                val filesWindow = activeWindowId()
+
+                val clicked = await("切换目录根（当前：工作目录）", click = true)
+                val visible = await("插件目录")
+                check(activeWindowId() == filesWindow) { "The directory menu opened a separate window." }
+                await(marker, present = false)
+
+                instrumentation.sendKeyDownUpSync(KeyEvent.KEYCODE_BACK)
+                await("插件目录", present = false)
+                await(marker)
+                instrumentation.sendKeyDownUpSync(KeyEvent.KEYCODE_BACK)
+                await(directory.name)
+                await(marker, present = false)
+                instrumentation.addResults(Bundle().apply {
+                    putDouble("jagent.files.root_menu.click_to_visible_node_ms", (visible - clicked) / 1_000_000.0)
+                })
+            }
+        } finally {
+            runBlocking {
+                Core.settings.update { it.copy(onboardingSeen = previousSettings.onboardingSeen, uiTheme = previousSettings.uiTheme) }
+            }
+            check(directory.deleteRecursively()) { "Could not remove workload directory ${directory.name}." }
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun activeWindowId(): Int {
+        val root = checkNotNull(automation.rootInActiveWindow)
+        return try { root.windowId } finally { root.recycle() }
     }
 
     @Test

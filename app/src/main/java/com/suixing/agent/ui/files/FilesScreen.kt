@@ -17,9 +17,11 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -30,6 +32,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -44,6 +47,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -57,6 +61,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.vectorResource
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.hideFromAccessibility
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -74,6 +80,7 @@ import com.suixing.agent.ui.components.SettingRow
 import com.suixing.agent.ui.components.SoftIcon
 import com.suixing.agent.ui.components.SuixingDialog
 import com.suixing.agent.ui.theme.FileTypeColors
+import com.suixing.agent.ui.theme.LocalUseMiuix
 import com.suixing.agent.ui.theme.MonoStyle
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CancellationException
@@ -91,6 +98,7 @@ import java.nio.file.attribute.BasicFileAttributes
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import top.yukonga.miuix.kmp.basic.Scaffold as MiuixScaffold
 
 internal class FileListingEntry(
     val file: File,
@@ -172,7 +180,9 @@ fun FilesScreen(onBack: () -> Unit, onReference: (File) -> Unit) {
     var root by remember { mutableStateOf(appRoot) }
     var current by remember { mutableStateOf(root) }
     var notice by remember { mutableStateOf<String?>(null) }
-    var rootMenu by remember { mutableStateOf(false) }
+    val rootMenuState = remember { mutableStateOf(false) }
+    var rootMenu by rootMenuState
+    val listState = rememberLazyListState()
     val allFilesLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult(),
     ) {
@@ -205,9 +215,6 @@ fun FilesScreen(onBack: () -> Unit, onReference: (File) -> Unit) {
 
     // The toolbar exits the page. System/edge back walks the selected root's hierarchy first.
     val parentDirectory = remember(root, current) { parentFileDirectory(root, current) }
-    BackHandler(enabled = parentDirectory != null) {
-        parentDirectory?.let { current = it }
-    }
 
     // Directory listing and per-entry sizes are disk IO, so they run off the main
     // thread and land in state; doing it inside composition stutters the list.
@@ -229,13 +236,10 @@ fun FilesScreen(onBack: () -> Unit, onReference: (File) -> Unit) {
         listing = false
     }
 
-    // 根节点必须自己铺不透明底：转场里进页是**不淡入**的（见 SuixingApp 顶部那段），这一页
-    // 若透出外壳的底，进页的那一帧就会看到上一页的残影。
-    Column(
-        Modifier
-            .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background)
-            .navigationBarsPadding(),
+    FilesPageLayout(
+        rootMenu = rootMenuState,
+        parentDirectory = parentDirectory,
+        onNavigateParent = { current = it },
     ) {
         PageTopBar(
             title = "文件",
@@ -253,7 +257,11 @@ fun FilesScreen(onBack: () -> Unit, onReference: (File) -> Unit) {
                         contentDescription = "切换目录根（当前：$rootLabel）",
                         onClick = { rootMenu = true },
                     )
-                    ActionMenu(expanded = rootMenu, onDismissRequest = { rootMenu = false }) {
+                    ActionMenu(
+                        expanded = rootMenu,
+                        onDismissRequest = { rootMenu = false },
+                        overlayPaneTitle = "切换目录根",
+                    ) {
                         ActionMenuItem(
                             text = { Text("工作目录") },
                             onClick = {
@@ -386,7 +394,7 @@ fun FilesScreen(onBack: () -> Unit, onReference: (File) -> Unit) {
         }
 
         val visibleListing = fileListing
-        LazyColumn(Modifier.fillMaxSize()) {
+        LazyColumn(Modifier.fillMaxSize(), state = listState) {
             if (visibleListing != null) items(
                 visibleListing.entries,
                 key = { it.file.absolutePath },
@@ -449,6 +457,43 @@ fun FilesScreen(onBack: () -> Unit, onReference: (File) -> Unit) {
             },
             onReference = { onReference(entry.file) },
         )
+    }
+}
+
+@Composable
+private fun FilesPageLayout(
+    rootMenu: State<Boolean>,
+    parentDirectory: File?,
+    onNavigateParent: (File) -> Unit,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    val useMiuix = LocalUseMiuix.current
+    val overlayOpen = useMiuix && rootMenu.value
+    BackHandler(enabled = parentDirectory != null && !overlayOpen) {
+        parentDirectory?.let(onNavigateParent)
+    }
+
+    // 页面转场需要不透明底，状态栏和导航栏的占位由原内容处理。
+    val page = @Composable {
+        val accessibility = if (overlayOpen) {
+            Modifier.clearAndSetSemantics { hideFromAccessibility() }
+        } else Modifier
+        Column(
+            Modifier.fillMaxSize()
+                .background(MaterialTheme.colorScheme.background)
+                .navigationBarsPadding()
+                .then(accessibility),
+            content = content,
+        )
+    }
+    if (useMiuix) {
+        MiuixScaffold(
+            modifier = Modifier.fillMaxSize(),
+            containerColor = Color.Transparent,
+            contentWindowInsets = WindowInsets(0, 0, 0, 0),
+        ) { page() }
+    } else {
+        page()
     }
 }
 

@@ -33,6 +33,7 @@ import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.LocalViewConfiguration
@@ -1186,6 +1187,7 @@ class DrawerPointerLoopTest {
                         LocalDensity provides drawerDensity,
                         LocalLayoutDirection provides LayoutDirection.Ltr,
                         LocalViewConfiguration provides DrawerViewConfiguration,
+                        LocalSoftwareKeyboardController provides null,
                         LocalFocusManager provides object : FocusManager {
                             override fun clearFocus(force: Boolean) = Unit
                             override fun moveFocus(focusDirection: FocusDirection): Boolean = false
@@ -1214,7 +1216,7 @@ class DrawerPointerLoopTest {
                     }
                 }
                 harness.beforeInput()
-                val children = nodeClass.getDeclaredMethod("getChildren\$ui")
+                val children = nodeClass.getMethod("getChildrenInfo")
                 val host = (children.invoke(root) as List<*>).single()!!
                 harness.currentShieldNode = { (children.invoke(host) as List<*>).drop(1).lastOrNull() }
                 harness.initialShieldNode = harness.currentShieldNode()

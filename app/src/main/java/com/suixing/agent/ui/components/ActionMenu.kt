@@ -50,6 +50,7 @@ internal fun ActionMenu(
     onDismissRequest: () -> Unit,
     modifier: Modifier = Modifier,
     anchorWidth: Dp? = null,
+    overlayPaneTitle: String? = null,
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val configuration = LocalConfiguration.current
@@ -73,6 +74,7 @@ internal fun ActionMenu(
             modifier = widthModifier.then(modifier),
             minWidth = minWidth,
             maxHeight = maxHeight,
+            overlayPaneTitle = overlayPaneTitle,
             content = content,
         )
         return

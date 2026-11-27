@@ -61,6 +61,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.error
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.paneTitle
 import androidx.compose.ui.state.ToggleableState
 import androidx.compose.ui.text.PlatformTextStyle
 import androidx.compose.ui.text.TextStyle
@@ -85,6 +86,7 @@ import top.yukonga.miuix.kmp.basic.CircularProgressIndicator as MiuixCircularPro
 import top.yukonga.miuix.kmp.basic.IconButton as MiuixIconButton
 import top.yukonga.miuix.kmp.basic.LinearProgressIndicator as MiuixLinearProgressIndicator
 import top.yukonga.miuix.kmp.basic.ListPopupColumn
+import top.yukonga.miuix.kmp.basic.ListPopupDefaults
 import top.yukonga.miuix.kmp.basic.ProgressIndicatorDefaults
 import top.yukonga.miuix.kmp.basic.RadioButton as MiuixRadioButton
 import top.yukonga.miuix.kmp.basic.Slider
@@ -97,6 +99,7 @@ import top.yukonga.miuix.kmp.icon.basic.Check
 import top.yukonga.miuix.kmp.icon.extended.Back
 import top.yukonga.miuix.kmp.layout.BottomSheetDefaults
 import top.yukonga.miuix.kmp.layout.DialogDefaults
+import top.yukonga.miuix.kmp.overlay.OverlayListPopup
 import top.yukonga.miuix.kmp.theme.LocalContentColor as MiuixLocalContentColor
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import top.yukonga.miuix.kmp.utils.PressFeedbackType
@@ -455,23 +458,43 @@ internal fun MiuixActionMenu(
     modifier: Modifier = Modifier,
     minWidth: Dp,
     maxHeight: Dp,
+    overlayPaneTitle: String?,
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val scheme = MiuixTheme.colorScheme
+    val menuContent: @Composable () -> Unit = {
+        ListPopupColumn {
+            ProvideDualContentColor(scheme.onSurfaceContainer) {
+                val menuModifier = if (overlayPaneTitle != null) {
+                    modifier.semantics { paneTitle = overlayPaneTitle }
+                } else Modifier
+                Column(menuModifier.fillMaxWidth(), content = content)
+            }
+        }
+    }
+    if (overlayPaneTitle != null) {
+        OverlayListPopup(
+            show = expanded,
+            onDismissRequest = onDismissRequest,
+            popupPositionProvider = MiuixOverlayMenuPositionProvider,
+            maxHeight = maxHeight,
+            minWidth = minWidth,
+            renderInRootScaffold = false,
+            content = menuContent,
+        )
+        return
+    }
     WindowListPopup(
         show = expanded,
         popupModifier = modifier,
         onDismissRequest = onDismissRequest,
         maxHeight = maxHeight,
         minWidth = minWidth,
-    ) {
-        ListPopupColumn {
-            ProvideDualContentColor(scheme.onSurfaceContainer) {
-                Column(Modifier.fillMaxWidth(), content = content)
-            }
-        }
-    }
+        content = menuContent,
+    )
 }
+
+internal val MiuixOverlayMenuPositionProvider = ListPopupDefaults.dropdownPositionProvider(horizontalMargin = 16.dp)
 
 @Composable
 internal fun MiuixActionMenuItem(

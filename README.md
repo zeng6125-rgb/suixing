@@ -7,7 +7,7 @@
 > **会话存储**：`chats/store/<id>.meta`（元数据 + 累计统计）+ `<id>.<gen>.jsonl`（每行一条消息的追加日志）。保存一轮只追加尾部，不再全量重写——32 MB 的会话每轮保存从「序列化 + 写 32 MB + rename」降到「追加几十字节到几 KB」。重排类操作（编辑重答、分支切换）会换代重写，旧代留一代作回退。**装回 0.8.316 及更早版本看不到这些会话**；更早的 `<id>.json` 单文件格式已不再支持读取（迁移代码随兼容层一起删了），磁盘上残留的这类文件不会出现在列表里。
 
 - Kotlin + Jetpack Compose（Material 3，Compose BOM 2026.09.00 / Kotlin 2.4.21 / AGP 9.4.1 / Gradle 9.8.2），通过 NDK/JNI 接入 Rust 文件搜索/编辑/变更观测、用量只读投影与聚合、SSE 与接口载荷解析、共享 JSON 解码/编码、上下文预算与组装、记忆提示词、Skill 文档处理、列表顺序、Markdown 解析、运行账本、工具入参脱敏预览、插件模板引擎、语音文本清洗、UI 树/网页正文提取、统一 SHA-256 及 PTY 内核；随包组件与固定来源见[第三方声明](THIRD_PARTY_NOTICES.md)。
-- 目标平台：Android 8.0 (API 26) 及以上；`compileSdk` / `targetSdk` = 37
+- 目标平台：Android 8.0 (API 26) 及以上，`compileSdk` 为 37.2，`targetSdk` 为 37。
 - 图片走 Coil 3（内存 + 磁盘双缓存、自动降采样），不再手写 `BitmapFactory` 与 LRU
 - 不做云同步、不做遥测，API Key 只存在本机应用私有目录
 - 支持 MCP：任何 MCP 服务器提供的工具都会并进模型可调用的工具表
@@ -20,8 +20,8 @@
 
 视觉取舍参考了 [Aether 扶摇](https://github.com/Zhou-Shilin/Aether)——不跟随 Material 动态取色、层级靠表面阶梯而不是阴影、卡片走大圆角、整页 edge-to-edge；布局与交互为本项目自研。底层色板仍是一套手调的墨绿（深色侧底色 `#0F1412`、主色 `#8FD6B6`、正文 `#E8EFEA`，浅色侧白底 + 主色 `#1F6B4C`），作为「跟随壁纸」动态取色的基底；它已不再是独立配色选项。几个刻意的选择：
 
-- **主题、配色与字体**：**主题**在「默认（Material 3）」与正式第三方组件主题「**MIUIX**」（`top.yukonga.miuix.kmp` 0.9.4，包含 `miuix-ui` / `miuix-preference` / `miuix-icons` 及全套 HyperOS 风格自补矢量，启用超椭圆卡片、官方与统一 `[2..22]`/`1.65dp` 风格图标库、原生顶栏/开关/滑杆/弹窗/底部表单，并在聊天长列表通过纯纵向过卷封装与帧同步状态融合 Miuix 弹性过卷与文字锚定）之间切换；**深浅模式**单独控制跟随系统 / 浅色 / 深色；**配色**对默认与 MIUIX 主题均同步提供「JAgent 配色」（Claude 暖纸色与陶土橙，默认）、「MIUIX 默认」（HyperOS 官方浅白/纯黑与 `#3482FF` / `#277AF7` 主题蓝）与 Android 12+「跟随壁纸」动态取色；**字体**提供「系统字体」与「JAgent 字体」（Serif 衬线体，默认）两项预设并同步作用于两种主题。墨绿与 Codex 已降级移除，老设置里存着它们会自动落到 JAgent 配色。
-- **不用阴影**。层级靠表面阶梯（`surfaceContainerLow` / `surfaceContainer` / `surfaceContainerHigh`，另有两级 Lowest / Highest）加 1dp 发丝描边区分。
+- **主题、配色与字体**：**主题**在「默认（Material 3）」与正式第三方组件主题「**MIUIX**」（`top.yukonga.miuix.kmp` 0.9.5-rc02，包含 `miuix-ui` / `miuix-preference` / `miuix-icons` 及全套 HyperOS 风格自补矢量，启用超椭圆卡片、官方与统一 `[2..22]`/`1.65dp` 风格图标库、原生顶栏/开关/滑杆/弹窗/底部表单，并在聊天长列表通过纯纵向过卷封装与帧同步状态融合 Miuix 弹性过卷与文字锚定）之间切换；**深浅模式**单独控制跟随系统 / 浅色 / 深色；**配色**对默认与 MIUIX 主题均同步提供「JAgent 配色」（Claude 暖纸色与陶土橙，默认）、「MIUIX 默认」（HyperOS 官方浅白/纯黑与 `#3482FF` / `#277AF7` 主题蓝）与 Android 12+「跟随壁纸」动态取色；**字体**提供「系统字体」与「JAgent 字体」（Serif 衬线体，默认）两项预设并同步作用于两种主题。墨绿与 Codex 已降级移除，老设置里存着它们会自动落到 JAgent 配色。
+- **表面层级**。常驻界面用表面色阶和 1 dp 描边区分层次。抽屉展开时，聊天页投下随开合进度淡入淡出的单层阴影。
 - **卡片 20dp 圆角、左侧抽屉导航**。没有底部导航条，会话页的纵向空间全部留给消息；顶栏左上角的按钮拉出抽屉（会话列表 + 助手 / 定时任务 / 文件 / 悬浮窗控制台 / 设置）。
 - **edge-to-edge**。状态栏与导航栏透明，内容自己处理 insets；顶栏自带 `statusBarsPadding()`。列表页的底部让位走 **`contentPadding`**——内容画到手势条下面、滚到底时末行才避让，而不是给列表挂 `navigationBarsPadding()`（后者会让内容停在手势条上方，底下留一条空背景带）。`navigationBarsPadding()` 只留给 `SnackbarHost` 这类不该穿底的浮层。
 - 会话页空状态是一个品牌标记加四条建议提示词（「看看现在屏幕上是什么」等），点一下直接填进输入框。
@@ -247,11 +247,13 @@ description: 打开某 App 完成签到，用户说「签到」时使用
 
 **文件**页可以浏览三个根：工作目录（`Android/data/com.suixing.agent/files`）、`/sdcard`（需要「所有文件访问权限」）、插件目录。支持面包屑导航、上一级、刷新、文本预览与复制（预览上限 20KB）。这一页是只读的——要改文件走工具。
 
+MIUIX 主题下，「切换目录根」菜单在文件页内打开，卡片离窗口左右安全边缘至少 16 dp。返回手势先关闭菜单。
+
 **会话管理**可以打开、导出（SAF 选位置，导出 JSON）、删除会话。
 
 ## 构建与出包
 
-需要 **JDK 17** 与 Android SDK（`platforms;android-37`，以及与它配套的 build-tools 37.x）。SDK 路径写在 `local.properties` 的 `sdk.dir`（该文件不入库）。
+需要 **JDK 17** 与 Android SDK（`platforms;android-37.2`，以及与它配套的 build-tools 37.x）。SDK 路径写在 `local.properties` 的 `sdk.dir`（该文件不入库）。
 
 原生构建固定 **NDK 28.2.13676358**、**CMake 3.22.1** 和 **Rust 1.100.0**。先独立准备工具链与锁定依赖缓存；CMake 会检查目标是否已安装，Cargo 在 Android 构建中使用 `--release --locked --offline`，不会自动下载 Rust 或依赖：
 

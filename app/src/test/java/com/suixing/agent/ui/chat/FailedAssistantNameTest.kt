@@ -140,6 +140,7 @@ class FailedAssistantNameTest {
                         LocalLayoutDirection provides LayoutDirection.Ltr,
                         LocalViewConfiguration provides mockk<ViewConfiguration>(relaxed = true),
                         LocalClipboardManager provides mockk<ClipboardManager>(relaxed = true),
+                        detachedGraphicsResourceCache(),
                         LocalInSelectable provides true,
                         LocalChatReadOnly provides true,
                     ) {
